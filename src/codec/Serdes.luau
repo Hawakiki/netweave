@@ -118,6 +118,7 @@ local READ_CHUNK: { [number]: () -> number } = {
 
 local reserve = Buffer.reserve
 local reject = Buffer.reject
+local remaining = Buffer.remaining
 local rejected = Buffer.rejected
 local openBlock = Buffer.openBlock
 local closeBlock = Buffer.closeBlock
@@ -687,7 +688,14 @@ local function arrayReader(node: Node): Reader
 		end
 	end
 
-	local readElement = readerFor(node.element :: Node)
+	local element = node.element :: Node
+	local readElement = readerFor(element)
+
+	--[[
+		The smallest number of bytes one element can occupy, when that is known at build time. A
+		static element has an exact size; a dynamic one does not, and answers nil.
+	]]
+	local perElement = element.fixedSize
 
 	return function(flags: Flags): any
 		local count = readLength()
@@ -696,11 +704,40 @@ local function arrayReader(node: Node): Reader
 			return {}
 		end
 
-		local result = sized(count)
+		--[[
+			A claim is not paid for until the bytes behind it exist.
+
+			~~The length was already bounded, so this is a cost question, not a safety one.~~
+			**Struck through in M3 phase 0.** A cost an attacker controls and does not pay for is an
+			amplification: a two-byte packet claiming 65535 elements bought a 65535-slot table, at
+			839x the cost of an honest packet, and *was then correctly rejected*. The rejection was
+			free. The allocation was not (`PLAN-M3` D-4).
+
+			Bounding the claim against the bytes that remain costs one comparison on the honest path
+			and turns the hostile one into a refusal before anything is allocated. Zap has the same
+			shape without the recovery — `_refsrc/zap/zap/src/irgen/des.rs:298` allocates from the
+			claimed length too, and its generated `read` does no bounds checking at all, so the
+			equivalent packet raises and takes the batch.
+		]]
+		local available = remaining()
+
+		if perElement and perElement > 0 and count * perElement > available then
+			reject(
+				`array claims {count} elements, needing {count * perElement} bytes, and {available} remain`
+			)
+			return {}
+		end
+
+		--[[
+			For a dynamic element there is no size to multiply by, so the *allocation* is capped at
+			the bytes available instead. An element cannot be conjured from no bytes, so this never
+			shortens an honest decode — and it bounds the hostile one to the packet's own length,
+			which is what the amplification was.
+		]]
+		local result = sized(if count < available then count else available)
 
 		for index = 1, count do
-			--[[ Bail on the first rejection rather than reading `max` elements of garbage. The
-			     length was already bounded, so this is a cost question, not a safety one. ]]
+			--[[ Bail on the first rejection rather than reading `max` elements of garbage. ]]
 			if rejected() then
 				return result
 			end
@@ -714,13 +751,27 @@ end
 
 local function mapReader(node: Node): Reader
 	local readLength = lengthReader(node)
-	local readKey = readerFor(node.key :: Node)
-	local readValue = readerFor(node.value :: Node)
+	local key = node.key :: Node
+	local value = node.value :: Node
+	local readKey = readerFor(key)
+	local readValue = readerFor(value)
+
+	--[[ A map never had the allocation bug an array had — it starts from `{}` and grows — but the
+	     same bound gives the same refusal, so a claim past the packet is reported the same way
+	     whichever container it arrived in (`PLAN-M3` D-4). ]]
+	local perEntry = if key.fixedSize and value.fixedSize then key.fixedSize + value.fixedSize else nil
 
 	return function(flags: Flags): any
 		local count = readLength()
 
 		if count < 0 then
+			return {}
+		end
+
+		local available = remaining()
+
+		if perEntry and perEntry > 0 and count * perEntry > available then
+			reject(`map claims {count} entries, needing {count * perEntry} bytes, and {available} remain`)
 			return {}
 		end
 
@@ -731,13 +782,13 @@ local function mapReader(node: Node): Reader
 				return result
 			end
 
-			local key = readKey(flags)
-			local value = readValue(flags)
+			local entryKey = readKey(flags)
+			local entryValue = readValue(flags)
 
 			--[[ A rejected key is a default, and defaults collide: writing them would fabricate an
 			     entry the sender never sent. ]]
 			if not rejected() then
-				result[key] = value
+				result[entryKey] = entryValue
 			end
 		end
 

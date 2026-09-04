@@ -44,6 +44,7 @@ four more that are live in `develop` today.
 | A bound on what one batch may hold live before dispatch | `src/transport/Inbound.luau` |
 | Per-channel `maxBytes`, and a total-element bound that nesting cannot evade | `src/api/Channel.luau`, `src/codec/Ir.luau` |
 | Counters, an immutable snapshot, and a default sink that warns | `src/api/Observer.luau`, `src/api/Diagnostics.luau` |
+| Global settings: severities per rule, limits, an immutable snapshot | `src/api/Config.luau` — **landed early**, see D-11 |
 | `query`: varint call ids, a pending table, a declared timeout, cancellation on disconnect | `src/transport/Query.luau`, `src/transport/Driver.luau` |
 | A protocol hash over types, not only names, checked at join | `src/api/Protocol.luau` |
 | The adversarial suite, with the failure/success ratio measured and asserted | `tests/hostile_runtime.luau`, `tests/fuzz_runtime.luau` |
@@ -155,31 +156,69 @@ The shared plan's closing rule, adopted. It is not rhetoric here: measured on th
 `transport_runtime` is at 14% failure-path assertions and `ir_runtime` at 13%. A rule nobody counts
 is a rule nobody keeps, so phase 6 lands a counter and the acceptance criteria name a number.
 
+
+### D-11 — Settings are ESLint-shaped, and a severity cannot reach enforcement
+
+Landed ahead of the rest of this milestone, because phase 1 needs somewhere for "how loud is this"
+to live and inventing that later would have meant changing the sink twice.
+
+`nw.configure` takes `rules` (severities) and `limits` (numbers) and the two cannot cross. A
+severity governs netweave's own console output and nothing else: a packet refused at `budget` is
+refused whatever `budget` is set to, and callbacks attached with `nw.observe` receive every
+rejection regardless of any setting.
+
+The reason to nail that down in a design decision rather than in a docstring is the failure mode.
+A linter's `off` is safe because a linter only ever reports. If `off` here had meant "stop
+refusing", then a config block copied off a forum post would be a supported way to delete G1
+through G6 from a game whose author never read it — and it would look like tuning.
+`Config.raises(rule)` answers `false` for every wire rule at every severity, so the rule is a
+function rather than a convention, and `tests/config_runtime.luau` asserts it for all six stages at
+`"error"`.
+
+The one rule that raises is `rateUnbounded`, which fires on the game's own declaration rather than
+on wire data. It is also the only rule in the ESLint sense — legal, and probably a mistake — and it
+exists because `rate = 1e6` satisfies G2 on paper while admitting everything the platform can
+deliver. The benchmark declares exactly that and turns the rule off immediately above the
+declaration, which is the shape the rule exists to produce: a considered exception, written down.
+
+**What this does not do yet.** The counters in phase 1 are not built; `nw.config.snapshot()` reports
+settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
 ## 6. Tasks
 
-### Phase 0 — the four defects that are live right now
+### Phase 0 — the five defects that were live in this tree — **done**
 
-- [ ] `authorize` is called through `xpcall`; a raise becomes a refusal at stage `"authorize"`
+- [x] `authorize` is called through `xpcall`; a raise becomes a refusal at stage `"authorize"`
       carrying the message, and the batch continues (D-1)
-- [ ] The dispatch loop is isolated per packet, so nothing a policy or handler does reaches the
-      remaining pending entries
-- [ ] A verdict is accepted only on an explicit `ok == true`; `nil`, `false` and malformed tables
-      refuse (D-2)
-- [ ] `Budget` becomes a token bucket; `burst` is declarable and defaults to `rate` (D-3)
-- [ ] `arrayReader` and `mapReader` grow as they read; no claimed count allocates ahead of the
-      bytes that justify it (D-4). Strike the "cost question, not a safety one" comment
-- [ ] Each of the four gets a test that is **run against the pre-fix code and confirmed to fail
-      there**. A regression test that has never failed proves nothing
+- [x] The dispatch loop is isolated per packet — by wrapping the two call sites that reach game
+      code rather than the loop itself. Everything else in it is netweave's own, and an `xpcall`
+      per packet around code that cannot legitimately raise is a cost with no guarantee attached
+- [x] A verdict is accepted only on an explicit `ok == true`; `nil`, `false`, numbers, `{}`, a
+      table with no `ok`, and a truthy non-`true` `ok` all refuse (D-2)
+- [x] `Budget` becomes a token bucket; `burst` is declarable, defaults to `rate`, is forbidden on
+      the outbound classes beside `rate`, and is refused below `rate` (D-3)
+- [x] No claimed count allocates ahead of the bytes that justify it (D-4). A static element gives
+      an exact bound; a dynamic one caps the allocation at the bytes remaining. `mapReader` never
+      had the bug — it grows from `{}` — and takes the bound anyway so the refusal reads the same.
+      The "cost question, not a safety one" comment is struck through in place
+- [x] Each gets a test **run against the pre-fix code and confirmed to fail there**: 14 failing
+      assertions in `transport_runtime`, 4 in `budget_runtime`, 2 in `serdes_runtime`
+- [x] **A raising policy also leaked the context.** `Context.release` was reached only on the paths
+      that returned normally, so a `ctx` retained from the raising packet stayed valid into the
+      next one — M2 phase 3's wrong-player attribution, reintroduced one packet at a time by an
+      exception path, and invisible in production because the guard is Studio-only
 
 ### Phase 1 — observability that is on by default
 
 - [ ] `Observer` keeps counters per channel per stage, not only the live callback
-- [ ] `nw.diagnostics()` returns an immutable snapshot; mutating it does not touch the counters and
-      does not throw
-- [ ] A default sink warns on the first refusal of each `(channel, stage)` pair, once, with the
-      reason and a pointer to `nw.observe`. Silence is opt-in, not default
+- [x] An immutable snapshot exists as `nw.config.snapshot()` — frozen at every level, and a second
+      call is a second table so two diagnostic screens cannot share a moment
+- [ ] `nw.diagnostics()` returns the same for the *counters*; mutating it does not touch them
+- [x] A default sink warns on the first refusal of each `(channel, stage)` pair, with the reason.
+      Silence is opt-in, not default — `src/api/Observer.luau`, and `DESIGN-API.md` §9.1 carries the
+      strikethrough
 - [ ] A `"protocol"` stage for handshake refusals (phase 5 fills it)
-- [ ] Rate-limit the default sink itself — the thing that reports a flood must not become one
+- [x] Rate-limit the default sink itself — the thing that reports a flood must not become one.
+      Three per `(channel, stage)`, then a line saying so; `limits.repeatsPerDiagnostic` moves it
 
 ### Phase 2 — resource limits
 

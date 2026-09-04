@@ -78,8 +78,18 @@ documentation — a reader sees `nw.intent` and knows the server does not approv
 | `intent` | C→S | `data`, `rate` | `authorize` | constrained `T` |
 | `signal` | C→S | `data`, `rate` | `authorize` | `Untrusted<T>` |
 | `query` | C→S→C | `args`, `returns`, `rate`, `authorize`, `timeout` | — | `Trusted<T>` |
-| `state` | S→C | `data`, `audience` | `rate`, `authorize` | `T` |
-| `event` | S→C | `data`, `audience` | `rate`, `authorize` | `T` |
+| `state` | S→C | `data`, `audience` | `rate`, `burst`, `authorize` | `T` |
+| `event` | S→C | `data`, `audience` | `rate`, `burst`, `authorize` | `T` |
+
+Every class that declares a `rate` may also declare a **`burst`**, the depth of its token bucket.
+It defaults to `rate` — one second's worth, the safe reading of silence — and it cannot be
+declared below `rate`, because tokens accrue at the rate and a shallower bucket would throw the
+difference away every second, leaving the declared rate unreachable and therefore fiction.
+
+`rate` is a *sustained* rate, enforced by a bucket rather than a window. A window that resets on a
+boundary admits a full allowance on each side of it: a channel declared `rate = 20` measured **39
+admissions across ten milliseconds** before M3 phase 0. The guarantee is now "no more than `rate`
+per second in any second", not "in the seconds netweave happened to draw".
 
 **`command`** changes authoritative state. Authorization is not optional, because a command
 without it is the exact shape of every Roblox exploit writeup.
@@ -370,7 +380,88 @@ nw.observe(function(rejection)
 end)
 ```
 
-## 10. Open
+### 9.1 Observed by default
+
+~~`nw.observe` is the only way to find out.~~ **Corrected.** M2 shipped six rejection stages and
+returned early from `emit` when nothing was observing, so a game that attached no observer got
+silent drops at all six — the failure `§3.7-K` faults Warp for, rebuilt with extra steps. netweave
+now writes to the console by default and goes quiet on its own: one channel and stage prints three
+times and then says it is suppressed. Observers are unaffected and always receive everything.
+
+## 10. Settings
+
+`nw.configure` takes rules in the shape ESLint made familiar, and one thing about it is not like
+ESLint at all.
+
+```lua
+nw.configure({
+    rules = {
+        parse = "warn",       -- default
+        budget = "warn",      -- default
+        authorize = "off",    -- default: expected to fire in normal play
+        handler = "error",    -- default: the game's own bug, so every occurrence
+        queue = "warn",
+        send = "warn",
+        rateUnbounded = "warn",
+    },
+    limits = {
+        queueCapacity = 256,
+        unreliableBytes = 908,
+        repeatsPerDiagnostic = 3,
+    },
+    contextGuard = nil,       -- nil means Studio-only, as before
+})
+```
+
+**A severity governs output and never enforcement.** A packet refused at `budget` is refused
+whatever `budget` is set to. There is no setting anywhere in netweave that makes a refused packet
+arrive, a missing policy optional, or an unauthorised sender authorised.
+
+That asymmetry is the whole design. A linter's `off` is safe because a linter only ever reports;
+if `off` here had meant "stop refusing", then the single most copy-pasted artifact in any
+ecosystem — a config block off a forum post — would be a way to delete G1 through G6 from a game
+whose author never read what they pasted. Severities live in `rules`, limits live in `limits`, and
+nothing can cross.
+
+| Severity | On a wire rule | On a declaration rule |
+|---|---|---|
+| `"off"` | silent | the check does not run |
+| `"warn"` | once per channel and stage | reported, and execution continues |
+| `"error"` | **every** occurrence, with a stack | raised |
+
+`"error"` on a wire rule does not raise and **cannot be made to** — that is G4, and
+`Config.raises` answers `false` for every wire rule at every severity rather than leaving it to a
+convention someone has to remember. Only `rateUnbounded` raises, because it fires on the game's own
+declaration, where `CLAUDE.md` §4 says raising is correct.
+
+**`"off"` is discouraged and the caution says why.** Reach for it when a stage fires in normal play
+by design and its log is drowning something else out. Reaching for it because a warning is annoying
+removes the only notice a game gets that it is dropping traffic.
+
+**`rateUnbounded` is the only lint here**, in the ESLint sense of the word: a declaration that is
+legal and probably a mistake. A `rate` above 10,000 packets per second is past anything a client can
+reach, so the channel is effectively unlimited and G2 has been satisfied on paper only.
+`bench/src/shared/Modes/netweave.luau` declares `1e6` and turns the rule off immediately above the
+declaration — a considered exception, written down, which is the shape the rule exists to produce.
+
+Limits are read when the thing they limit is built, so configure before declaring. A queue that
+already exists keeps the capacity it was created with, and `unreliableBytes` can only be lowered:
+908 is Roblox's ceiling, not netweave's preference (`§3.7-F`).
+
+**Two layers check a settings table, and they catch different things.** `Settings` catches the
+values — a severity that is not one of the three, a limit that is not a number, a `contextGuard`
+that is not a boolean. It cannot catch a *name*, because width subtyping accepts extra properties
+and `{ rules = { handlers = "warn" } }` satisfies a type with no `handlers`. So `nw.configure` also
+carries `CheckedSettings`, a `type function` that reads `properties` and refuses an unknown rule,
+limit or section at the call site with the same message the runtime would have given — the answer
+§4 already uses for channel specs. A misspelled rule is the case that matters: it reads as
+"configured" while the default silently stays in force.
+
+`nw.config.snapshot()` returns what is in force, frozen at every level, so a diagnostic screen
+cannot become a way to reconfigure the library by accident. `nw.config.describe()` lists every rule
+with its default, whether it is a wire rule, and one line on what it reports.
+
+## 11. Open
 
 1. ~~**Type-inference spike.**~~ **Answered** in `spike/inference/`. `type function` gives both
    per-field payload inference and directional views, under `LuauSolverV2`. See §7.

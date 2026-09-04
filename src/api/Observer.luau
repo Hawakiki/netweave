@@ -24,6 +24,8 @@
 	the batch, which is the failure Blink and Zap both have (`RESEARCH §3.8-R`).
 ]]
 
+local Config = require("./Config")
+
 local Observer = {}
 
 --[=[
@@ -101,6 +103,57 @@ local function report(message: string): string
 	return message
 end
 
+--[[
+	The default sink, and the reason `nw.observe` is no longer the only way to find out.
+
+	M2 shipped every one of these stages and then returned early when nothing was observing, so a
+	game that attached no observer got silent drops at all six. That is precisely what
+	`RESEARCH §3.7-K` faults Warp for — a player blackholed with nothing anywhere saying so — and
+	building the signal and not raising it reproduces the fault with extra steps.
+
+	It goes quiet on its own. One channel and stage prints `repeatsPerDiagnostic` times and then
+	says it is done, because the failure mode of a default-on log is that a refusal storm becomes
+	the outage. `"error"` is the opt-in to every occurrence, and even there nothing raises: these
+	are rejections carrying wire data, and G4 has no exceptions.
+]]
+local seen: { [string]: number } = {}
+
+--[[ Injected for the same reason `Budget` injects its clock: `warn` writes somewhere a test cannot
+     read, so a sink that is only ever eyeballed is a sink nobody has asserted. Defaults to `warn`
+     and is private. ]]
+local sink: (string) -> () = warn
+
+local function announce(channel: string, stage: Stage, reason: string, player: Player?)
+	local level = Config.severityOf(stage)
+
+	if level == "off" then
+		return
+	end
+
+	local who = if player then ` from {player.Name}` else ""
+
+	if level == "error" then
+		sink(`[netweave] {channel} refused at {stage}{who}: {reason}\n{debug.traceback("", 2)}`)
+		return
+	end
+
+	local key = `{channel}\0{stage}`
+	local times = (seen[key] or 0) + 1
+	local ceiling = Config.limitOf("repeatsPerDiagnostic")
+
+	if times > ceiling then
+		return
+	end
+
+	seen[key] = times
+
+	local suffix = if times == ceiling
+		then ` (further "{stage}" reports for {channel} are suppressed; nw.observe still receives them)`
+		else ""
+
+	sink(`[netweave] {channel} refused at {stage}{who}: {reason}{suffix}`)
+end
+
 --[=[
 	@within Observer
 	@function observe
@@ -154,10 +207,6 @@ end
 	Fills the shared record and hands it to every observer. Called by the transport, not by games.
 ]=]
 function Observer.emit(channel: string, player: Player?, stage: Stage, reason: string, bytes: number)
-	if count == 0 then
-		return
-	end
-
 	record.channel = channel
 	record.player = player
 	record.stage = stage
@@ -167,6 +216,21 @@ function Observer.emit(channel: string, player: Player?, stage: Stage, reason: s
 	for index = 1, count do
 		xpcall(observers[index], report, record)
 	end
+
+	announce(channel, stage, reason, player)
+end
+
+--[=[
+	@within Observer
+	@function setSink
+	@param replacement ((line: string) -> ())?
+	@private
+
+	Replaces where the default sink writes. `nil` puts `warn` back, and so does [Observer.reset].
+	Exists so the severities and the repeat suppression can be asserted rather than eyeballed.
+]=]
+function Observer.setSink(replacement: ((string) -> ())?)
+	sink = replacement or warn
 end
 
 --[=[
@@ -178,7 +242,9 @@ end
 ]=]
 function Observer.reset()
 	table.clear(observers)
+	table.clear(seen)
 	count = 0
+	sink = warn
 end
 
 return Observer

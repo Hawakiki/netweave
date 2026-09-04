@@ -39,7 +39,7 @@ Security and structure lead this project; the codec exists so that enforcing the
 
 | # | Deliverable | Artifact |
 |---|---|---|
-| D1 | Type-inference spike, with a written verdict | `spike/inference/`, `docs/DESIGN-API.md` §7, §10 |
+| D1 | Type-inference spike, with a written verdict | `spike/inference/`, `docs/DESIGN-API.md` §7, §11 |
 | D2 | Frozen wire format | `docs/WIRE-FORMAT.md` |
 | D3 | Type combinators with constraints | `src/types/` |
 | D4 | Schema → IR → closure codec | `src/codec/` |

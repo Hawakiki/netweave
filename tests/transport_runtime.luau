@@ -17,6 +17,7 @@
 local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
+local Context = require("../src/api/Context")
 local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
 local Observer = require("../src/api/Observer")
@@ -1316,6 +1317,196 @@ do
 
 	channel.handler = nil
 	byId[48] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A policy is game code, and game code does not get the batch (PLAN-M3 D-1)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		M2 wrapped the handler and left `authorize` bare, so a policy that raised took every packet
+		behind it — including other players', once the queue drain crosses senders. That turns the
+		authorization layer into the denial-of-service surface: find one input that trips a game's
+		policy and the traffic batched behind it dies.
+
+		`RESEARCH §3.8-R` is the same failure at the codec layer, which netweave already avoids.
+		This is that discipline applied to the game's own code rather than to a peer's.
+
+		Against the pre-fix code this block reports `receive survived = false` and delivers 0 of 2.
+	]]
+	local channel = outboundChannel(50, t.struct({ a = t.u8 }), {
+		class = "command",
+		authorize = function(_ctx: any, value: any)
+			if value.a == 1 then
+				error("policy blew up")
+			end
+
+			return { ok = true, value = nil, reason = nil }
+		end,
+	})
+
+	byId[50] = channel
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, value.a)
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	Batch.writePacket(channel, { a = 2 })
+	Batch.writePacket(channel, { a = 3 })
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("a raising policy does not reach the receive loop", survived)
+	equals("the packets it did not refuse were delivered", #got, 2)
+	equals("and the first of those is the second packet", got[1], 2)
+	equals("the raise was reported once", #reported, 1)
+	check(
+		"at the authorize stage",
+		reported[1] ~= nil and string.find(reported[1], "authorize:", 1, true) ~= nil
+	)
+
+	channel.handler = nil
+	byId[50] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A verdict is `ok == true` or it is a refusal (PLAN-M3 D-2)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		Not truthy. A policy that returns nothing is a policy someone forgot to finish, and the safe
+		reading of an unfinished policy is "no" — this is the one place in netweave where a shrug
+		must not mean yes.
+
+		Against the pre-fix code the `nil` case raises `attempt to index nil` on the receive path,
+		which is a G4 violation reachable from a game's own bug, and `{ ok = "yes" }` is *admitted*
+		because the check was `if not allowed`.
+	]]
+	local shrugs: { { name: string, returns: any } } = {
+		{ name = "nil", returns = nil },
+		{ name = "false", returns = false },
+		{ name = "a number", returns = 0 },
+		{ name = "an empty table", returns = {} },
+		{ name = "a table with no ok", returns = { value = 1 } },
+		{ name = "ok = false", returns = { ok = false } },
+		{ name = "a truthy non-true ok", returns = { ok = "yes" } },
+	}
+
+	for index, shrug in shrugs do
+		local id = 60 + index
+		local channel = outboundChannel(id, t.struct({ a = t.u8 }), {
+			class = "command",
+			authorize = function()
+				return shrug.returns
+			end,
+		})
+
+		byId[id] = channel
+
+		local called = 0
+		channel.handler = function()
+			called += 1
+		end
+
+		local inbound, reported = inboundOf(true, {})
+
+		Batch.writePacket(channel, { a = 1 })
+
+		local packed, instances = Buffer.take()
+		local survived = pcall(function()
+			inbound.receive(packed, instances, alice)
+		end)
+
+		check(`a policy returning {shrug.name} does not raise`, survived)
+		equals(`a policy returning {shrug.name} refuses`, called, 0)
+		equals(`and reports it`, #reported, 1)
+
+		channel.handler = nil
+		byId[id] = nil
+		Observer.reset()
+	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A raising policy does not leak the context (PLAN-M3 D-1)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		`Context.release` was only reached on the paths that returned normally, so a policy that
+		raised left the record's generation unbumped — and a `ctx` retained from that packet stayed
+		*valid* into the next one, reading the next sender's channel and clock through a proxy the
+		guard should have expired.
+
+		That is the wrong-player attribution M2 phase 3 fixed at the batch level, reintroduced one
+		packet at a time by an exception path. The guard is Studio-only, so the leak is invisible in
+		production, where it is also the only place it matters.
+
+		Against the pre-fix code the retained proxy reads packet two's channel instead of raising.
+	]]
+	local guardWas = Context.guarded()
+	Context.setGuarded(true)
+
+	local stashed: any = nil
+
+	local channel = outboundChannel(70, t.struct({ a = t.u8 }), {
+		class = "command",
+		authorize = function(ctx: any, value: any)
+			if value.a == 1 then
+				stashed = ctx
+				error("policy blew up")
+			end
+
+			return { ok = true, value = nil, reason = nil }
+		end,
+	})
+
+	byId[70] = channel
+	channel.handler = function() end
+
+	local inbound = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	local first, firstInstances = Buffer.take()
+	pcall(function()
+		inbound.receive(first, firstInstances, alice)
+	end)
+
+	check("the policy stashed a ctx", stashed ~= nil)
+
+	reset()
+	Batch.writePacket(channel, { a = 2 })
+	local second, secondInstances = Buffer.take()
+	pcall(function()
+		inbound.receive(second, secondInstances, bob)
+	end)
+
+	local readable = pcall(function()
+		return (stashed :: any).channel
+	end)
+
+	check("the ctx the raising policy held is expired, not alive on the next packet", not readable)
+
+	Context.setGuarded(guardWas)
+	channel.handler = nil
+	byId[70] = nil
 	Observer.reset()
 end
 

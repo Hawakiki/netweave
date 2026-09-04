@@ -22,6 +22,9 @@
 ]]
 
 local Batch = require("./Batch")
+--[[ Aliased, because this module already exports a type named `Config` for its own constructor
+     options and two `Config`s in one file is a reading hazard even where Luau permits it. ]]
+local Settings = require("../api/Config")
 local Context = require("../api/Context")
 local Observer = require("../api/Observer")
 
@@ -37,13 +40,18 @@ local Inbound = {}
 	into a memory leak that looks like a networking library, and the packets worth keeping when a
 	handler finally attaches are the recent ones, not the ones from a minute ago.
 ]]
-local QUEUE_CAPACITY = 256
+--[[ A default rather than a constant since M3: `nw.configure` moves it, and it is read when a
+     queue is first created so a game that raises it before declaring gets the queue it asked for.
+     Stored on the queue itself, because changing the limit must not desynchronise the ring
+     arithmetic of a queue that already exists. ]]
+local DEFAULT_QUEUE_CAPACITY = 256
 
 type Queue = {
 	values: { any },
 	senders: { any },
 	read: number,
 	count: number,
+	capacity: number,
 	dropped: number,
 }
 
@@ -173,16 +181,55 @@ function Inbound.new(config: Config): Inbound
 		local authorize: ((any, any) -> any)? = channel.authorize
 
 		if authorize then
-			local verdict = authorize(ctx, value)
+			--[[
+				A policy is game code, and game code does not get the batch.
 
-			--[[ Read out of the shared verdict record before anything else can overwrite it
-			     (`src/api/Policy.luau`). ]]
-			local allowed = verdict.ok
-			local narrowed = verdict.value
-			local reason = verdict.reason
+				M2 wrapped the handler and left this call bare, which made the authorization layer a
+				denial-of-service surface: one input that trips a game's policy takes every packet
+				batched behind it, and the queue drain crosses senders, so those packets are not
+				necessarily the same player's. `RESEARCH §3.8-R` is this failure at the codec layer,
+				which netweave already avoids; `PLAN-M3` D-1 is the same discipline applied to the
+				game's own code.
+
+				`xpcall` with the module-level `traceback` handler allocates no closure per call.
+			]]
+			local ran, verdict = xpcall(authorize, traceback, ctx, value)
+
+			if not ran then
+				report(channel, who, "authorize", `the policy raised: {tostring(verdict)}`, bytes)
+				Context.release(who)
+				return
+			end
+
+			--[[
+				`ok == true`, not truthy, and only off a table.
+
+				A policy that returns nothing is a policy someone forgot to finish, and the safe
+				reading of an unfinished policy is "no" — this is the one place in netweave where a
+				shrug must not mean yes. The pre-fix check was `if not allowed`, which admitted
+				`ok = "yes"` and raised outright on `nil` (`PLAN-M3` D-2).
+
+				Read out of the shared verdict record before anything else can overwrite it
+				(`src/api/Policy.luau`).
+			]]
+			local shaped = if type(verdict) == "table" then verdict else nil
+			local allowed = shaped ~= nil and shaped.ok == true
+			local narrowed = if shaped then shaped.value else nil
+			local reason = if shaped then shaped.reason else nil
 
 			if not allowed then
-				report(channel, who, "authorize", reason or "denied", bytes)
+				report(
+					channel,
+					who,
+					"authorize",
+					reason
+						or (
+							if shaped
+								then "denied"
+								else `the policy returned {typeof(verdict)}, not a verdict`
+						),
+					bytes
+				)
 				Context.release(who)
 				return
 			end
@@ -264,9 +311,12 @@ function Inbound.new(config: Config): Inbound
 		local queue = queues[channel]
 
 		if not queue then
+			local capacity = Settings.limitOf("queueCapacity") or DEFAULT_QUEUE_CAPACITY
+
 			queue = {
-				values = table.create(QUEUE_CAPACITY),
-				senders = table.create(QUEUE_CAPACITY),
+				values = table.create(capacity),
+				senders = table.create(capacity),
+				capacity = capacity,
 				read = 0,
 				count = 0,
 				dropped = 0,
@@ -275,10 +325,10 @@ function Inbound.new(config: Config): Inbound
 			queues[channel] = queue
 		end
 
-		if queue.count == QUEUE_CAPACITY then
+		if queue.count == queue.capacity then
 			--[[ Drop the oldest and step the read cursor past it. Reported once per drop so a
 			     forgotten `:listen` is visible rather than merely quiet. ]]
-			queue.read = (queue.read + 1) % QUEUE_CAPACITY
+			queue.read = (queue.read + 1) % queue.capacity
 			queue.count -= 1
 			queue.dropped += 1
 
@@ -291,7 +341,7 @@ function Inbound.new(config: Config): Inbound
 			)
 		end
 
-		local slot = (queue.read + queue.count) % QUEUE_CAPACITY
+		local slot = (queue.read + queue.count) % queue.capacity
 		queue.values[slot + 1] = value
 		queue.senders[slot + 1] = who
 		queue.count += 1
@@ -388,7 +438,7 @@ function Inbound.new(config: Config): Inbound
 
 				queue.values[slot + 1] = nil
 				queue.senders[slot + 1] = nil
-				queue.read = (slot + 1) % QUEUE_CAPACITY
+				queue.read = (slot + 1) % queue.capacity
 				queue.count -= 1
 			end
 
