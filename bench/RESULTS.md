@@ -95,6 +95,25 @@ The direction of the miss is specific, and the other two directions say where it
 them.** Decode is where `table.clone(TEMPLATE)` pays off (`RESEARCH §3.8-S`), and this is the
 first measurement of that as a framerate rather than as an allocation count.
 
+### The codegen gap, per schema family
+
+PLAN-M1 phase 6 asks for this as a percentage. netweave against the better of the two code
+generators, Blink and Zap, in the same cell of the same run:
+
+| | Encode (Up) | Decode (Down) |
+|---|---|---|
+| `ArrayHeavy` | **0.61x — 39% behind** | 1.13x — 13% ahead |
+| `FlagIdiomatic` | 1.00x | 0.96x |
+| `FlagNaive` | 1.03x | 0.88x |
+
+**Only one of those six numbers is outside the noise.** The same libraries measured across the
+two runs a day apart move by up to 10% on framerate with no code change at all — Blink's
+`FlagNaive` encode went 211 to 232, Zap's `ArrayHeavy` encode 125 to 116. So the honest reading
+of this table is: netweave is 39% behind on array encode, indistinguishable everywhere else, and
+the 13% decode lead is real but only just.
+
+One cell, one direction. That is the whole measured gap, and it has an identified cause.
+
 The encode side has a known defect that is the adapter's, not the codec's: the stand-in transport
 calls `Buffer.save()` twice per send to swap destination buffers, allocating two tables per packet
 whatever the payload size. The flat 609.3 B encode figure below is that, and at 200 packets a

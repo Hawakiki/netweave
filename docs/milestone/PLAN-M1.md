@@ -1,8 +1,8 @@
 # PLAN-M1 — Declaration Surface and L1 Codec
 
-**Status:** phases 1-5 done; phase 6 (measurement) next. The Studio half of the suite has been run:
-`tests/roblox_runtime.luau` passes there. `api_runtime` failed on a Studio-only defect, which is fixed;
-the re-run confirming it is outstanding.
+**Status:** all six phases landed; **not closed.** Six of eight acceptance criteria are met, one
+partially and one missed, and both open items are the same encode-side defect — identified, fixed,
+and awaiting one re-measurement (`bench/Recheck.rbxl`). See §9.
 **Depends on:** M0 (baseline harness and numbers), `docs/DESIGN-API.md` (agreed API shape)
 **Blocks:** M2 (transport: batching, budgets, audience evaluation, intent coalescing)
 
@@ -281,8 +281,18 @@ And one assumption is now measured rather than assumed: **`src/netweave.luau` re
       read. That is the exact failure G5 and the length prefix are paid for, reintroduced by the
       code meant to honour them.
 - [x] `bench/report.luau` and `bench/src/shared/WireTap.luau` know about netweave
-- [ ] Rerun the M0 matrix, update `bench/RESULTS.md` and `bench/runs/`
-- [ ] Record the codegen gap as a percentage per schema family, and revise `§3.7-D`
+- [x] `Config.SMOKE` and `Config.ONLY_MODES`, because a full matrix is a quarter of an hour and
+      finding a broken adapter at the end of one is the worst order to learn it in
+- [x] M0 matrix rerun with all five modes — `bench/runs/2026-09-04.json`, `bench/RESULTS.md`
+      rewritten around it
+- [x] Codegen gap recorded as a percentage per schema family, and `§3.7-D` revised — the new
+      `RESEARCH §3.10` records it. The claim is narrowed rather than deleted: allocation coalescing
+      is a code generator's advantage **on encode only**, and on the same payload in the same run
+      the runtime schema wins decode.
+- [ ] **Re-measure `ArrayHeavy` after the encode fix.** The run above was taken with a defect in
+      the bench adapter — two `Buffer.save()` tables per send — that is the likeliest cause of the
+      one acceptance criterion this milestone misses. `bench/Recheck.rbxl` runs netweave against
+      Blink and Zap in about six minutes.
 
 ## 7. Acceptance criteria
 
@@ -328,3 +338,55 @@ On a 7-byte `FlagIdiomatic` payload, one or two extra bytes is 15-30%. Mitigatio
 measures it before phase 4 commits, and a varint keeps the common case to one byte. The
 guarantee it buys — one bad packet cannot kill a batch — is worth stating in those terms
 rather than hiding the cost.
+
+## 9. Result
+
+**Shipped.** A schema declared in plain Luau yields the payload type, the validation and the
+buffer serdes; six channel classes carry the security obligation in the type; and the whole thing
+is measured next to Blink, Zap, ByteNet and a raw `RemoteEvent` rather than argued about.
+
+### Against the acceptance criteria
+
+| | | |
+|---|---|---|
+| 1 | Missing `rate`, `authorize` or `audience` fails analysis | **met** — `tests/api_reject.luau`, 13 diagnostics, counted exactly |
+| 2 | Round-trip at every constraint boundary | **met** — `tests/serdes_runtime.luau` and `tests/roblox_runtime.luau`, the latter run in Studio |
+| 3 | No adversarial input reaches `error()` | **met** — truncation, out-of-range, non-finite, unknown tag, missing instance, plus a 4,200-case fuzz |
+| 4 | Bytes equal to Blink and Zap on `ArrayHeavy`, within one byte of Zap on `FlagIdiomatic` | **met** — 601 and 601, 8 against 7 |
+| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.64x of Blink on encode. Met on both flag families, and netweave is fastest of all five on `FlagNaive` |
+| 6 | Decode allocation at or below ByteNet's | **met** — 389 B against 520 B, though Zap's 65 B in the same run resets what the bar should be |
+| 7 | No allocation on the receive hot path | **receive path met; send path not** — the bench's stand-in transport allocated two tables per send, since fixed and not yet re-measured |
+| 8 | `stylua --check`, `selene`, `lune run bench/check` pass | **met** |
+
+**Six of eight met, one partially, one missed.** Both open items are the same defect on the encode
+side, and it is identified rather than suspected: an encode-allocation figure that stayed at
+609.3 B whether the payload was 600 bytes or 6.
+
+### Against the risks
+
+- **R-1 — the spike fails and per-field inference is impossible.** Did not happen. `type function`
+  under `LuauSolverV2` maps a declaration table to per-channel directional views, and G6 is a
+  compile-time guarantee (`DESIGN-API.md` §7).
+- **R-2 — the layout passes do not close the gap.** Half true, and the half that is true is
+  narrower than feared. Bytes reached parity with Zap; encode CPU did not close on `ArrayHeavy`.
+- **R-3 — security enforcement costs more than the codec saves.** No evidence of it. Every
+  benchmark channel is a `command` with a policy attached and a context acquired per packet, and
+  netweave still ties or wins on both flag families.
+- **R-4 — the length prefix is a visible byte cost on small packets.** Real and exactly as costed:
+  one byte, 14% of a 7-byte payload, zero on a static schema.
+
+### What M1 changed about the plan
+
+Four claims did not survive contact with a measurement, and each is corrected where it was made:
+
+- `DESIGN-API.md` §6 — `Untrusted<number>` normalises to `never`. Both brands are type functions
+  that bind to table payloads only.
+- `DESIGN-API.md` §3 — three internal primitives, not four.
+- `RESEARCH §3.7-D` — allocation coalescing is a code generator's advantage on **encode**; the
+  runtime schema wins decode on the same payload (`§3.10-BB`).
+- `PLAN-M0`'s "raw beats every library on small payloads" reproduced as a tie, not a win.
+
+And one hazard is worth carrying into M2: an `export type function` that its own module never
+references becomes `any` across a `require`, with no diagnostic. It silently disabled five of the
+thirteen guarantees in `tests/api_reject.luau`, and the exact count is what caught it.
+
