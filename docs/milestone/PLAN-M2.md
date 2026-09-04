@@ -157,7 +157,7 @@ means something rather than a cap nobody hits.
       allocations to one
 - [x] The wire format did not move — `bench/envelope.luau` asserts absolute byte counts and field
       offsets against a literal layout, and neither is symmetric with the writer
-- [ ] **Re-measure.** Folded into the single Studio run at the end of phase 5
+- [x] **Re-measure.** Folded into the single Studio run at the end of phase 5
 
 ### Phase 1 — the envelope, out of the benchmark — **done**
 - [x] `src/transport/Batch.luau` — `WIRE-FORMAT.md` §1-§2, and the only place that knows it
@@ -231,8 +231,9 @@ means something rather than a cap nobody hits.
       other libraries choose between `Fire(player, ...)` and `FireAll(...)` at the call site; an
       audience of `everyone` resolves to one broadcast whatever subject is handed to `publish`, so
       collapsing them would have made the `Down` cell secretly a `FireAll` cell
-- [ ] Run the matrix; update `bench/RESULTS.md` and `bench/runs/`
-- [ ] Record what changed against the stand-in, per schema family
+- [x] Run the matrix; update `bench/RESULTS.md` and `bench/runs/` — `bench/runs/2026-09-04-m2.json`
+- [x] Record what changed against the stand-in, per schema family — `bench/RESULTS.md`, "M2: the
+      stand-in replaced by the real transport"
 
 ## 7. Acceptance criteria
 
@@ -284,3 +285,61 @@ offset moves bytes without failing any round-trip test, because the reader is sy
 read them back from the same wrong place. Mitigation: `bench/envelope.luau` asserts absolute byte
 counts and field offsets against a literal layout, and `tests/serdes_runtime.luau` pins the M0
 competitor byte counts. Both must pass unchanged, and neither is symmetric with the writer.
+
+---
+
+## 9. Result
+
+Closed 2026-09-04. One Studio Play produced the test suite and then the 5x3 matrix:
+**8 runtime modules, 8 passed**, then 45 of 45 cells correct. Run document:
+`bench/runs/2026-09-04-m2.json`. Narrative: `bench/RESULTS.md`, "M2: the stand-in replaced by the
+real transport".
+
+### Against the acceptance criteria
+
+| | | |
+|---|---|---|
+| 1 | `rate = n` refuses packet `n + 1`, reported at stage `"budget"` | **met** — `tests/budget_runtime.luau`, under lune, with an injected clock |
+| 2 | The window resets without the server having sent anything | **met** — Warp's bug made *unreachable* rather than fixed: the reset happens on the charge itself, so there is no second path to skip |
+| 3 | `nearby(120)` includes and excludes correctly; `everyone` issues one call for N players | **met** — `tests/transport_runtime.luau`, audience evaluation behind `Roster`, call count asserted |
+| 4 | One bad packet does not take the batch; both framing modes resynchronise | **met** — and the plan's claim that `static` could not resynchronise was wrong and is struck through in phase 1 |
+| 5 | Unreliable over 908 B refused with a reason before the send | **met** — stage `"send"` |
+| 6 | A listener-less channel has bounded memory and counts its drops | **met** — 256-slot ring, drop-oldest, reported |
+| 7 | `intent` delivers at most one value per player per tick | **met** — coalescing keeps the last value and sums the bytes |
+| 8 | Bytes per packet unchanged from M1 | **met** — 601 and 8, byte for byte, with the real envelope replacing the stand-in |
+| 9 | No framerate cell worse than the stand-in; `ArrayHeavy` clears the 1.3x bar | **half met** — no cell regressed outside the harness's own 14% noise (`ArrayHeavy` 85 to 86), but the 1.3x bar is **still missed** at 1.53x of Blink |
+| 10 | Every check passes | **met** — analyze 32 files clean, `api_reject` 13, `types_reject` 8, seven lune suites, `bench/envelope`, `bench/check` 53 files, selene 0 |
+
+**Nine of ten met, one half met.**
+
+### What the run settled that the plan could not
+
+- **The `ArrayHeavy` framerate gap is the codec's, and nothing else's.** 85 with the stand-in, 86
+  with batching, budget accounting, audience evaluation, per-packet isolation and read-then-dispatch
+  all added. M2 cost nothing measurable, so criterion 9's miss is M1's miss unchanged, on the array
+  decode path. No transport work will move it — which is worth knowing before anyone tries.
+- **Flag decode allocation became the best of the field** — 462.8 B against Zap's 573.4 B — by
+  *removing* the stand-in. The stand-in was costing more than the transport it stood in for.
+
+### What the run cost, and where it went
+
+`ArrayHeavy` decode allocation went 1184.8 B to 9309.2 B, 7.9x, the worst cell in the run. It is
+the price of phase 3: reading a batch to completion before dispatching any of it keeps 200 decoded
+values live at once where the stand-in held one. Framerate did not move, so it is peak memory
+rather than CPU, and it is bounded by one batch — but an untrusted client picks the size of that
+batch. **That makes it a resource limit, and it is `PLAN-M3` phase 2, not a footnote.**
+
+### Eleven defects the phase audits found
+
+Listed in full against their phases above. The three that were security-relevant rather than
+merely wrong:
+
+- **A yielding handler attributed one player's packets to another** (phase 3). Roblox runs each
+  remote callback on its own coroutine and the decode cursor is global.
+- **A lying instance count handed a packet another packet's `Instance`** (phase 1), decoding
+  successfully, with no failure visible on either side.
+- **A crafted channel id reached `perSender[nil]`** (phase 4) — an `error()` on the receive path,
+  the one place nothing may throw.
+
+Each has a regression test. The two subtlest were run against the pre-fix code and confirmed to
+fail there, because a test that has never failed is a test that proves nothing.
