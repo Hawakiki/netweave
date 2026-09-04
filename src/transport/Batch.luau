@@ -90,14 +90,6 @@ export type Sink = {
 	the emptiness check is what makes it once per batch rather than once per packet.
 ]=]
 function Batch.begin()
-	--[[
-		A packet boundary is where a block left open by a raising encode gets cleaned up. Without
-		this, the length byte reserved below would be taken from that block's stale cursor — and
-		`Buffer.reserve` is block-aware precisely so that a bitfield inside a block works, so the
-		one that leaks is the one that matters.
-	]]
-	Buffer.discardBlock()
-
 	if Buffer.used() == 0 then
 		Buffer.writeU8(Batch.VERSION)
 	end
@@ -130,17 +122,25 @@ end
 
 --[=[
 	@within Batch
-	@function writePacket
+	@function writeBody
 	@param channel Channel
 	@param value any
 
-	Appends one packet to the current outgoing buffer, version byte included if it is the first.
+	The packet without the version byte, for a caller that is building one packet on its own rather
+	than appending to a batch.
 
-	Raises if the value does not satisfy the schema — that is the encode-side posture, and the
-	caller owns the rewind (`Serdes.Codec.write`).
+	The fan-out path needs this: it serialises once into a buffer of its own and copies the bytes
+	into each recipient, and a version byte in the scratch would have to be stripped on the way in —
+	an offset to get wrong on every broadcast for no gain.
 ]=]
-function Batch.writePacket(channel: any, value: any)
-	Batch.begin()
+function Batch.writeBody(channel: any, value: any)
+	--[[
+		A packet boundary is where a block left open by a raising encode gets cleaned up. Without
+		this, the length byte reserved below would be taken from that block's stale cursor — and
+		`Buffer.reserve` is block-aware precisely so that a bitfield inside a block works, so the one
+		that leaks is the one that matters.
+	]]
+	Buffer.discardBlock()
 	Buffer.writeVarint(channel.id)
 
 	local codec = channel.codec
@@ -166,6 +166,22 @@ function Batch.writePacket(channel: any, value: any)
 	if counted then
 		patchVarint(lengthAt, length)
 	end
+end
+
+--[=[
+	@within Batch
+	@function writePacket
+	@param channel Channel
+	@param value any
+
+	Appends one packet to the current outgoing buffer, version byte included if it is the first.
+
+	Raises if the value does not satisfy the schema — that is the encode-side posture, and the
+	caller owns the rewind (`Serdes.Codec.write`).
+]=]
+function Batch.writePacket(channel: any, value: any)
+	Batch.begin()
+	Batch.writeBody(channel, value)
 end
 
 -- ---------------------------------------------------------------------------------------------
