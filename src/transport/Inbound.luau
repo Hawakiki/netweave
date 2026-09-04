@@ -230,7 +230,6 @@ function Inbound.new(config: Config): Inbound
 		local count = list.count
 
 		list.count = 0
-		depth -= 1
 
 		for index = 1, count do
 			local channel = channels[index]
@@ -243,6 +242,17 @@ function Inbound.new(config: Config): Inbound
 
 			call(channel, who, value, sizes[index])
 		end
+
+		--[[
+			The depth is released **after** the loop, not before it.
+
+			Releasing it first looks harmless — the list has already been drained into locals — and is
+			not: a handler that yields lets the next batch in, and that batch would then `claim` this
+			very list and overwrite the entries this loop has not reached yet. The failure is silent
+			and size-dependent, which is why it survived a first test: the interleaved batch only
+			corrupts the outer one when it is at least as long.
+		]]
+		depth -= 1
 	end
 
 	--[[
