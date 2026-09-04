@@ -269,7 +269,18 @@ And one assumption is now measured rather than assumed: **`src/netweave.luau` re
 `init.luau` reaching its own children still does not, which is why there is not one.
 
 ### Phase 6 — measurement
-- [ ] `bench/src/shared/Modes/netweave.luau`
+- [x] `bench/src/shared/Modes/netweave.luau` — the six benchmark channels declared through the real
+      surface (`command` with a policy attached, per R-3), plus a stand-in transport installed
+      through `nw.internal.transport`. The stand-in is the harness's, not netweave's: M2 owns
+      batching, budgets, audience evaluation and coalescing, and every number here has to be read
+      with that in mind. Blink and Zap both batch and flush on `Heartbeat`, so a netweave measured
+      without batching would be measuring the absence of a milestone rather than a library.
+- [x] `bench/envelope.luau` — the batch envelope under lune, so a framing bug fails in a second
+      rather than as "the payload garbled" after a Studio run. It found one immediately: a
+      rejection is sticky, so a refused packet stopped the whole batch at the *next* packet's id
+      read. That is the exact failure G5 and the length prefix are paid for, reintroduced by the
+      code meant to honour them.
+- [x] `bench/report.luau` and `bench/src/shared/WireTap.luau` know about netweave
 - [ ] Rerun the M0 matrix, update `bench/RESULTS.md` and `bench/runs/`
 - [ ] Record the codegen gap as a percentage per schema family, and revise `§3.7-D`
 

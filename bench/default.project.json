@@ -15,7 +15,11 @@
         "$path": "src/shared",
 
         "Vendor": {
-          "$path": "vendor"
+          "$path": "vendor",
+
+          "netweave": {
+            "$path": "../src"
+          }
         }
       },
 

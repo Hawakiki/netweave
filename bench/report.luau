@@ -18,7 +18,9 @@ local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 
-local MODES = { "blink", "zap", "bytenet", "raw" }
+--[[ netweave first, because the tables exist to answer what it costs. `raw` last, because it is
+     the floor rather than a competitor. ]]
+local MODES = { "netweave", "blink", "zap", "bytenet", "raw" }
 local SCHEMAS = { "ArrayHeavy", "FlagIdiomatic", "FlagNaive" }
 
 local path = process.args[1]
