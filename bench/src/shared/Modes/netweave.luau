@@ -245,25 +245,41 @@ return function(canonical): Adapter
 	]]
 	local parked: { [any]: any } = {}
 
-	local function batchFor(destination: any): any
-		local existing = parked[destination]
+	--[[
+		Which destination's buffer is currently loaded, so consecutive sends to the same one cost
+		nothing.
 
-		if existing then
-			return existing
+		The first version swapped on every send: `Buffer.save()` before, `Buffer.save()` again
+		after, two tables per packet regardless of payload size. The 2026-09-04 run measured it as
+		a flat **609.3 B per encode call on all three schemas** — a figure that does not move with
+		the payload is not measuring the payload — and at 200 packets a frame it is 400 tables a
+		frame of pure waste. It is also the likeliest part of why netweave's `ArrayHeavy` encode
+		framerate missed acceptance criterion 5.
+
+		The harness fires one destination at a time, and so does a game inside a single channel's
+		fan-out, so tracking the current one removes the swap from the common path entirely.
+	]]
+	local loaded: any = nil
+
+	local function switchTo(destination: any)
+		if loaded == destination then
+			return
 		end
 
-		local previous = Buffer.save()
-		Buffer.load(nil)
-		local fresh = Buffer.save()
-		Buffer.load(previous)
+		if loaded ~= nil then
+			parked[loaded] = Buffer.save()
+		end
 
-		parked[destination] = fresh
-		return fresh
+		local existing = parked[destination]
+
+		--[[ `load(nil)` starts a fresh empty buffer, which is exactly what a destination with no
+		     parked batch needs. ]]
+		Buffer.load(existing)
+		loaded = destination
 	end
 
 	local function write(destination: any, channel: any, value: any)
-		local previous = Buffer.save()
-		Buffer.load(batchFor(destination))
+		switchTo(destination)
 
 		if Buffer.used() == 0 then
 			Buffer.writeU8(WIRE_VERSION)
@@ -283,13 +299,21 @@ return function(canonical): Adapter
 		else
 			channel.codec.write(value)
 		end
-
-		parked[destination] = Buffer.save()
-		Buffer.load(previous)
 	end
 
+	--[[
+		Once a frame, send whatever each destination accumulated.
+
+		This is where the saves belong: one per destination per frame rather than two per packet.
+		A destination that received nothing this frame is skipped without touching the buffer at
+		all, and `take` leaves a fresh empty buffer behind, so the parked entry is dropped rather
+		than re-saved.
+	]]
 	local function flush()
-		local previous = Buffer.save()
+		if loaded ~= nil then
+			parked[loaded] = Buffer.save()
+			loaded = nil
+		end
 
 		for destination, save in parked do
 			Buffer.load(save)
@@ -306,13 +330,10 @@ return function(canonical): Adapter
 				else
 					reliable:FireServer(packed, instances)
 				end
-
-				--[[ `take` resets to a fresh buffer, so this is the empty one, not the sent one. ]]
-				parked[destination] = Buffer.save()
 			end
-		end
 
-		Buffer.load(previous)
+			parked[destination] = nil
+		end
 	end
 
 	--[[
