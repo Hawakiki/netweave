@@ -104,10 +104,17 @@ local function allocate(length: number): number
 	local needed = offset + length
 
 	if needed > outgoingSize then
-		local size = outgoingSize
-		repeat
+		--[[
+			Doubling from the current size, but never from zero: `0 * 2` is `0`, so a buffer that
+			somehow has no capacity would spin here forever rather than grow. A zero-size buffer is
+			reachable — a parked record starts as one — and a growth loop that cannot terminate is a
+			hung server rather than a wrong answer.
+		]]
+		local size = math.max(outgoingSize, INITIAL_SIZE)
+
+		while size < needed do
 			size *= 2
-		until size >= needed
+		end
 
 		local grown = buffer.create(size)
 		buffer.copy(grown, 0, outgoing, 0, offset)
@@ -614,6 +621,86 @@ function Codec.save(): Save
 		instances = outgoingInstances,
 		instanceCount = outgoingInstanceCount,
 	}
+end
+
+--[=[
+	@within CodecBuffer
+	@function emptySave
+	@return Save
+
+	A parked record with nothing in it, ready to be loaded.
+
+	The transport keeps one per recipient and refills it with [CodecBuffer.saveInto], so this is
+	called once per destination rather than per packet. It exists so that the record's shape is
+	defined here rather than copied into every caller that needs one.
+]=]
+function Codec.emptySave(): Save
+	return {
+		buffer = buffer.create(INITIAL_SIZE),
+		size = INITIAL_SIZE,
+		used = 0,
+		instances = {},
+		instanceCount = 0,
+	}
+end
+
+--[=[
+	@within CodecBuffer
+	@function saveInto
+	@param record Save -- overwritten in place
+
+	[CodecBuffer.save] without the allocation.
+
+	`save` builds a table, and the transport parks one buffer per recipient and swaps between them
+	on the send path — so a `save` per swap is a table per packet, which is exactly the cost M1's
+	benchmark measured as a flat 609.3 B of encode allocation on every schema. A record owned by
+	the caller and refilled costs nothing after the first frame.
+]=]
+function Codec.saveInto(record: Save)
+	record.buffer = outgoing
+	record.size = outgoingSize
+	record.used = outgoingUsed
+	record.instances = outgoingInstances
+	record.instanceCount = outgoingInstanceCount
+end
+
+--[=[
+	@within CodecBuffer
+	@function mark
+	@return number -- bytes written
+	@return number -- instances written
+
+	Where the buffer is, as two numbers rather than a record.
+
+	Paired with [CodecBuffer.rollback] this is an allocation-free rewind, which the send path needs
+	on every packet: an encode that raises has to leave the batch as it found it, and the batch
+	behind the half-written packet is a real player's real traffic.
+]=]
+function Codec.mark(): (number, number)
+	return outgoingUsed, outgoingInstanceCount
+end
+
+--[=[
+	@within CodecBuffer
+	@function rollback
+	@param used number
+	@param instanceCount number
+
+	Rewinds to a [CodecBuffer.mark].
+
+	The buffer itself is not shrunk — it may have grown past the mark and that growth is worth
+	keeping. What is undone is the *content*: the bytes past `used` are unreachable and the sidecar
+	entries past `instanceCount` are cleared, so a retained Instance does not outlive the packet
+	that was abandoned.
+]=]
+function Codec.rollback(used: number, instanceCount: number)
+	for index = instanceCount + 1, outgoingInstanceCount do
+		outgoingInstances[index] = nil
+	end
+
+	outgoingUsed = used
+	outgoingInstanceCount = instanceCount
+	blockDepth = 0
 end
 
 --[=[

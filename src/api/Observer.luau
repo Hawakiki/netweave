@@ -27,7 +27,7 @@
 local Observer = {}
 
 --[=[
-	@type Stage "parse" | "budget" | "authorize"
+	@type Stage "parse" | "budget" | "authorize" | "send"
 	@within Observer
 
 	How far a packet got before it was refused.
@@ -37,12 +37,18 @@ local Observer = {}
 	| `parse` | the bytes did not decode against the channel's schema |
 	| `budget` | the sender is over the channel's declared `rate` |
 	| `authorize` | the payload decoded and was in budget, and a policy said no |
+	| `send` | netweave refused to put a packet on the wire |
 
-	The three are worth separating because they mean different things about the sender. `parse`
-	is a stale client or an attacker; `budget` is a flood; `authorize` is a player asking for
-	something they are not entitled to.
+	The first three are worth separating because they mean different things about the sender.
+	`parse` is a stale client or an attacker; `budget` is a flood; `authorize` is a player asking
+	for something they are not entitled to.
+
+	`send` is the odd one and points the other way — it is netweave refusing *this* game's own
+	outgoing packet, and the only case in M2 is an unreliable payload over Roblox's size limit.
+	Roblox drops that silently, so without a signal here it is invisible from both ends
+	(`RESEARCH §3.7-F`).
 ]=]
-export type Stage = "parse" | "budget" | "authorize"
+export type Stage = "parse" | "budget" | "authorize" | "send"
 
 --[=[
 	@interface Rejection

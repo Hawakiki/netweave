@@ -14,8 +14,13 @@
 	tables stands in for the `RemoteEvent`s and both directions run in-process.
 ]]
 
+local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
+local Link = require("../src/transport/Link")
+local Observer = require("../src/api/Observer")
+local Outbound = require("../src/transport/Outbound")
+local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
 local t = require("../src/types")
 
@@ -517,6 +522,410 @@ do
 	equals("and decodes", seen[1].value.n, 3)
 
 	byId[10] = nil
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Outbound
+-- ---------------------------------------------------------------------------------------------
+
+--[[ A loopback link. Everything the real one does to a `RemoteEvent`, recorded instead. ]]
+type Sent = { reliable: boolean, destination: any, packed: buffer, instances: { any } }
+
+local function linkOf(): (Link.Link, { Sent })
+	local log: { Sent } = {}
+
+	local link: Link.Link = {
+		send = function(reliable, destination, packed, instances)
+			table.insert(log, {
+				reliable = reliable,
+				destination = destination,
+				packed = packed,
+				instances = instances,
+			})
+		end,
+
+		sendAll = function(reliable, packed, instances)
+			table.insert(log, {
+				reliable = reliable,
+				destination = "everyone",
+				packed = packed,
+				instances = instances,
+			})
+		end,
+
+		receive = function() end,
+	}
+
+	return link, log
+end
+
+local alice = { name = "alice" }
+local bob = { name = "bob" }
+local carol = { name = "carol" }
+
+--[[ `nearby` returns whoever the test says is nearby. The geometry belongs to Roblox and is
+     covered where Roblox is, not by pretending here. ]]
+local nearbyOf: { any } = { alice }
+
+local roster: Recipients.Roster = {
+	all = function()
+		return { alice, bob, carol }
+	end,
+
+	owner = function(subject: any): any?
+		return subject
+	end,
+
+	within = function(_subject: any, _studs: number, out: { any }): number
+		for index, player in nearbyOf do
+			out[index] = player
+		end
+
+		return #nearbyOf
+	end,
+}
+
+local function outboundChannel(id: number, descriptor: any, extra: { [string]: any }?): any
+	local channel = channelOf(id, descriptor)
+
+	for key, value in extra or {} do
+		channel[key] = value
+	end
+
+	return channel
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(20, t.struct({ a = t.u8 }))
+	byId[20] = channel
+
+	--[[ A frame's worth of packets to one recipient is one remote call, not one per packet. That
+	     ratio is the measured case for batching: raw issues ~6,400 invocations a second against a
+	     batching library's ~126 (`bench/RESULTS.md`). ]]
+	out.push(channel, alice, { a = 1 })
+	out.push(channel, alice, { a = 2 })
+	out.push(channel, alice, { a = 3 })
+
+	equals("nothing is sent before the flush", #log, 0)
+
+	out.flush()
+
+	equals("one call carried all three", #log, 1)
+	equals("to the right recipient", log[1].destination, alice)
+	check("on the reliable channel", log[1].reliable)
+	equals("with one version byte", buffer.len(log[1].packed), 1 + 3 * 2)
+
+	Batch.read(log[1].packed, log[1].instances :: any, sink)
+	equals("all three arrived", #seen, 3)
+	equals("in order", seen[3].value.a, 3)
+
+	byId[20] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(21, t.struct({ a = t.u8 }))
+	byId[21] = channel
+
+	--[[ Two recipients each get their own batch, and neither sees the other's packets. ]]
+	out.push(channel, alice, { a = 1 })
+	out.push(channel, bob, { a = 2 })
+	out.push(channel, alice, { a = 3 })
+	out.flush()
+
+	equals("two calls", #log, 2)
+
+	local byDestination: { [any]: buffer } = {}
+
+	for _, entry in log do
+		byDestination[entry.destination] = entry.packed
+	end
+
+	Batch.read(byDestination[alice], nil, sink)
+	equals("alice got two packets", #seen, 2)
+	equals("hers, in order", seen[2].value.a, 3)
+
+	table.clear(seen)
+	Batch.read(byDestination[bob], nil, sink)
+	equals("bob got one", #seen, 1)
+	equals("his own", seen[1].value.a, 2)
+
+	byId[21] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+
+	--[[ An audience of everyone is one `FireAllClients`, not N `FireClient`s. This is the one axis
+	     where ByteNet beats both code generators, and collapsing it into the fan-out path would
+	     throw it away silently (`RESEARCH §3.7-E`). ]]
+	local channel = outboundChannel(22, t.struct({ a = t.u8 }), {
+		audience = Audience.everyone,
+	})
+
+	byId[22] = channel
+
+	out.publish(channel, nil, { a = 7 })
+	out.flush()
+
+	equals("one call for everyone", #log, 1)
+	equals("addressed to all", log[1].destination, "everyone")
+
+	Batch.read(log[1].packed, nil, sink)
+	equals("and it decodes", seen[1].value.a, 7)
+
+	byId[22] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(23, t.struct({ a = t.u8, b = t.u16 }), {
+		audience = Audience.nearby(120),
+	})
+
+	byId[23] = channel
+
+	nearbyOf = { alice, bob, carol }
+
+	out.publish(channel, alice, { a = 1, b = 2 })
+	out.flush()
+
+	equals("one call per recipient", #log, 3)
+
+	--[[ Serialised once and copied, so every recipient's bytes have to be identical. A fan-out
+	     that re-encoded per recipient would pass this too — what it would not pass is the encode
+	     allocation, which is why the copy is the point rather than the equality. ]]
+	local first = log[1].packed
+
+	for index = 2, 3 do
+		equals(`recipient {index} matches`, buffer.len(log[index].packed), buffer.len(first))
+	end
+
+	table.clear(seen)
+	Batch.read(log[3].packed, nil, sink)
+	equals("and it decodes", seen[1].value.b, 2)
+
+	nearbyOf = { alice }
+	byId[23] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(24, t.struct({ a = t.u8 }), {
+		audience = Audience.owner,
+	})
+
+	byId[24] = channel
+
+	--[[ One recipient takes the direct path rather than the fan-out: serialising and copying to
+	     reach one buffer is strictly more work than writing into it. ]]
+	out.publish(channel, bob, { a = 9 })
+	out.flush()
+
+	equals("one call", #log, 1)
+	equals("to the owner", log[1].destination, bob)
+
+	byId[24] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local chosen: { any } = { carol }
+
+	local channel = outboundChannel(25, t.struct({ a = t.u8 }), {
+		audience = Audience.select(function()
+			return chosen :: any
+		end),
+	})
+
+	byId[25] = channel
+
+	out.publish(channel, nil, { a = 4 })
+	out.flush()
+
+	equals("the selector decided", #log, 1)
+	equals("who receives", log[1].destination, carol)
+
+	--[[ An empty selection sends nothing at all, rather than an empty batch. ]]
+	chosen = {}
+	out.publish(channel, nil, { a = 5 })
+	out.flush()
+
+	equals("an empty audience sends nothing", #log, 1)
+
+	byId[25] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(26, t.struct({ a = t.u8 }), { unreliable = true })
+
+	byId[26] = channel
+
+	--[[ Unreliable is not batched. One lost datagram would otherwise cost N events instead of
+	     one, which is a semantic error rather than a saving (`RESEARCH §3.7-E`). ]]
+	out.push(channel, alice, { a = 1 })
+	out.push(channel, alice, { a = 2 })
+
+	equals("each went out on its own", #log, 2)
+	check("on the unreliable channel", not log[1].reliable)
+
+	out.flush()
+	equals("and the flush had nothing to do", #log, 2)
+
+	byId[26] = nil
+end
+
+do
+	reset()
+	Observer.reset()
+
+	local reported: { string } = {}
+
+	Observer.observe(function(rejection)
+		table.insert(reported, `{rejection.stage}:{rejection.bytes}`)
+	end)
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+
+	--[[
+		Roblox drops an unreliable payload past 908 bytes silently — no error, no warning, and
+		nothing on either side. None of the three surveyed libraries checks for it
+		(`RESEARCH §3.7-F`), so a game using them loses packets it cannot see losing.
+	]]
+	local channel = outboundChannel(27, t.array(t.u8), { unreliable = true })
+	byId[27] = channel
+
+	local big = table.create(1200, 1)
+
+	out.push(channel, alice, big)
+
+	equals("nothing went out", #log, 0)
+	equals("and it was reported", #reported, 1)
+	check("at the send stage", string.find(reported[1], "send:", 1, true) ~= nil)
+
+	--[[ A payload that fits still goes. ]]
+	local fits = table.create(800, 1)
+	out.push(channel, alice, fits)
+	equals("a payload that fits is sent", #log, 1)
+
+	Observer.reset()
+	byId[27] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local good = outboundChannel(28, t.struct({ a = t.u8 }))
+	local narrow = outboundChannel(29, t.struct({ x = t.u8(0, 100) }))
+
+	byId[28] = good
+	byId[29] = narrow
+
+	--[[
+		A packet whose value the schema forbids raises, and that is the posture. What it must not do
+		is leave the half-written packet in the batch: the bytes behind it are a real player's real
+		traffic, and a partial packet in front of them makes the whole batch undecodable.
+	]]
+	out.push(good, alice, { a = 1 })
+
+	local ok = pcall(out.push, narrow, alice, { x = 200 })
+	check("the bad value still raises", not ok)
+
+	out.push(good, alice, { a = 2 })
+	out.flush()
+
+	equals("one call", #log, 1)
+
+	Batch.read(log[1].packed, nil, sink)
+	equals("both good packets survived", #seen, 2)
+	equals("the one before the failure", seen[1].value.a, 1)
+	equals("and the one after it", seen[2].value.a, 2)
+
+	byId[28] = nil
+	byId[29] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(30, t.struct({ a = t.u8 }))
+	byId[30] = channel
+
+	--[[ A player who left. Their parked batch is bytes nobody will receive, and holding it holds
+	     the buffer behind it too. ]]
+	out.push(channel, alice, { a = 1 })
+	out.push(channel, bob, { a = 2 })
+	out.forget(alice)
+	out.flush()
+
+	equals("only the remaining player is sent to", #log, 1)
+	equals("and it is the right one", log[1].destination, bob)
+
+	byId[30] = nil
+end
+
+do
+	reset()
+
+	local link, log = linkOf()
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(31, t.struct({ a = t.u8 }))
+	byId[31] = channel
+
+	--[[
+		A client sends to exactly one place, and it is not addressable by name — so the destination
+		is a sentinel rather than `nil`.
+
+		`nil` is what this reached for first, and it is indistinguishable from "no destination
+		loaded": the swap sees a match, skips the load, and the packet lands in whichever buffer
+		happened to be current. On a server that is one player's traffic in another player's batch.
+	]]
+	out.push(channel, Outbound.SERVER, { a = 1 })
+	out.push(channel, Outbound.SERVER, { a = 2 })
+	out.flush()
+
+	equals("one call", #log, 1)
+	equals("with no named recipient", log[1].destination, nil)
+
+	Batch.read(log[1].packed, nil, sink)
+	equals("both packets arrived", #seen, 2)
+	equals("in order", seen[2].value.a, 2)
+
+	--[[ And a client's batch does not collide with a broadcast's, which is the other sentinel. ]]
+	table.clear(seen)
+	out.push(channel, Outbound.SERVER, { a = 3 })
+	out.push(channel, Outbound.EVERYONE, { a = 4 })
+	out.flush()
+
+	equals("two separate batches", #log, 3)
 end
 
 reset()
