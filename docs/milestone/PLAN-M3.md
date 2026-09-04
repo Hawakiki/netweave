@@ -196,6 +196,11 @@ settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
       table with no `ok`, and a truthy non-`true` `ok` all refuse (D-2)
 - [x] `Budget` becomes a token bucket; `burst` is declarable, defaults to `rate`, is forbidden on
       the outbound classes beside `rate`, and is refused below `rate` (D-3)
+- [x] **The bucket is at least one token deep, whatever the rate.** Found by the audit after the
+      phase closed, not by a test: a rate below one packet per second is legal and ordinary, and a
+      bucket 0.5 deep can never hold the whole token the admission test wants — so `rate = 0.5`
+      refused every packet after the first, forever. Warp's failure reintroduced by the fix meant
+      to make it unreachable
 - [x] No claimed count allocates ahead of the bytes that justify it (D-4). A static element gives
       an exact bound; a dynamic one caps the allocation at the bytes remaining. `mapReader` never
       had the bug — it grows from `{}` — and takes the bound anyway so the refusal reads the same.

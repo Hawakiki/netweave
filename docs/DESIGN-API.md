@@ -451,9 +451,12 @@ reach, so the channel is effectively unlimited and G2 has been satisfied on pape
 `bench/src/shared/Modes/netweave.luau` declares `1e6` and turns the rule off immediately above the
 declaration — a considered exception, written down, which is the shape the rule exists to produce.
 
-Limits are read when the thing they limit is built, so configure before declaring. A queue that
-already exists keeps the capacity it was created with, and `unreliableBytes` can only be lowered:
-908 is Roblox's ceiling, not netweave's preference (`§3.7-F`).
+Limits are not all read at the same moment. `queueCapacity` is read when a channel's queue is first
+created, so a queue that already exists keeps the depth it was made with; `unreliableBytes` and
+`repeatsPerDiagnostic` are read at the point of use and take effect immediately. Configuring before
+the first channel is declared makes all three behave alike, which is why that is the advice rather
+than the rule. `unreliableBytes` can only be *lowered*: 908 is Roblox's ceiling, not netweave's
+preference (`§3.7-F`).
 
 **Two layers check a settings table, and they catch different things.** `Settings` catches the
 values — a severity that is not one of the three, a limit that is not a number, a `contextGuard`
