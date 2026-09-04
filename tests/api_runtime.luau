@@ -624,6 +624,61 @@ end
 Namespace.reset()
 Observer.reset()
 
+-- ---------------------------------------------------------------------------------------------
+-- Every channel carries a byte ceiling it did not have to ask for (PLAN-M3 D-5)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local allows = nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+
+	--[[ The point of deriving it: a game that declares nothing still gets a bound, because every
+	     netweave type is bounded and the layout adds them up. `RESEARCH §3.7-F` records that no
+	     surveyed library checks a payload size at all — they would have to ask the author for the
+	     number, and here the schema already knows it. ]]
+	local tight = nw.command({
+		data = t.struct({ origin = t.vector3, seq = t.u16 }),
+		rate = 20,
+		authorize = allows,
+	}) :: any
+
+	equals("a tight schema derives an exact ceiling", tight.maxBytes, 14)
+
+	local loose = nw.command({ data = t.array(t.u8), rate = 20, authorize = allows }) :: any
+
+	equals("an unbounded array derives the most its prefix can express", loose.maxBytes, 65537)
+
+	--[[ The case a declaration is for: the type allows sixty-four kilobytes because the array has
+	     no bound, and the game never sends more than three hundred. Declaring the smaller number
+	     turns a theoretical ceiling into a real one. ]]
+	local tightened = nw.command({
+		data = t.array(t.u8),
+		rate = 20,
+		maxBytes = 300,
+		authorize = allows,
+	}) :: any
+
+	equals("a declaration tightens it", tightened.maxBytes, 300)
+
+	refuses("a ceiling above what the schema can reach", function()
+		nw.command({ data = t.struct({ seq = t.u16 }), rate = 20, maxBytes = 5000, authorize = allows })
+	end)
+
+	refuses("a fractional ceiling", function()
+		nw.command({ data = t.array(t.u8), rate = 20, maxBytes = 12.5, authorize = allows })
+	end)
+
+	refuses("a ceiling of zero", function()
+		nw.command({ data = t.array(t.u8), rate = 20, maxBytes = 0, authorize = allows })
+	end)
+
+	--[[ `maxBytes` on an outbound class is a type error, so its case lives in
+	     `tests/api_reject.luau` where a file is allowed to fail analysis. ]]
+end
+
 if failures > 0 then
 	error(`{failures} api assertions failed`)
 end

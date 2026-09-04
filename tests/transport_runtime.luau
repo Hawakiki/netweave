@@ -17,6 +17,7 @@
 local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
+local Config = require("../src/api/Config")
 local Context = require("../src/api/Context")
 local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
@@ -1510,6 +1511,221 @@ do
 	Observer.reset()
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Every channel has a byte ceiling, and the game declared none of it (PLAN-M3 D-5)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		The ceiling is derived from the schema, so it exists whether or not the author thought to
+		ask for one. `RESEARCH §3.7-F` records that no surveyed library checks a payload size at
+		all, and the reason is that they would have to ask — here the layout adds the bounds up.
+
+		Refused before the payload is decoded, and the batch steps over it: the length prefix is
+		what makes that possible, and it is the length that was wrong.
+	]]
+	local channel = outboundChannel(80, t.array(t.u8), { class = "signal", maxBytes = 4 })
+	byId[80] = channel
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, #value)
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { 1, 2 })
+	Batch.writePacket(channel, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
+	Batch.writePacket(channel, { 3, 4 })
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("an oversized packet does not reach the receive loop", survived)
+	equals("the packets under the ceiling were delivered", #got, 2)
+	equals("and the one over it was not", got[2], 2)
+	equals("it was reported once", #reported, 1)
+	check("at the budget stage", reported[1] ~= nil and string.find(reported[1], "budget:", 1, true) ~= nil)
+
+	channel.handler = nil
+	byId[80] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ The layout derives a ceiling for every schema, so the transport always has one to enforce.
+	     That it reaches a declared channel is `tests/api_runtime.luau`; that it is right is here. ]]
+	local channel = outboundChannel(81, t.struct({ origin = t.vector3, seq = t.u16 }), { class = "signal" })
+
+	equals("a tight schema derives an exact ceiling", channel.codec.maxSize, 14)
+	equals("which is what the packet actually costs", channel.codec.fixedSize, 14)
+
+	byId[81] = nil
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A batch cannot hold more than it is allowed to (PLAN-M3 D-6)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		Reading a batch to completion before dispatching any of it is not negotiable — a yielding
+		handler plus a global decode cursor attributes one player's bytes to another (`PLAN-M2`
+		phase 3) — and it means every decoded value in a batch is live at once.
+
+		`bench/RESULTS.md` measured the price: `ArrayHeavy` decode allocation went 1184.8 B to
+		9309.2 B on the same payload, because two hundred decoded values were alive where one had
+		been. The size of that batch is chosen by an untrusted client, which makes it a resource
+		limit rather than a performance note.
+
+		Past the bound the rest of the batch is refused *before* decode, not decoded and dropped:
+		refusing has to stay cheaper than accepting or the limit becomes the amplifier.
+	]]
+	local channel = outboundChannel(85, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[85] = channel
+
+	local delivered = 0
+	channel.handler = function()
+		delivered += 1
+	end
+
+	Config.configure({ limits = { pendingPerBatch = 4 } })
+
+	local inbound, reported = inboundOf(true, {})
+
+	for index = 1, 10 do
+		Batch.writePacket(channel, { a = index })
+	end
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("an oversized batch does not reach the receive loop", survived)
+	equals("only the bound was dispatched", delivered, 4)
+	equals("every packet past it was reported", #reported, 6)
+	check("at the budget stage", reported[1] ~= nil and string.find(reported[1], "budget:", 1, true) ~= nil)
+
+	Config.reset()
+	channel.handler = nil
+	byId[85] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ The bound is per batch, not a running total: the next batch from the same sender starts
+	     with an empty pending set. A limit that leaked across batches would blackhole a player
+	     after one bad frame, which is the failure `RESEARCH §3.7-K` is about. ]]
+	local channel = outboundChannel(86, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[86] = channel
+
+	local delivered = 0
+	channel.handler = function()
+		delivered += 1
+	end
+
+	Config.configure({ limits = { pendingPerBatch = 2 } })
+
+	local inbound = inboundOf(true, {})
+
+	for _ = 1, 3 do
+		Batch.writePacket(channel, { a = 1 })
+	end
+
+	local first, firstInstances = Buffer.take()
+	inbound.receive(first, firstInstances, alice)
+
+	equals("the first batch delivered its bound", delivered, 2)
+
+	reset()
+
+	for _ = 1, 2 do
+		Batch.writePacket(channel, { a = 1 })
+	end
+
+	local second, secondInstances = Buffer.take()
+	inbound.receive(second, secondInstances, alice)
+
+	equals("and the next batch starts fresh", delivered, 4)
+
+	Config.reset()
+	channel.handler = nil
+	byId[86] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		Nesting cannot evade the ceiling, because the ceiling is on bytes and nesting is paid for in
+		bytes. `t.array(t.array(t.u8, 0, 1000), 0, 1000)` derives 1,002,002 — honest, and useless as
+		a limit — so this is the schema a declared `maxBytes` exists for.
+
+		The measurement that settled the shape of this check: after `PLAN-M3` D-4 bounded a claim by
+		the bytes behind it, a hostile 1000x1000 packet costs **0.0238 us per byte** and an honest
+		packet of the same schema costs **0.0480** — the hostile one is *cheaper per byte*. Decode
+		work is proportional to payload size and no longer amplifiable, so bounding the bytes bounds
+		the work, and a separate per-element counter would charge every honest packet for a threat
+		that no longer exists.
+	]]
+	local nested = outboundChannel(87, t.array(t.array(t.u8, 0, 1000), 0, 1000), {
+		class = "signal",
+		maxBytes = 64,
+	})
+
+	byId[87] = nested
+
+	local delivered = 0
+	nested.handler = function()
+		delivered += 1
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ Under the ceiling: two inner arrays of ten. ]]
+	Batch.writePacket(nested, { { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, { 1, 2, 3 } })
+
+	--[[ Over it, by nesting rather than by one long array — which is the evasion the bound has to
+	     be immune to. ]]
+	local wide = {}
+
+	for outer = 1, 20 do
+		wide[outer] = { 1, 2, 3, 4, 5 }
+	end
+
+	Batch.writePacket(nested, wide)
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("a nested payload does not reach the receive loop", survived)
+	equals("the one under the ceiling arrived", delivered, 1)
+	equals("and the one that nested past it did not", #reported, 1)
+	check(
+		"refused at the budget stage",
+		reported[1] ~= nil and string.find(reported[1], "budget:", 1, true) ~= nil
+	)
+
+	equals("the derived ceiling on that schema is honest and useless", nested.codec.maxSize, 1002002)
+
+	nested.handler = nil
+	byId[87] = nil
+	Observer.reset()
+end
 reset()
 
 if failures > 0 then

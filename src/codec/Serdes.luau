@@ -964,6 +964,7 @@ end
 export type Codec = {
 	framing: "static" | "counted",
 	fixedSize: number?,
+	maxSize: number,
 	instances: number?,
 	write: (value: any) -> (),
 	read: () -> (any, string?),
@@ -1055,6 +1056,7 @@ function Serdes.build(layout: Ir.Layout): Codec
 	return {
 		framing = layout.framing,
 		fixedSize = layout.fixedSize,
+		maxSize = layout.maxSize,
 		instances = layout.instances,
 
 		write = function(value: any)

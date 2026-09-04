@@ -351,10 +351,23 @@ function Inbound.new(config: Config): Inbound
 	     yield, for the same reason `sender` is safe. ]]
 	local filling: Pending = pool[1]
 
+	--[[ Set when the pending set fills, cleared when a batch starts. Not a field on `Pending`
+	     because a batch that arrives inside another batch's dispatch has its own, and the outer
+	     one's state is restored around it the way `sender` and `filling` are. ]]
+	local full = false
+	local pendingCeiling = Settings.limitOf("pendingPerBatch")
+
 	local sink: Batch.Sink = {
 		resolve = resolve,
 
 		admit = function(channel: any, bytes: number): string?
+			--[[ Once the pending set is full the rest of the batch is refused here, before decode,
+			     rather than decoded and then dropped. Refusing has to stay cheaper than accepting or
+			     the limit becomes the amplifier. ]]
+			if full then
+				return `batch holds more than {pendingCeiling} packets; the rest were dropped`
+			end
+
 			return admit(channel, sender, bytes)
 		end,
 
@@ -381,7 +394,34 @@ function Inbound.new(config: Config): Inbound
 				return
 			end
 
+			--[[
+				The pending set is bounded, and the bound is the price of reading a batch to completion
+				before dispatching any of it.
+
+				That order is not negotiable — a yielding handler plus a global decode cursor attributes
+				one player's bytes to another (`PLAN-M2` phase 3) — but it means every decoded value in
+				a batch is live at once. The benchmark measured what that costs: `ArrayHeavy` decode
+				allocation went 1184.8 B to 9309.2 B on the same payload, because two hundred decoded
+				values were alive where one had been. The batch's size is chosen by an untrusted client,
+				which makes it a resource limit rather than a performance note (`PLAN-M3` D-6).
+
+				Past the bound the batch stops. Dispatching early to make room is the one thing that
+				cannot be done here, because it is the order the bound exists to protect.
+			]]
 			local count = filling.count + 1
+
+			if count > pendingCeiling then
+				full = true
+				report(
+					channel,
+					sender,
+					"budget",
+					`batch holds more than {pendingCeiling} packets; the rest were dropped`,
+					bytes
+				)
+				return
+			end
+
 			filling.count = count
 			filling.channels[count] = channel
 			filling.senders[count] = sender
@@ -403,14 +443,18 @@ function Inbound.new(config: Config): Inbound
 			     found it. ]]
 			local outerSender = sender
 			local outerFilling = filling
+			local outerFull = full
 
 			sender = from
 			filling = list
+			full = false
+			pendingCeiling = Settings.limitOf("pendingPerBatch")
 
 			Batch.read(packed, instances, sink)
 
 			sender = outerSender
 			filling = outerFilling
+			full = outerFull
 
 			dispatch(list)
 		end,

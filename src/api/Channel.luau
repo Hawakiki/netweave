@@ -71,6 +71,7 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	.primitive Primitive
 	.rate number? -- packets per second the sender may send. nil on outbound classes
 	.burst number? -- bucket depth; nil means one second at `rate`
+	.maxBytes number -- the most bytes a payload may claim; derived from the schema, tightened by declaration
 	.timeout number? -- `query` only, seconds
 	.authorize Check<T>? -- resolved from the declared policy at load
 	.audience Audience? -- outbound classes only
@@ -94,6 +95,7 @@ export type Channel<C, A, T, R> = {
 	primitive: Primitive,
 	rate: number?,
 	burst: number?,
+	maxBytes: number?,
 	timeout: number?,
 	authorize: Policy.Check<T>?,
 	audience: Audience.Audience<A>?,
@@ -187,7 +189,9 @@ type function forbid(spec, class, field)
 			.. "carry no authority by definition, and letting them approve requests would make "
 			.. "the class name a lie. If you need to approve it, it is a command.",
 		rate = "The server is the sender on this class, so there is nobody to budget.",
-		burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth " .. "of.",
+		burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth of.",
+		maxBytes = "This class is sent by the server, which is not a peer whose payload size needs "
+			.. "policing. The schema still gives it a ceiling.",
 		audience = "Only state and event have an audience; an inbound channel has exactly one "
 			.. "recipient, which is the server.",
 		timeout = "Only a query waits for a reply.",
@@ -323,6 +327,7 @@ end
 export type function OutboundPayload(spec, class)
 	forbid(spec, class, types.singleton("rate"))
 	forbid(spec, class, types.singleton("burst"))
+	forbid(spec, class, types.singleton("maxBytes"))
 	forbid(spec, class, types.singleton("authorize"))
 	forbid(spec, class, types.singleton("args"))
 	forbid(spec, class, types.singleton("returns"))
@@ -464,6 +469,26 @@ local function checkedBurst(spec: any, class: string, rate: number): number?
 	return burst
 end
 
+--[[
+	Optional, and only ever a tightening. The schema already gives every channel a ceiling, so this
+	exists for the case the schema cannot express: a channel whose type allows a megabyte because an
+	array is unbounded, but whose game never sends more than a few hundred bytes. Declaring the
+	smaller number turns a theoretical bound into a real one.
+]]
+local function checkedMaxBytes(spec: any, class: string): number?
+	local maxBytes = spec.maxBytes
+
+	if maxBytes == nil then
+		return nil
+	end
+
+	if type(maxBytes) ~= "number" or maxBytes ~= maxBytes or maxBytes < 1 or maxBytes % 1 ~= 0 then
+		error(`nw.{class} takes maxBytes as a whole number of bytes, at least 1, got {tostring(maxBytes)}`, 3)
+	end
+
+	return maxBytes
+end
+
 local function requirePolicy(spec: any, class: string): any
 	local authorize = spec.authorize
 
@@ -490,6 +515,8 @@ local FORBIDDEN_REASON: { [string]: string } = {
 		.. "name a lie.",
 	rate = "The server is the sender on this class, so there is nobody to budget.",
 	burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth of.",
+	maxBytes = "This class is sent by the server, which is not a peer whose payload size needs "
+		.. "policing. The schema still gives it a ceiling.",
 	audience = "Only state and event have an audience; an inbound channel has one recipient, "
 		.. "which is the server.",
 	timeout = "Only a query waits for a reply.",
@@ -564,6 +591,28 @@ local function make(
 		channel[field] = value
 	end
 
+	--[[
+		The byte ceiling, derived from the schema and tightened by a declaration if there is one.
+
+		Deriving it is what makes it universal: a game that declares nothing still gets a bound,
+		because every netweave type is bounded and the layout can add them up. A declared `maxBytes`
+		can only lower it — asking for more than the schema can produce is a number that could never
+		be reached, and accepting it would let an author believe they had set a limit.
+	]]
+	local derived = channel.codec.maxSize
+	local declared = channel.maxBytes
+
+	if declared and declared > derived then
+		error(
+			`nw.{class} declares maxBytes = {declared}, but this schema can never produce more than `
+				.. `{derived} bytes. A ceiling above what the schema can reach is not a limit — remove it, `
+				.. `or lower it to the size this channel should actually accept.`,
+			3
+		)
+	end
+
+	channel.maxBytes = declared or derived
+
 	return channel
 end
 
@@ -596,6 +645,7 @@ function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<
 	return make("command", "AuthorizedInbound", requireType(raw, "data", "command"), {
 		rate = rate,
 		burst = checkedBurst(raw, "command", rate),
+		maxBytes = checkedMaxBytes(raw, "command"),
 		authorize = requirePolicy(raw, "command"),
 	})
 end
@@ -634,6 +684,7 @@ function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>,
 	return make("intent", "AuthorizedInbound", requireType(raw, "data", "intent"), {
 		rate = rate,
 		burst = checkedBurst(raw, "intent", rate),
+		maxBytes = checkedMaxBytes(raw, "intent"),
 		unreliable = checkedUnreliable(raw, "intent"),
 	})
 end
@@ -673,6 +724,7 @@ function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>,
 	return make("signal", "UntrustedInbound", requireType(raw, "data", "signal"), {
 		rate = rate,
 		burst = checkedBurst(raw, "signal", rate),
+		maxBytes = checkedMaxBytes(raw, "signal"),
 		unreliable = checkedUnreliable(raw, "signal"),
 	})
 end
@@ -719,6 +771,7 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 	local channel = make("query", "AuthorizedInbound", requireType(raw, "args", "query"), {
 		rate = rate,
 		burst = checkedBurst(raw, "query", rate),
+		maxBytes = checkedMaxBytes(raw, "query"),
 		authorize = requirePolicy(raw, "query"),
 		timeout = timeout,
 		returns = returns,
@@ -749,7 +802,7 @@ end
 ]=]
 function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "state", { "rate", "burst", "authorize", "args", "returns", "timeout" })
+	rejectForbidden(raw, "state", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
 	return make("state", "Outbound", requireType(raw, "data", "state"), {
 		audience = requireAudience(raw, "state"),
@@ -777,7 +830,7 @@ end
 ]=]
 function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "event", { "rate", "burst", "authorize", "args", "returns", "timeout" })
+	rejectForbidden(raw, "event", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
 	return make("event", "Outbound", requireType(raw, "data", "event"), {
 		audience = requireAudience(raw, "event"),

@@ -78,8 +78,22 @@ documentation — a reader sees `nw.intent` and knows the server does not approv
 | `intent` | C→S | `data`, `rate` | `authorize` | constrained `T` |
 | `signal` | C→S | `data`, `rate` | `authorize` | `Untrusted<T>` |
 | `query` | C→S→C | `args`, `returns`, `rate`, `authorize`, `timeout` | — | `Trusted<T>` |
-| `state` | S→C | `data`, `audience` | `rate`, `burst`, `authorize` | `T` |
-| `event` | S→C | `data`, `audience` | `rate`, `burst`, `authorize` | `T` |
+| `state` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` | `T` |
+| `event` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` | `T` |
+
+**Every channel carries a byte ceiling, and it derived it from the schema.** Every netweave type is
+bounded — a number by its encoding, a string or array by its range, an unbounded array by the 65535
+its prefix can express — so the layout can add them up. `t.struct({ origin = t.vector3, seq = t.u16 })`
+can never be more than fourteen bytes, and a packet claiming more is refused before a byte of it is
+decoded, at stage `budget`, with the game having declared nothing. `RESEARCH §3.7-F` records that no
+surveyed library checks a payload size at all; the reason is that they would have to ask the author
+for the number.
+
+An inbound class may declare **`maxBytes`** to *tighten* that ceiling, and only to tighten it: asking
+for more than the schema can produce is refused rather than clamped, because a ceiling that can never
+be reached would let an author believe they had set a limit. It is for the schema whose bound is
+honest and useless — `t.array(t.array(t.u8, 0, 1000), 0, 1000)` derives 1,002,002, and `maxBytes = 2048`
+at `rate = 20` turns that into 40,960 bytes per second.
 
 Every class that declares a `rate` may also declare a **`burst`**, the depth of its token bucket.
 It defaults to `rate` — one second's worth, the safe reading of silence — and it cannot be
