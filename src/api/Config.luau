@@ -101,6 +101,7 @@ export type Rules = {
 	@interface Limits
 	@within Config
 	.queueCapacity number? -- packets held for a channel whose listener has not attached yet
+	.pendingPerBatch number? -- decoded packets held live while a batch is read, before any is dispatched
 	.unreliableBytes number? -- the largest unreliable payload that will be sent
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
 
@@ -112,6 +113,7 @@ export type Rules = {
 	| Limit | Read |
 	|---|---|
 	| `queueCapacity` | when a channel's queue is first created, which is its first refusal to a missing listener. A queue that already exists keeps the depth it was made with |
+	| `pendingPerBatch` | at the start of every batch |
 	| `unreliableBytes` | on every unreliable send, so it takes effect immediately and can only *lower* the ceiling — 908 is Roblox's limit, not netweave's |
 	| `repeatsPerDiagnostic` | on every report |
 
@@ -120,6 +122,7 @@ export type Rules = {
 ]=]
 export type Limits = {
 	queueCapacity: number?,
+	pendingPerBatch: number?,
 	unreliableBytes: number?,
 	repeatsPerDiagnostic: number?,
 }
@@ -335,6 +338,7 @@ table.freeze(RULES)
 
 local LIMITS: { [string]: { default: number, min: number, max: number } } = {
 	queueCapacity = { default = 256, min = 1, max = 65536 },
+	pendingPerBatch = { default = 256, min = 1, max = 65536 },
 	unreliableBytes = { default = 908, min = 1, max = 908 },
 	repeatsPerDiagnostic = { default = 3, min = 1, max = 1000 },
 }

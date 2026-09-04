@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 13
+-- netweave:expect 15
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -129,5 +129,22 @@ local function giveItem(_request: nw.Trusted<{ screen: number }>) end
 combat.server.openedMenu:listen(function(_ctx, opened)
 	giveItem(opened)
 end)
+
+--[[ 14. `maxBytes` on a class the server sends. The server is not a peer whose payload size needs
+     policing, and the schema gives every channel a ceiling regardless — so the field would be
+     configuring a check that does not apply to it. ]]
+local _oversizedEvent = nw.event({
+	data = t.struct({ seq = t.u16 }),
+	audience = nw.audience.everyone,
+	maxBytes = 4,
+})
+
+--[[ 15. And `burst`, for the same reason `rate` is forbidden here: the depth of a budget that
+     does not exist. ]]
+local _burstyEvent = nw.event({
+	data = t.struct({ seq = t.u16 }),
+	audience = nw.audience.everyone,
+	burst = 30,
+})
 
 return nil

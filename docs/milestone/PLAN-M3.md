@@ -108,13 +108,38 @@ question, not a safety one". **That is wrong and is struck through in this plan.
 attacker controls and does not pay for is an amplification. The reader grows as it reads, and no
 claim buys memory before the bytes behind it exist.
 
-### D-5 — Decode work is a budget, in the same accounting as bytes
+### D-5 — Every channel has a byte ceiling, derived from its schema
 
-`rate` counts packets and `maxBytes` counts bytes, and neither bounds work: a 5-byte packet can
-cost as much as a 900-byte one (D-4). A per-tick decode-work ceiling is charged per element read
-and per table allocated, refusing at stage `"budget"` when it is exhausted. This is the only limit
-that bounds the nested-array case — `t.array(t.array(t.u8))` — without inventing a rule about
-nesting depth.
+~~Decode work is a budget, in the same accounting as bytes. A per-tick decode-work ceiling is
+charged per element read and per table allocated.~~ **Corrected during phase 2, by measurement.**
+
+The premise was that `rate` counts packets and nothing bounds work, so a small packet could cost
+what a large one costs. D-4 removed that: once a claim is bounded by the bytes behind it, decode
+work is proportional to payload size. Measured on the nested schema D-5 was written for,
+`t.array(t.array(t.u8, 0, 1000), 0, 1000)`:
+
+| | per packet | per byte |
+|---|---|---|
+| hostile, 1000 x 1000 from 2002 bytes | 47.7 us | **0.0238 us** |
+| honest, one array of 1000, 1004 bytes | 48.2 us | **0.0480 us** |
+
+The hostile packet is *cheaper per byte* than the honest one. There is no amplification left to
+charge for, and a per-element counter would tax every honest packet for a threat that no longer
+exists.
+
+What is built instead is a byte ceiling, and it is **derived from the schema** rather than
+declared. Every netweave type is bounded — a number by its encoding, a string or array by its
+range, an unbounded array by the 65535 its prefix can express — so the layout can add them up and
+every channel gets a ceiling whether or not its author thought to ask for one.
+`t.struct({ origin = t.vector3, seq = t.u16 })` derives 14, and a packet claiming more is provably
+a lie, refused before decode at stage `"budget"`. `RESEARCH §3.7-F` records that no surveyed
+library checks a payload size at all; the reason is that they would have to ask the author for the
+number.
+
+A declared `maxBytes` can only *tighten* it, and asking for more than the schema can produce is
+refused rather than clamped — a ceiling that could never be reached would let an author believe
+they had set a limit. That is what the nested schema needs: it derives 1,002,002, which is honest
+and useless, and `maxBytes = 2048` at `rate = 20` bounds it to 40,960 bytes per second.
 
 ### D-6 — Read-then-dispatch stays, and gains a ceiling
 
@@ -233,15 +258,26 @@ settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
 - [x] Rate-limit the default sink itself — the thing that reports a flood must not become one.
       Three per `(channel, stage)`, then a line saying so; `limits.repeatsPerDiagnostic` moves it
 
-### Phase 2 — resource limits
+### Phase 2 — resource limits — **done bar the measurement**
 
-- [ ] Per-channel `maxBytes`, enforced before decode, refused at stage `"budget"`
-- [ ] A per-tick decode-work ceiling, charged per element and per table (D-5)
-- [ ] The nested-array case has a test: `t.array(t.array(t.u8))` cannot cost more than the ceiling
-      however the nesting is arranged
-- [ ] `Inbound`'s pending set is bounded; past the ceiling the batch stops and the remainder is
-      refused at stage `"queue"` (D-6)
+- [x] A byte ceiling per channel, enforced before decode, refused at stage `"budget"` — **derived
+      from the schema** rather than declared, so a game that asks for nothing still gets one. A
+      declared `maxBytes` may only tighten it, and asking for more than the schema can produce is
+      refused (D-5)
+- [x] ~~A per-tick decode-work ceiling, charged per element and per table.~~ **Not built, and D-5
+      carries the measurement.** After D-4 the hostile nested packet costs 0.0238 us per byte and
+      the honest one 0.0480 — decode work is proportional to payload size, so bounding the bytes
+      bounds the work and a per-element counter would tax every honest packet for a threat that no
+      longer exists
+- [x] The nested-array case has a test: nesting cannot evade the ceiling, because the ceiling is on
+      bytes and nesting is paid for in bytes. It also pins the derived figure, 1,002,002 — honest,
+      and useless as a limit, which is the case a declaration exists for
+- [x] `Inbound`'s pending set is bounded; past the ceiling the rest of the batch is refused
+      **before decode** rather than decoded and dropped, because refusing has to stay cheaper than
+      accepting. Reported at stage ~~`"queue"`~~ **`"budget"`**: `"queue"` means the game attached
+      no listener, and this is the sender being over a limit (D-6)
 - [ ] Re-measure `ArrayHeavy` decode allocation against the M2 figure of 9309.2 B and record both
+      — folded into the single Studio run at the end of the milestone
 
 ### Phase 3 — the trust boundary, decided
 

@@ -296,6 +296,27 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 		     the loop can step over it and carry on. ]]
 		local denial = sink.admit(channel, bytes)
 
+		--[[
+			The declared length against the channel's ceiling, before a byte of the payload is decoded.
+
+			The ceiling comes from the schema rather than from the game: every netweave type is
+			bounded, so `t.struct({ origin = t.vector3, seq = t.u16 })` can never be more than fourteen
+			bytes and a packet claiming more is provably a lie. `RESEARCH §3.7-F` records that no
+			surveyed library checks a payload size at all, and the reason is that they would have to ask
+			the author for the number — here the schema already knows it (`PLAN-M3` D-5).
+
+			After `admit`, not before. An oversized packet still crossed the wire and still cost the
+			server a read, so it spends the sender's budget like any other; checking first would let a
+			flood of provably invalid packets run free of the limiter built to stop floods.
+		]]
+		if not denial then
+			local ceiling = channel.maxBytes
+
+			if ceiling and payloadLength > ceiling then
+				denial = `payload claims {payloadLength} bytes, over the {ceiling} this channel can hold`
+			end
+		end
+
 		if denial then
 			sink.refuse(channel, "budget", denial, bytes)
 		else
