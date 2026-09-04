@@ -1,0 +1,91 @@
+# selene standard library additions, layered on the Roblox one.
+#
+# `types` exists only inside a `type function` body. selene has no way to model that scope — it
+# sees the identifier at file level and reports it undefined — and its lint filters are
+# file-global, so a scoped `allow` is not available either. Declaring the members used here is
+# the narrowest option: a typo in any other global is still caught.
+[selene]
+base = "roblox"
+name = "netweave"
+
+# Argument types are `any` rather than the real ones. A type function passes types around, and
+# `types.singleton(name)` where `name` came from another type is the normal case; constraining
+# these to `string` reported every such call as incorrect while catching nothing.
+["types.singleton"]
+args = [{ type = "any" }]
+
+["types.newtable"]
+args = [
+    { type = "any", required = false },
+    { type = "any", required = false },
+    { type = "any", required = false },
+]
+
+["types.newfunction"]
+args = [
+    { type = "any", required = false },
+    { type = "any", required = false },
+    { type = "any", required = false },
+]
+
+["types.unionof"]
+args = [{ type = "any" }, { type = "any" }]
+
+["types.intersectionof"]
+args = [{ type = "any" }, { type = "any" }]
+
+["types.optional"]
+args = [{ type = "any" }]
+
+# `copy` is what makes a type function callable from another one: a parameter that arrives generic
+# fails to reduce, and copying it first is the fix (`spike/declare/`).
+["types.copy"]
+args = [{ type = "any" }]
+
+["types.unknown"]
+property = true
+
+["types.string"]
+property = true
+
+["types.number"]
+property = true
+
+["types.boolean"]
+property = true
+
+["types.any"]
+property = true
+
+["types.never"]
+property = true
+
+# The type functions in `src/api/` call each other — a shared `forbid` writes one message per
+# forbidden field rather than six copies of it. selene does not bind a `type function` declaration
+# as a name, so each of those calls reads as an undefined global, and its lint filters are
+# file-global rather than scoped, so a per-file `allow` would switch the check off for real code in
+# the same file.
+#
+# Declaring them here is the narrowest option, and nothing is lost: `luau-lsp` reports an unknown
+# global under `--!strict`, and `lune run analyze` is part of the test suite. Renaming one of these
+# helpers means renaming it here too, which is the cost of the compromise.
+["payloadOf"]
+args = [{ type = "any" }, { type = "any" }]
+
+["propertyOf"]
+args = [{ type = "any" }, { type = "any" }]
+
+["requireRate"]
+args = [{ type = "any" }, { type = "any" }]
+
+["requireData"]
+args = [{ type = "any" }, { type = "any" }, { type = "any" }, { type = "any" }]
+
+["forbid"]
+args = [{ type = "any" }, { type = "any" }, { type = "any" }]
+
+["brandedAs"]
+args = [{ type = "any" }, { type = "any" }]
+
+["channelView"]
+args = [{ type = "any" }, { type = "any" }]

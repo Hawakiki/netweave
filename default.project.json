@@ -1,0 +1,7 @@
+{
+  "name": "netweave",
+  "emitLegacyScripts": false,
+  "tree": {
+    "$path": "src"
+  }
+}

@@ -1,0 +1,4 @@
+# Vendored competitor sources and their generated output. Not ours to format.
+_refsrc/
+bench/vendor/
+tools/

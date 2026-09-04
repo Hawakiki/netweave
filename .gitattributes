@@ -1,0 +1,14 @@
+# The working tree is LF, and stays LF on every platform.
+#
+# Git on Windows defaults to converting on checkout, which would rewrite every file in the
+# repository the first time it is cloned and put `stylua --check` and the analyzer's line numbers
+# out of step with what was committed. Roblox, lune and every tool here read LF fine.
+* text=auto eol=lf
+
+# Vendored competitor sources are evidence, not this project's code. Never diffed, never blamed.
+_refsrc/** linguist-vendored
+bench/vendor/** linguist-vendored
+
+# Generated: a Roblox API dump for selene, and the analyzer's type definitions.
+roblox.yml linguist-generated
+tools/globalTypes.d.luau linguist-generated
