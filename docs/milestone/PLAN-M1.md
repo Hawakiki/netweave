@@ -1,8 +1,8 @@
 # PLAN-M1 — Declaration Surface and L1 Codec
 
-**Status:** all six phases landed; **not closed.** Six of eight acceptance criteria are met, one
-partially and one missed, and both open items are the same encode-side defect — identified, fixed,
-and awaiting one re-measurement (`bench/Recheck.rbxl`). See §9.
+**Status: closed.** Six of eight acceptance criteria met, one partially, one missed. The miss is
+`ArrayHeavy` encode throughput; its cause was isolated by a second measurement rather than guessed,
+and implementing the fix is M2's opening item. See §9.
 **Depends on:** M0 (baseline harness and numbers), `docs/DESIGN-API.md` (agreed API shape)
 **Blocks:** M2 (transport: batching, budgets, audience evaluation, intent coalescing)
 
@@ -289,8 +289,10 @@ And one assumption is now measured rather than assumed: **`src/netweave.luau` re
       `RESEARCH §3.10` records it. The claim is narrowed rather than deleted: allocation coalescing
       is a code generator's advantage **on encode only**, and on the same payload in the same run
       the runtime schema wins decode.
-- [ ] **Re-measure `ArrayHeavy` after the encode fix.** `bench/Recheck.rbxl` runs netweave against
-      Blink and Zap over nine cells, about ten minutes.
+- [x] **Re-measured `ArrayHeavy` after the encode fix** — `bench/runs/2026-09-04-recheck.json`.
+      **netweave stayed at exactly 85** while Blink went 139 to 144 and Zap 116 to 120 on a
+      slightly quicker machine, so the gap widened to 1.69x. The discriminating test came back
+      against the adapter hypothesis and left the other standing.
 
       ~~The bench adapter's two `Buffer.save()` tables per send are the likeliest cause of the one
       acceptance criterion this milestone misses.~~ **Too small to be.** Two tables per send is a
@@ -300,10 +302,12 @@ And one assumption is now measured rather than assumed: **`src/netweave.luau` re
       `ArrayHeavy` packet, 120,000 a frame, against six for a flag packet.
 
       That is D-2's first layout pass, computed and then not used: `Ir.lower` produces `fixedSize`,
-      `Serdes.build` copies it onto the `Codec`, and nothing reads it. The re-measurement is
-      therefore a **discriminating test rather than a confirmation** — if `ArrayHeavy` encode stays
-      near 85 while encode allocation drops to near zero, the adapter was not the cause and the
-      missing pre-allocation is.
+      `Serdes.build` copies it onto the `Codec`, and nothing reads it.
+
+      **Confirmed.** The fix landed where it should — on the flag schemas, where the two tables
+      *were* the whole measurement, encode allocation fell from 609.3 B to 81.92 B, which is Zap's
+      figure to the decimal — and moved the `ArrayHeavy` framerate not at all. Implementing D-2's
+      first pass is M2's opening item.
 
 ## 7. Acceptance criteria
 
@@ -364,9 +368,9 @@ is measured next to Blink, Zap, ByteNet and a raw `RemoteEvent` rather than argu
 | 2 | Round-trip at every constraint boundary | **met** — `tests/serdes_runtime.luau` and `tests/roblox_runtime.luau`, the latter run in Studio |
 | 3 | No adversarial input reaches `error()` | **met** — truncation, out-of-range, non-finite, unknown tag, missing instance, plus a 4,200-case fuzz |
 | 4 | Bytes equal to Blink and Zap on `ArrayHeavy`, within one byte of Zap on `FlagIdiomatic` | **met** — 601 and 601, 8 against 7 |
-| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.64x of Blink on encode. Met on both flag families, and netweave is fastest of all five on `FlagNaive` |
+| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.69x of Blink on encode, confirmed by re-measurement. Met on both flag families, where the whole field is inside the harness's own 14% noise |
 | 6 | Decode allocation at or below ByteNet's | **met** — 389 B against 520 B, though Zap's 65 B in the same run resets what the bar should be |
-| 7 | No allocation on the receive hot path | **receive path met; send path not** — two causes, one fixed in the bench adapter and one in `Serdes` itself, deferred to M2 |
+| 7 | No allocation on the receive hot path | **receive path met; send path improved, not closed** — the adapter's two tables per send are gone, measured; `Serdes` still allocates per field, deferred to M2 |
 | 8 | `stylua --check`, `selene`, `lune run bench/check` pass | **met** |
 
 **Six of eight met, one partially, one missed**, and both open items are on the encode side.
@@ -378,9 +382,18 @@ so one `ArrayHeavy` packet costs 600 allocations and a frame of them costs 120,0
 packet costs six. That is why the gap appears on exactly one schema family and nowhere else, and
 it is a code change in `src/codec/`, not a benchmark artifact.
 
-Doing it is deliberately left to M2 rather than smuggled into M1's closing hours. The theme of
-this project is that the guarantees come first and the optimisation follows the measurement; the
+A second run separated the two causes rather than leaving the attribution to argument: with the
+adapter fixed, the flag schemas' encode allocation fell to Zap's exact figure and `ArrayHeavy`
+throughput did not move by one frame. That is what makes the remaining item a known task instead
+of an open question.
+
+Doing it is deliberately left to M2 rather than smuggled into M1's closing hours. The theme of this
+project is that the guarantees come first and the optimisation follows the measurement; the
 measurement now exists and says precisely where to spend.
+
+And it says one more thing worth carrying forward: **the harness cannot resolve differences under
+about 15%.** netweave's two flag cells run the same schema through the same code and differ by 14%
+in the same run. Every claim M2 makes from this harness has to clear that bar.
 
 ### Against the risks
 
