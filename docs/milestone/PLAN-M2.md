@@ -274,7 +274,7 @@ an amplifier. Mitigation: measure the refusal path specifically, not just the ac
 treat "denial is cheaper than acceptance" as a criterion rather than an assumption.
 
 **R-3 — audience evaluation per publish does not scale.**
-`nearby(120)` runs per publish, and `DESIGN-API.md` §10.4 left open whether that is per-subject or
+`nearby(120)` runs per publish, and `DESIGN-API.md` §11.4 left open whether that is per-subject or
 cached per tick. At 100 players and a 60 Hz state channel the difference is four orders of
 magnitude. Mitigation: decide it in phase 2 with a measurement, and write the answer into §10.4
 rather than leaving it open a second time.

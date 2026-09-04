@@ -35,6 +35,7 @@
 ]]
 
 local Audience = require("./Audience")
+local Config = require("./Config")
 local Policy = require("./Policy")
 local Serdes = require("../codec/Serdes")
 local Types = require("../types")
@@ -69,6 +70,7 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	.class Class
 	.primitive Primitive
 	.rate number? -- packets per second the sender may send. nil on outbound classes
+	.burst number? -- bucket depth; nil means one second at `rate`
 	.timeout number? -- `query` only, seconds
 	.authorize Check<T>? -- resolved from the declared policy at load
 	.audience Audience? -- outbound classes only
@@ -91,6 +93,7 @@ export type Channel<C, A, T, R> = {
 	class: Class,
 	primitive: Primitive,
 	rate: number?,
+	burst: number?,
 	timeout: number?,
 	authorize: Policy.Check<T>?,
 	audience: Audience.Audience<A>?,
@@ -184,6 +187,7 @@ type function forbid(spec, class, field)
 			.. "carry no authority by definition, and letting them approve requests would make "
 			.. "the class name a lie. If you need to approve it, it is a command.",
 		rate = "The server is the sender on this class, so there is nobody to budget.",
+		burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth " .. "of.",
 		audience = "Only state and event have an audience; an inbound channel has exactly one "
 			.. "recipient, which is the server.",
 		timeout = "Only a query waits for a reply.",
@@ -318,6 +322,7 @@ end
 ]=]
 export type function OutboundPayload(spec, class)
 	forbid(spec, class, types.singleton("rate"))
+	forbid(spec, class, types.singleton("burst"))
 	forbid(spec, class, types.singleton("authorize"))
 	forbid(spec, class, types.singleton("args"))
 	forbid(spec, class, types.singleton("returns"))
@@ -372,6 +377,44 @@ end
 	`rate` is checked at declaration rather than trusted, because G2 says there is no unlimited and
 	a `rate` of `math.huge` would be exactly that with the type system none the wiser.
 ]]
+
+--[[
+	A rate above this is documentation, not a limit. One client at 60 fps sending 166 packets a
+	frame is already an order of magnitude past any shipped game, so a declaration above it admits
+	everything the platform can physically deliver — which is what G2 exists to stop being written
+	by accident.
+
+	It is a lint rather than a rejection because the number is legitimate in a benchmark, where the
+	point is to measure the library and not the budget. `bench/src/shared/Modes/netweave.luau`
+	declares 1e6 and turns this rule off, in that order, which is the intended shape: a considered
+	exception, written down.
+]]
+local BINDING_RATE = 10000
+
+local function lintRate(rate: number, class: string)
+	if rate <= BINDING_RATE then
+		return
+	end
+
+	local level = Config.severityOf("rateUnbounded")
+
+	if level == "off" then
+		return
+	end
+
+	local message = `nw.{class} declares rate = {rate}, which no client can reach — the channel is `
+		.. `effectively unlimited (netweave guarantee G2). Declare the rate the game actually needs, `
+		.. `or set rules.rateUnbounded = "off" if this is deliberate.`
+
+	--[[ This one fires on the game's own declaration rather than on wire data, which is why it is
+	     allowed to raise at all. G4 covers the receive path; a declaration is programmer error and
+	     `CLAUDE.md` §4 says that is what raising is for. ]]
+	if Config.raises("rateUnbounded") then
+		error(message, 4)
+	end
+
+	warn(`[netweave] {message}`)
+end
 local function checkedRate(spec: any, class: string): number
 	local rate = spec.rate
 
@@ -383,7 +426,42 @@ local function checkedRate(spec: any, class: string): number
 		)
 	end
 
+	lintRate(rate, class)
+
 	return rate
+end
+
+--[[
+	The depth of the bucket, and optional: omitting it means one second.s worth, which is the safe
+	reading of silence. Declaring it is how a game says "this channel is bursty" — an input the codec
+	sends in a flurry on a key press and then not at all — without also raising the sustained rate,
+	which is what a game would otherwise have to do and is the thing `rate` exists to bound.
+
+	Below `rate` is refused rather than clamped. A depth under the rate cannot be honoured: tokens
+	accrue at `rate` per second and the cap would throw the difference away every second, so the
+	channel would run at the depth and the declared rate would be fiction.
+]]
+local function checkedBurst(spec: any, class: string, rate: number): number?
+	local burst = spec.burst
+
+	if burst == nil then
+		return nil
+	end
+
+	if type(burst) ~= "number" or burst ~= burst or burst == math.huge or burst % 1 ~= 0 then
+		error(`nw.{class} takes burst as a whole number of packets, got {tostring(burst)}`, 3)
+	end
+
+	if burst < rate then
+		error(
+			`nw.{class} declares burst = {burst} below rate = {rate}. The bucket refills at the rate, `
+				.. `so a depth under it would be discarded every second and the rate would never be `
+				.. `reached. Raise the burst, or lower the rate.`,
+			3
+		)
+	end
+
+	return burst
 end
 
 local function requirePolicy(spec: any, class: string): any
@@ -411,6 +489,7 @@ local FORBIDDEN_REASON: { [string]: string } = {
 		.. "no authority by definition, and letting them approve requests would make the class "
 		.. "name a lie.",
 	rate = "The server is the sender on this class, so there is nobody to budget.",
+	burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth of.",
 	audience = "Only state and event have an audience; an inbound channel has one recipient, "
 		.. "which is the server.",
 	timeout = "Only a query waits for a reply.",
@@ -510,8 +589,13 @@ function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<
 	local raw: any = spec
 	rejectForbidden(raw, "command", { "audience", "args", "returns", "timeout", "unreliable" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "command")
+
 	return make("command", "AuthorizedInbound", requireType(raw, "data", "command"), {
-		rate = checkedRate(raw, "command"),
+		rate = rate,
+		burst = checkedBurst(raw, "command", rate),
 		authorize = requirePolicy(raw, "command"),
 	})
 end
@@ -543,8 +627,13 @@ function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>,
 	local raw: any = spec
 	rejectForbidden(raw, "intent", { "authorize", "audience", "args", "returns", "timeout" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "intent")
+
 	return make("intent", "AuthorizedInbound", requireType(raw, "data", "intent"), {
-		rate = checkedRate(raw, "intent"),
+		rate = rate,
+		burst = checkedBurst(raw, "intent", rate),
 		unreliable = checkedUnreliable(raw, "intent"),
 	})
 end
@@ -577,8 +666,13 @@ function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>,
 	local raw: any = spec
 	rejectForbidden(raw, "signal", { "authorize", "audience", "args", "returns", "timeout" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "signal")
+
 	return make("signal", "UntrustedInbound", requireType(raw, "data", "signal"), {
-		rate = checkedRate(raw, "signal"),
+		rate = rate,
+		burst = checkedBurst(raw, "signal", rate),
 		unreliable = checkedUnreliable(raw, "signal"),
 	})
 end
@@ -606,6 +700,10 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 	local raw: any = spec
 	rejectForbidden(raw, "query", { "data", "audience", "unreliable" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "query")
+
 	local timeout = raw.timeout
 
 	if type(timeout) ~= "number" or timeout ~= timeout or timeout <= 0 or timeout == math.huge then
@@ -619,7 +717,8 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 	local returns = requireType(raw, "returns", "query")
 
 	local channel = make("query", "AuthorizedInbound", requireType(raw, "args", "query"), {
-		rate = checkedRate(raw, "query"),
+		rate = rate,
+		burst = checkedBurst(raw, "query", rate),
 		authorize = requirePolicy(raw, "query"),
 		timeout = timeout,
 		returns = returns,
@@ -650,7 +749,7 @@ end
 ]=]
 function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "state", { "rate", "authorize", "args", "returns", "timeout" })
+	rejectForbidden(raw, "state", { "rate", "burst", "authorize", "args", "returns", "timeout" })
 
 	return make("state", "Outbound", requireType(raw, "data", "state"), {
 		audience = requireAudience(raw, "state"),
@@ -678,7 +777,7 @@ end
 ]=]
 function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "event", { "rate", "authorize", "args", "returns", "timeout" })
+	rejectForbidden(raw, "event", { "rate", "burst", "authorize", "args", "returns", "timeout" })
 
 	return make("event", "Outbound", requireType(raw, "data", "event"), {
 		audience = requireAudience(raw, "event"),

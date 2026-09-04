@@ -33,6 +33,7 @@
 local Batch = require("./Batch")
 local Buffer = require("../codec/Buffer")
 local Link = require("./Link")
+local Config = require("../api/Config")
 local Observer = require("../api/Observer")
 local Recipients = require("./Recipients")
 
@@ -55,7 +56,10 @@ local Outbound = {}
 	packet that passes it can still be dropped if it carries many instances, and that is stated
 	rather than papered over.
 ]]
-local UNRELIABLE_LIMIT = 908
+--[[ Roblox refuses an unreliable payload over 908 bytes, so this is a ceiling rather than a
+     preference: `nw.configure` can only lower it. `RESEARCH §3.7-F` records that none of the four
+     surveyed libraries checks it at all. ]]
+local UNRELIABLE_CEILING = 908
 
 --[=[
 	@prop EVERYONE any
@@ -204,7 +208,9 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 		local packed, instances = Buffer.take()
 		local size = buffer.len(packed)
 
-		if size > UNRELIABLE_LIMIT then
+		local ceiling = math.min(Config.limitOf("unreliableBytes") or UNRELIABLE_CEILING, UNRELIABLE_CEILING)
+
+		if size > ceiling then
 			--[[ Refused here rather than dropped by Roblox there. A payload over the limit
 			     disappears silently on the wire, and none of the three surveyed libraries checks
 			     for it (`RESEARCH §3.7-F`). ]]
@@ -212,7 +218,7 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 				channel.qualified,
 				if all or destination == SERVER then nil else destination,
 				"send",
-				`unreliable payload is {size} bytes, over the {UNRELIABLE_LIMIT} byte limit`,
+				`unreliable payload is {size} bytes, over the {ceiling} byte limit`,
 				size
 			)
 			return

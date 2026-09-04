@@ -53,6 +53,7 @@
 local Audience = require("./api/Audience")
 local Driver = require("./transport/Driver")
 local Channel = require("./api/Channel")
+local Config = require("./api/Config")
 local Context = require("./api/Context")
 local Namespace = require("./api/Namespace")
 local Observer = require("./api/Observer")
@@ -118,6 +119,72 @@ nw.validate = Trust.validate
 
 nw.observe = Observer.observe
 
+-- Settings --------------------------------------------------------------------------------------
+
+--[=[
+	@within netweave
+	@function configure
+	@param settings Config.Settings
+
+	Global settings, in the shape ESLint made familiar.
+
+	```lua
+	nw.configure({
+		rules = {
+			budget = "warn",     -- a sender over its declared rate
+			authorize = "error", -- every refusal, with a traceback
+			handler = "warn",
+		},
+		limits = { queueCapacity = 512 },
+	})
+	```
+
+	Call it before declaring channels: limits are read when the transport builds the thing they
+	limit, and a queue that already exists keeps the capacity it was created with.
+
+	:::caution `"off"` is discouraged, and it is not an off switch
+	No severity turns enforcement off. A packet refused at `budget` is refused whatever `budget` is
+	set to — `"off"` silences netweave's console output for that stage and nothing else, and
+	callbacks attached with [netweave.observe] keep receiving it.
+
+	Reach for `"off"` when a stage is *expected* to fire in normal play and the log is drowning
+	something else out — a `signal` channel that refuses under load by design, say. Reaching for it
+	because a warning is annoying removes the only notice a game gets that it is dropping traffic,
+	which is the failure `RESEARCH §3.7-K` documents in Warp and the reason these defaults are on.
+	:::
+]=]
+nw.configure = function<S>(settings: S & Config.Settings): Config.CheckedSettings<S, Config.Snapshot>
+	Config.configure(settings)
+
+	--[[
+		`contextGuard` is applied here rather than read inside `Context` because the guard is
+		checked once per packet and `Config` would be a second table index on that path. Pushing it
+		at configure time keeps the read side a single upvalue, which is what `CLAUDE.md` §4 asks
+		of anything the receive loop touches.
+	]]
+	local guard = Config.contextGuard()
+
+	if guard ~= nil then
+		Context.setGuarded(guard)
+	end
+
+	--[[ The declared return is a type function the analyzer cannot reduce while `S` is free, so the
+	     cast is the only way to say "this is that". The type function is in the signature for its
+	     `error()`, which is what rejects a misspelled rule at the call site; the value handed back
+	     is a plain snapshot either way. ]]
+	return Config.snapshot() :: any
+end
+
+--[=[
+	@within netweave
+	@prop config Config
+	@within netweave
+
+	The settings themselves: `nw.config.snapshot()` for what is in force, `nw.config.describe()`
+	for every rule with its default and one line on what it reports.
+]=]
+nw.config = Config
+
 --[=[
 	@within netweave
 	@function namespace
@@ -180,6 +247,8 @@ export type Rejection = Observer.Rejection
 export type Stage = Observer.Stage
 export type Protocol = Namespace.Protocol
 export type Views<D> = View.Views<D>
+export type Severity = Config.Severity
+export type Settings = Config.Settings
 
 --[=[
 	@prop internal table
@@ -191,6 +260,7 @@ export type Views<D> = View.Views<D>
 	a game has no reason to undo.
 ]=]
 nw.internal = table.freeze({
+	config = Config,
 	transport = Transport,
 	context = Context,
 	observer = Observer,

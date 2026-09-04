@@ -63,6 +63,15 @@ return function(canonical): Adapter
 	]]
 	nw.internal.context.setGuarded(false)
 
+	--[[
+		The rate below is a million packets a second, which is exactly what `rules.rateUnbounded`
+		exists to warn about — and here it is correct: the harness offers hundreds of packets per
+		step and a budget that bound them would make this a measurement of the budget. Turning the
+		rule off beside the declaration it is about is the intended shape, and is why the rule is a
+		lint rather than a refusal.
+	]]
+	nw.configure({ rules = { rateUnbounded = "off" } })
+
 	-- -----------------------------------------------------------------------------------------
 	-- Schemas
 	-- -----------------------------------------------------------------------------------------

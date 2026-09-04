@@ -663,6 +663,108 @@ end
 
 -- ---------------------------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------------------------
+-- A claim is not paid for until it is honoured (PLAN-M3 D-4)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		`arrayReader` allocated `table.create(count)` from the wire's claimed count before reading a
+		single element, so a two-byte packet claiming 65535 bought a 65535-slot table. The packet
+		was then correctly *rejected* — the rejection was free, the allocation was not.
+
+		A source comment on that line read "the length was already bounded, so this is a cost
+		question, not a safety one". It is struck through in `PLAN-M3` D-4: a cost an attacker
+		controls and does not pay for is an amplification. At 0.17 ms per hostile packet and roughly
+		five bytes to express one, a single 900-byte batch bought about 31 ms of decode.
+
+		Zap has the same shape (`_refsrc/zap/zap/src/irgen/des.rs:298`) and no bounds check on its
+		buffer reads at all, so the equivalent packet there raises and takes the whole batch. The
+		half netweave already had right was the recovery; this is the half it did not.
+	]]
+	local codec = Serdes.fromSchema(t.array(t.u8))
+
+	local hostile = buffer.create(2)
+	buffer.writeu16(hostile, 0, 65535)
+
+	Buffer.beginRead(hostile, nil)
+	local value, failure = codec.read()
+
+	equals("a claim past the packet decodes to nothing", value, nil)
+	check("and is refused", failure ~= nil)
+	check(
+		"naming the claim rather than the byte it died on",
+		failure ~= nil and string.find(failure, "65535", 1, true) ~= nil
+	)
+
+	--[[
+		The functional assertion above is the test; this is the reason the test exists. The bound is
+		deliberately loose — 20x against a measured 690x — because a timing assertion that is tight
+		is a timing assertion that fails on somebody else's machine.
+	]]
+	local honest = buffer.create(3)
+	buffer.writeu16(honest, 0, 1)
+	buffer.writeu8(honest, 2, 7)
+
+	local function timed(packed: buffer, runs: number): number
+		local start = os.clock()
+
+		for _ = 1, runs do
+			Buffer.beginRead(packed, nil)
+			codec.read()
+		end
+
+		return os.clock() - start
+	end
+
+	timed(honest, 200)
+
+	local honestCost = timed(honest, 2000)
+	local hostileCost = timed(hostile, 2000)
+
+	check(
+		`a refused claim costs about what an honest packet costs (honest {honestCost}, hostile {hostileCost})`,
+		hostileCost < honestCost * 20 + 0.05
+	)
+end
+
+do
+	--[[ The bound is the bytes that remain, not a constant, so a claim that *is* backed by bytes
+	     still decodes. This is the case a naive cap would have broken. ]]
+	local codec = Serdes.fromSchema(t.array(t.u8))
+
+	local honest = buffer.create(302)
+	buffer.writeu16(honest, 0, 300)
+
+	for index = 0, 299 do
+		buffer.writeu8(honest, 2 + index, index % 256)
+	end
+
+	Buffer.beginRead(honest, nil)
+	local value, failure = codec.read()
+
+	equals("a claim the packet can back decodes", failure, nil)
+	equals("with every element", if value then #value else 0, 300)
+	--[[ The three-hundredth element was written as `299 % 256`. ]]
+	equals("in order", if value then value[300] else nil, 43)
+end
+
+do
+	--[[ An element whose size is not known at build time cannot be bounded by multiplication, so
+	     the pre-allocation is capped at the bytes available instead. The claim still fails, and it
+	     still fails without buying memory for it first. ]]
+	local codec = Serdes.fromSchema(t.array(t.string(0, 200)))
+
+	local hostile = buffer.create(2)
+	buffer.writeu16(hostile, 0, 65535)
+
+	Buffer.beginRead(hostile, nil)
+	local value, failure = codec.read()
+
+	equals("a dynamic element claim decodes to nothing", value, nil)
+	check("and is refused", failure ~= nil)
+end
+
 if failures > 0 then
 	error(`{failures} serdes assertions failed`)
 end
