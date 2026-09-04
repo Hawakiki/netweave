@@ -1278,11 +1278,18 @@ do
 		end
 	end
 
+	--[[ Alice sends two, bob sends four. The sizes matter: the pending lists are pooled, and an
+	     interleaved batch shorter than the one it interrupts would not reach the entries the outer
+	     dispatch has yet to visit. A first version of this test used one packet for bob and passed
+	     against code that was wrong. ]]
 	Batch.writePacket(channel, { a = 1 })
 	Batch.writePacket(channel, { a = 2 })
 	local alicePacket = Buffer.take()
 
-	Batch.writePacket(channel, { a = 9 })
+	for value = 6, 9 do
+		Batch.writePacket(channel, { a = value })
+	end
+
 	local bobPacket = Buffer.take()
 
 	local first = coroutine.create(function()
@@ -1297,14 +1304,15 @@ do
 	--[[ Bob's batch arrives while alice's is suspended mid-dispatch. ]]
 	inbound.receive(bobPacket, nil, bob)
 
-	equals("bob was served", #delivered, 2)
-	equals("as bob", delivered[2], "bob:9")
+	equals("bob was served", #delivered, 5)
+	equals("as bob", delivered[2], "bob:6")
+	equals("all of him", delivered[5], "bob:9")
 
 	--[[ And alice's second packet is still alice's, read from alice's bytes. ]]
 	coroutine.resume(suspended :: thread)
 
-	equals("alice's batch finished", #delivered, 3)
-	equals("with her own second packet", delivered[3], "alice:2")
+	equals("alice's batch finished", #delivered, 6)
+	equals("with her own second packet", delivered[6], "alice:2")
 
 	channel.handler = nil
 	byId[48] = nil
