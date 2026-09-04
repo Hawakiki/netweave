@@ -17,6 +17,7 @@
 local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
+local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
 local Observer = require("../src/api/Observer")
 local Outbound = require("../src/transport/Outbound")
@@ -926,6 +927,388 @@ do
 	out.flush()
 
 	equals("two separate batches", #log, 3)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Inbound
+-- ---------------------------------------------------------------------------------------------
+
+local function inboundOf(isServer: boolean, deny: { [string]: string }): (Inbound.Inbound, { string })
+	local reported: { string } = {}
+
+	Observer.reset()
+	Observer.observe(function(rejection)
+		table.insert(reported, `{rejection.stage}:{rejection.channel}`)
+	end)
+
+	local inbound = Inbound.new({
+		resolve = function(id: number): any
+			return byId[id]
+		end,
+
+		admit = function(channel: any, _who: any?, _bytes: number): string?
+			return deny[channel.qualified]
+		end,
+
+		isServer = isServer,
+	})
+
+	return inbound, reported
+end
+
+--[[ A policy that answers however the test says, in the shape `src/api/Policy.luau` produces. ]]
+local function verdictOf(ok: boolean, reason: string?): any
+	return function()
+		return { ok = ok, value = nil, reason = reason }
+	end
+end
+
+do
+	reset()
+
+	local channel = outboundChannel(40, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[40] = channel
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, value.a)
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	Batch.writePacket(channel, { a = 2 })
+
+	inbound.receive(Buffer.take(), nil, alice)
+
+	equals("both were dispatched", #got, 2)
+	equals("in order", got[2], 2)
+	equals("and nothing was reported", #reported, 0)
+
+	channel.handler = nil
+	byId[40] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ A policy that denies stops the handler and reports at the authorize stage. The packet
+	     decoded and was in budget; what refused it was the game's own rule. ]]
+	local channel = outboundChannel(41, t.struct({ a = t.u8 }), {
+		class = "command",
+		authorize = verdictOf(false, "not today"),
+	})
+
+	byId[41] = channel
+
+	local called = 0
+	channel.handler = function()
+		called += 1
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	inbound.receive(Buffer.take(), nil, alice)
+
+	equals("the handler did not run", called, 0)
+	equals("and it was reported", #reported, 1)
+	check("at the authorize stage", string.find(reported[1], "authorize:", 1, true) ~= nil)
+
+	channel.handler = nil
+	byId[41] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		A handler is game code and can throw. If it threw into the receive loop it would abort the
+		batch — the exact failure G5 exists to prevent, reintroduced by the game rather than by a
+		peer. The packets behind it belong to other players.
+	]]
+	local channel = outboundChannel(42, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[42] = channel
+
+	local survived: { number } = {}
+
+	channel.handler = function(_ctx: any, value: any)
+		if value.a == 2 then
+			error("a handler that misbehaves")
+		end
+
+		table.insert(survived, value.a)
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	Batch.writePacket(channel, { a = 2 })
+	Batch.writePacket(channel, { a = 3 })
+
+	local ok = pcall(inbound.receive, Buffer.take(), nil, alice)
+
+	check("the batch did not raise", ok)
+	equals("the packets around it survived", #survived, 2)
+	equals("the one after the throw", survived[2], 3)
+	equals("and the throw was reported", #reported, 1)
+	check("at the handler stage", string.find(reported[1], "handler:", 1, true) ~= nil)
+
+	channel.handler = nil
+	byId[42] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ Refused before the payload is decoded, so a flood costs an id read and a seek rather than
+	     a deserialisation (`PLAN-M2` R-2). ]]
+	local channel = outboundChannel(43, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[43] = channel
+
+	local called = 0
+	channel.handler = function()
+		called += 1
+	end
+
+	local inbound, reported = inboundOf(true, { ["test.c43"] = "over budget" })
+
+	Batch.writePacket(channel, { a = 1 })
+	inbound.receive(Buffer.take(), nil, alice)
+
+	equals("the handler did not run", called, 0)
+	check("and it was reported at the budget stage", string.find(reported[1], "budget:", 1, true) ~= nil)
+
+	channel.handler = nil
+	byId[43] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Intent coalescing
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		At most one intent per player per tick. Stale input has no value, so an attacker who fills
+		the rate budget cannot convert it into per-packet server work — which is what makes `rate`
+		on an intent a number that means something (`DESIGN-API.md` §3).
+	]]
+	local channel = outboundChannel(44, t.struct({ pitch = t.u8 }), { class = "intent" })
+	byId[44] = channel
+
+	local delivered: { any } = {}
+
+	channel.handler = function(ctx: any, value: any)
+		table.insert(delivered, { who = ctx.player, pitch = value.pitch })
+	end
+
+	local inbound = inboundOf(true, {})
+
+	for pitch = 1, 20 do
+		Batch.writePacket(channel, { pitch = pitch })
+	end
+
+	inbound.receive(Buffer.take(), nil, alice)
+
+	equals("nothing is delivered during receive", #delivered, 0)
+
+	inbound.tick()
+
+	equals("one value reached the handler", #delivered, 1)
+	equals("and it is the newest", delivered[1].pitch, 20)
+
+	--[[ Per player, not globally: two players' inputs do not supersede each other. ]]
+	table.clear(delivered)
+
+	Batch.writePacket(channel, { pitch = 7 })
+	inbound.receive(Buffer.take(), nil, alice)
+	Batch.writePacket(channel, { pitch = 9 })
+	inbound.receive(Buffer.take(), nil, bob)
+
+	inbound.tick()
+
+	equals("both players were served", #delivered, 2)
+
+	--[[ And a tick with nothing pending delivers nothing rather than repeating. ]]
+	table.clear(delivered)
+	inbound.tick()
+	equals("an empty tick is empty", #delivered, 0)
+
+	channel.handler = nil
+	byId[44] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The listener-less queue
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+
+	--[[
+		A handler attached one frame late is an ordering accident, and losing the traffic to it is a
+		bug the game cannot see. The packets are kept until something listens.
+	]]
+	local channel = outboundChannel(45, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[45] = channel
+
+	local inbound = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	Batch.writePacket(channel, { a = 2 })
+	inbound.receive(Buffer.take(), nil, alice)
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, value.a)
+	end
+
+	inbound.drain(channel)
+
+	equals("what arrived first is delivered", #got, 2)
+	equals("in arrival order", got[1], 1)
+	equals("and the rest of it", got[2], 2)
+
+	--[[ Draining twice does not deliver twice. ]]
+	inbound.drain(channel)
+	equals("a second drain has nothing to do", #got, 2)
+
+	channel.handler = nil
+	byId[45] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		Blink grows this queue without bound and warns on every insert past 256, so a forgotten
+		`:listen` becomes warn spam plus a memory leak (`RESEARCH §3.7-H`). netweave keeps the
+		newest, drops the oldest, and says so once per drop.
+	]]
+	local channel = outboundChannel(46, t.struct({ a = t.u16 }), { class = "signal" })
+	byId[46] = channel
+
+	local inbound, reported = inboundOf(true, {})
+
+	for index = 1, 300 do
+		Batch.writePacket(channel, { a = index })
+		inbound.receive(Buffer.take(), nil, alice)
+	end
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, value.a)
+	end
+
+	inbound.drain(channel)
+
+	equals("the queue is bounded", #got, 256)
+	equals("and it kept the newest", got[256], 300)
+	equals("dropping the oldest", got[1], 45)
+	equals("and reported every drop", #reported, 44)
+
+	channel.handler = nil
+	byId[46] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ A client's handler takes the payload alone: its inbound is the server's outbound, and the
+	     server is not a peer to be checked. ]]
+	local channel = outboundChannel(47, t.struct({ a = t.u8 }), { class = "event" })
+	byId[47] = channel
+
+	local got: { number } = {}
+	channel.handler = function(value: any)
+		table.insert(got, value.a)
+	end
+
+	local inbound = inboundOf(false, {})
+
+	Batch.writePacket(channel, { a = 5 })
+	inbound.receive(Buffer.take(), nil, nil)
+
+	equals("the payload arrived alone", #got, 1)
+	equals("with its field", got[1], 5)
+
+	channel.handler = nil
+	byId[47] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		A handler is game code and may yield, and Roblox runs each remote callback on its own
+		coroutine — so a yield lets the next batch in. The decoder's cursor is global state, so
+		reading and dispatching in one pass would mean: handler yields, the next batch calls
+		`beginRead`, and when the first resumes it walks the *second* batch's bytes while
+		attributing them to the first batch's sender.
+
+		Not a crash. One player's packets delivered as another player's, which is the worst shape a
+		networking bug can take. Reading a batch to completion before dispatching any of it closes
+		it structurally, and this is the case that would otherwise prove it.
+	]]
+	local channel = outboundChannel(48, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[48] = channel
+
+	local inbound = inboundOf(true, {})
+	local delivered: { string } = {}
+	local suspended: thread? = nil
+
+	channel.handler = function(ctx: any, value: any)
+		table.insert(delivered, `{ctx.player.name}:{value.a}`)
+
+		--[[ Yield on the first packet of the first batch, the way a handler that waits on anything
+		     would. The interleaved batch arrives while this one is suspended. ]]
+		if value.a == 1 and not suspended then
+			suspended = coroutine.running()
+			coroutine.yield()
+		end
+	end
+
+	Batch.writePacket(channel, { a = 1 })
+	Batch.writePacket(channel, { a = 2 })
+	local alicePacket = Buffer.take()
+
+	Batch.writePacket(channel, { a = 9 })
+	local bobPacket = Buffer.take()
+
+	local first = coroutine.create(function()
+		inbound.receive(alicePacket, nil, alice)
+	end)
+
+	coroutine.resume(first)
+
+	equals("the first batch stopped inside its handler", #delivered, 1)
+	equals("on alice", delivered[1], "alice:1")
+
+	--[[ Bob's batch arrives while alice's is suspended mid-dispatch. ]]
+	inbound.receive(bobPacket, nil, bob)
+
+	equals("bob was served", #delivered, 2)
+	equals("as bob", delivered[2], "bob:9")
+
+	--[[ And alice's second packet is still alice's, read from alice's bytes. ]]
+	coroutine.resume(suspended :: thread)
+
+	equals("alice's batch finished", #delivered, 3)
+	equals("with her own second packet", delivered[3], "alice:2")
+
+	channel.handler = nil
+	byId[48] = nil
+	Observer.reset()
 end
 
 reset()
