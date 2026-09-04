@@ -42,6 +42,7 @@ local Observer = {}
 	| `handler` | the packet was delivered and the game's own handler threw |
 	| `queue` | nothing is listening on that channel yet, and the backlog is full |
 	| `send` | netweave refused to put a packet on the wire |
+	| `protocol` | the peer is on a different set of channel definitions |
 
 	The first three are worth separating because they mean different things about the sender.
 	`parse` is a stale client or an attacker; `budget` is a flood; `authorize` is a player asking
@@ -54,8 +55,12 @@ local Observer = {}
 	`send` points the other way entirely — netweave refusing *this* game's own outgoing packet. The
 	only case in M2 is an unreliable payload over Roblox's size limit, which Roblox enforces by
 	dropping silently, so without a signal here it is invisible from both ends (`RESEARCH §3.7-F`).
+
+	`protocol` is the odd one: it fires once when a peer joins on a hash that does not match, not per
+	packet. No surveyed library checks this at all, so the failure it replaces is a stale client that
+	connects successfully and is then refused on every packet forever, with nothing saying why.
 ]=]
-export type Stage = "parse" | "budget" | "authorize" | "handler" | "queue" | "send"
+export type Stage = "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol"
 
 --[=[
 	@interface Rejection
@@ -122,6 +127,46 @@ local seen: { [string]: number } = {}
      read, so a sink that is only ever eyeballed is a sink nobody has asserted. Defaults to `warn`
      and is private. ]]
 local sink: (string) -> () = warn
+
+--[[
+	Counters, kept because the sink deliberately goes quiet.
+
+	A default sink that reported every refusal would become the outage under a flood, so it prints
+	three times per channel and stage and then stops. That is right for a console and useless for a
+	question like "is this channel refusing more than it did an hour ago" — which is the question
+	that distinguishes a bug from an attack, and the one `RESEARCH §3-G6` says nobody can answer.
+
+	Two integers per channel and stage. The table for a channel is allocated on its first refusal
+	and refilled after that, so a sustained flood allocates nothing: under load the rejection path
+	is the hot path, and making refusal cost more than acceptance is how a limiter becomes an
+	amplifier.
+]]
+type Counter = { count: number, bytes: number }
+
+local tallies: { [string]: { [string]: Counter } } = {}
+local total = 0
+local since = os.clock()
+
+local function tally(channel: string, stage: Stage, bytes: number)
+	local byStage = tallies[channel]
+
+	if not byStage then
+		byStage = {}
+		tallies[channel] = byStage
+	end
+
+	local entry = byStage[stage]
+
+	if not entry then
+		byStage[stage] = { count = 1, bytes = bytes }
+		total += 1
+		return
+	end
+
+	entry.count += 1
+	entry.bytes += bytes
+	total += 1
+end
 
 local function announce(channel: string, stage: Stage, reason: string, player: Player?)
 	local level = Config.severityOf(stage)
@@ -213,11 +258,99 @@ function Observer.emit(channel: string, player: Player?, stage: Stage, reason: s
 	record.reason = reason
 	record.bytes = bytes
 
+	tally(channel, stage, bytes)
+
 	for index = 1, count do
 		xpcall(observers[index], report, record)
 	end
 
 	announce(channel, stage, reason, player)
+end
+
+--[=[
+	@interface Tally
+	@within Observer
+	.count number -- refusals at this channel and stage
+	.bytes number -- their payloads, added up
+
+	Bytes are counted whether or not the packet was ever decoded, because a refused packet still
+	crossed the wire and a figure that only counted what was accepted would understate exactly the
+	traffic worth looking at.
+]=]
+export type Tally = { read count: number, read bytes: number }
+
+--[=[
+	@interface Diagnostics
+	@within Observer
+	.since number -- `os.clock` when counting last started
+	.total number -- refusals at every channel and stage
+	.channels { [string]: { [string]: Tally } } -- qualified name, then stage
+
+	What [Observer.diagnostics] returns. Frozen at every level.
+]=]
+export type Diagnostics = {
+	read since: number,
+	read total: number,
+	read channels: { read [string]: { read [string]: Tally } },
+}
+
+--[=[
+	@within Observer
+	@function diagnostics
+	@return Diagnostics
+
+	Every refusal since the counters were last reset, by channel and stage.
+
+	```lua
+	local seen = nw.diagnostics()
+
+	for channel, stages in seen.channels do
+		for stage, tally in stages do
+			print(channel, stage, tally.count, tally.bytes)
+		end
+	end
+	```
+
+	The console sink goes quiet after a few reports so a flood does not become the outage, which
+	makes this the only way to answer "is this channel refusing more than it was" — the question
+	that separates a bug from an attack. `RESEARCH §3-G6` records that no surveyed library can
+	answer it.
+
+	:::note Built on read, not on the rejection path
+	The snapshot is assembled here rather than kept assembled, so counting a refusal stays two
+	increments. Call it on a timer or when a diagnostic screen opens, not per packet.
+	:::
+
+	:::caution
+	Frozen at every level, so it cannot be mutated back into the live counters — a diagnostic
+	screen must not become a way to reset them by accident. [Observer.reset] is how they are
+	cleared, and it drops observers too.
+	:::
+]=]
+function Observer.diagnostics(): Diagnostics
+	local channels: { [string]: { [string]: Tally } } = {}
+
+	for channel, byStage in tallies do
+		local copied: { [string]: Tally } = {}
+
+		for stage, entry in byStage do
+			copied[stage] = table.freeze({ count = entry.count, bytes = entry.bytes })
+		end
+
+		channels[channel] = table.freeze(copied)
+	end
+
+	local taken = {
+		since = since,
+		total = total,
+		channels = table.freeze(channels),
+	}
+
+	table.freeze(taken)
+
+	--[[ Frozen, so the value is read-only where the constructor is not; the cast says that and
+	     nothing more. ]]
+	return taken :: any
 end
 
 --[=[
@@ -243,7 +376,10 @@ end
 function Observer.reset()
 	table.clear(observers)
 	table.clear(seen)
+	table.clear(tallies)
 	count = 0
+	total = 0
+	since = os.clock()
 	sink = warn
 end
 

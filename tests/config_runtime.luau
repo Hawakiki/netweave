@@ -211,13 +211,14 @@ do
 			handler = "error",
 			queue = "error",
 			send = "error",
+			protocol = "error",
 		},
 	})
 
 	--[[ This is G4 as a table lookup rather than as a convention. Every stage that carries wire
 	     data answers false at the loudest severity there is; only the declaration rule answers
 	     true. A future rule that gets `wire` wrong fails here rather than in a game. ]]
-	for _, stage in { "parse", "budget", "authorize", "handler", "queue", "send" } do
+	for _, stage in { "parse", "budget", "authorize", "handler", "queue", "send", "protocol" } do
 		check(`{stage} at "error" still does not raise`, not Config.raises(stage))
 	end
 
@@ -426,7 +427,7 @@ do
 
 	local described = Config.describe()
 
-	equals("every rule is listed", #described, 7)
+	equals("every rule is listed", #described, 8)
 	equals("sorted", described[1].rule, "authorize")
 
 	local wire = 0
@@ -440,7 +441,7 @@ do
 		equals(`{row.rule} reports its live severity`, row.severity, Config.severityOf(row.rule))
 	end
 
-	equals("six of the seven are wire rules", wire, 6)
+	equals("seven of the eight are wire rules", wire, 7)
 end
 
 -- ---------------------------------------------------------------------------------------------

@@ -376,7 +376,7 @@ and the failure Warp demonstrates by silently blackholing players (`§3.7-K`).
 ```lua
 nw.observe(function(rejection)
     -- channel, player, stage, reason, bytes
-    -- stage: "parse" | "budget" | "authorize"
+    -- stage: "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol"
 end)
 ```
 
@@ -387,6 +387,13 @@ returned early from `emit` when nothing was observing, so a game that attached n
 silent drops at all six — the failure `§3.7-K` faults Warp for, rebuilt with extra steps. netweave
 now writes to the console by default and goes quiet on its own: one channel and stage prints three
 times and then says it is suppressed. Observers are unaffected and always receive everything.
+
+Because the console goes quiet, `nw.diagnostics()` is what is left: every refusal since the
+counters were last reset, by channel and then by stage, with a count and the bytes those packets
+carried. It is frozen at every level and built on read rather than kept assembled, so counting a
+refusal stays two increments and a diagnostic screen cannot become a way to reset them. A rule set
+to `"off"` still counts — severity is about output, and a setting that could make refusals vanish
+from a diagnostic screen would be the one thing §10 says a severity must never do.
 
 ## 10. Settings
 
