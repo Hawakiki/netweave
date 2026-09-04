@@ -1,0 +1,45 @@
+{
+  "name": "netweave-bench",
+  "emitLegacyScripts": false,
+  "tree": {
+    "$className": "DataModel",
+
+    "Players": {
+      "$properties": {
+        "CharacterAutoLoads": false
+      }
+    },
+
+    "ReplicatedStorage": {
+      "Shared": {
+        "$path": "src/shared",
+
+        "Vendor": {
+          "$path": "vendor"
+        }
+      },
+
+      "GetResults": {
+        "$className": "RemoteFunction"
+      },
+
+      "PublishResults": {
+        "$className": "RemoteEvent"
+      },
+
+      "Control": {
+        "$className": "RemoteEvent"
+      },
+
+      "Client": {
+        "$path": "src/client"
+      }
+    },
+
+    "ServerScriptService": {
+      "Server": {
+        "$path": "src/server"
+      }
+    }
+  }
+}

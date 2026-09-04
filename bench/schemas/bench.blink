@@ -1,0 +1,93 @@
+-- netweave benchmark schema, Blink 0.18.8 dialect.
+-- Regenerate with: lune run bench/schemas/generate.luau
+-- Written the way a Blink author would write it (PLAN-M0 D-7): FlagIdiomatic uses `set`,
+-- which packs flags into a bitfield at up to 32 per word (RESEARCH §3.9-AA).
+
+option Casing = Pascal
+option WriteValidations = true
+option ManualReplication = false
+option ServerOutput = "../vendor/blink/Server.luau"
+option ClientOutput = "../vendor/blink/Client.luau"
+
+struct Entity {
+    id: u8,
+    x: u8,
+    y: u8,
+    z: u8,
+    orientation: u8,
+    animation: u8,
+}
+
+set Flags12 = { f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12 }
+
+enum Weapon = { primary, secondary, melee, grenade }
+enum Team = { red, blue }
+
+struct FlagIdiomatic {
+    flags: Flags12,
+    weapon: Weapon,
+    team: Team,
+    targetId: u16?,
+    combo: u8?,
+}
+
+struct FlagNaive {
+    f1: boolean,
+    f2: boolean,
+    f3: boolean,
+    f4: boolean,
+    f5: boolean,
+    f6: boolean,
+    f7: boolean,
+    f8: boolean,
+    f9: boolean,
+    f10: boolean,
+    f11: boolean,
+    f12: boolean,
+    weapon: Weapon,
+    team: Team,
+    targetId: u16?,
+    combo: u8?,
+}
+
+event ArrayHeavyUp {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: Entity[100],
+}
+
+event ArrayHeavyDown {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: Entity[100],
+}
+
+event FlagIdiomaticUp {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: FlagIdiomatic,
+}
+
+event FlagIdiomaticDown {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: FlagIdiomatic,
+}
+
+event FlagNaiveUp {
+    From: Client,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: FlagNaive,
+}
+
+event FlagNaiveDown {
+    From: Server,
+    Type: Reliable,
+    Call: SingleSync,
+    Data: FlagNaive,
+}

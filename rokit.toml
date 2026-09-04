@@ -1,0 +1,10 @@
+# Toolchain for netweave. Managed by rokit (https://github.com/rojo-rbx/rokit).
+#
+# luau-lsp is load-bearing, not a convenience: the guarantees in docs/DESIGN-API.md are type
+# errors, so `analyze` is part of the test suite. It must run with LuauSolverV2 (PLAN-M1 D-7).
+[tools]
+luau-lsp = "JohnnyMorganz/luau-lsp@1.69.0"
+rojo = "rojo-rbx/rojo@7.7.0"
+lune = "lune-org/lune@0.10.5"
+stylua = "JohnnyMorganz/StyLua@2.3.0"
+selene = "Kampfkarren/selene@0.29.0"

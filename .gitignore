@@ -1,0 +1,14 @@
+# Build outputs
+netweave.rbxm
+netweave-test.rbxl
+bench/Benchmark.rbxl
+
+# Studio writes one of these beside a place file while it has it open
+*.rbxl.lock
+*.rbxlx.lock
+
+# Vendored competitor sources, kept locally for research (see _refsrc/README.md)
+_refsrc/
+
+# Rojo/luau-lsp scratch
+sourcemap.json

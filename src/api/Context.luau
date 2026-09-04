@@ -1,0 +1,225 @@
+--!strict
+--!optimize 2
+
+--[=[
+	@class Context
+
+	What a policy and a handler are told about the request they are looking at.
+
+	```lua
+	combat.fireWeapon:listen(function(ctx, shot)
+		if (shot.origin - ctx.character.PrimaryPart.Position).Magnitude > 8 then
+			return
+		end
+	end)
+	```
+
+	:::caution
+	**A `ctx` is valid only for the synchronous duration of the handler.** There is one per player
+	and its fields are refreshed in place; retaining it across a yield hands you the next packet's
+	context, or another channel's. In Studio that is an error rather than a silent wrong answer.
+	:::
+]=]
+
+--[[
+	`ctx` reaches every policy and every handler, so allocating one per packet would break the
+	zero-hot-path-allocation criterion on the first packet (`RESEARCH §3.6-A4`, `§3.6-B4`,
+	`PLAN-M1` acceptance 7). One per player, refreshed, is the only shape that costs nothing.
+
+	The cost of that choice is a real footgun, so it is guarded rather than documented and hoped
+	about: in Studio the handler receives a proxy that compares a generation counter before every
+	read, and a fresh one per acquisition so it can tell which acquisition the holder has. Production
+	hands over the record itself — no proxy, no comparison, nothing allocated.
+]]
+
+local Context = {}
+
+--[=[
+	@interface Ctx
+	@within Context
+	.player Player -- the sender, on the server; the local player on the client
+	.channel string -- the qualified channel name this request arrived on
+	.character Model? -- refreshed per request, nil if the player has none
+	.humanoid Humanoid? -- refreshed per request, nil if the character has none
+	.now number -- `os.clock()` at the moment the packet was dispatched
+]=]
+export type Ctx = {
+	player: Player,
+	channel: string,
+	character: Model?,
+	humanoid: Humanoid?,
+	now: number,
+}
+
+type Record = {
+	live: Ctx,
+	generation: number,
+}
+
+--[[
+	`RunService` does not exist under lune, where the tests run, and neither does `game`. A pcall
+	is the only detection that works in both places; it runs once at load, not per request.
+]]
+local function detectStudio(): boolean
+	local ok, studio = pcall(function()
+		return game:GetService("RunService"):IsStudio()
+	end)
+
+	return ok and studio == true
+end
+
+local GUARDED = detectStudio()
+
+local records: { [any]: Record } = {}
+
+--[[
+	One proxy per *acquisition*, not per player, and only in Studio.
+
+	A single proxy per player cannot work, and the first version of this file shipped that bug: the
+	closure captures `generation` when the proxy is built, so the first `release` expires it
+	permanently and every handler from the second packet onward raises. Caught by running
+	`tests/api_runtime.luau` in Studio, which is the only place the guard is even on.
+
+	Nor is a plain `active` boolean enough. It answers "is some handler running", so it catches a
+	`ctx` read after its handler returned — and misses the worse case, a `ctx` retained and read
+	during a *later* packet's handler, where it would quietly hand over another request's data.
+	Distinguishing those needs the holder's acquisition to be identifiable, which means a distinct
+	object per acquisition.
+
+	Studio pays two allocations per packet for that, and Studio is not where throughput is
+	measured. Production never calls this: `acquire` hands back the record itself.
+]]
+local function guard(record: Record): Ctx
+	local generation = record.generation
+	local live = record.live
+
+	--[[
+		A metatable, not a copy: copying the fields per request would make the stale value
+		*readable*, which is worse than an error because it looks like it worked.
+	]]
+	return (
+		setmetatable({}, {
+			__index = function(_, key: any): any
+				if record.generation ~= generation then
+					error(
+						`this ctx expired. It belonged to a handler that has already returned; a ctx is `
+							.. `valid only for the synchronous duration of the handler that received it `
+							.. `(netweave DESIGN-API §8). Copy the fields you need instead: `
+							.. `local player = ctx.player`,
+						2
+					)
+				end
+
+				return (live :: any)[key]
+			end,
+
+			__newindex = function()
+				error("a ctx is read-only", 2)
+			end,
+
+			__metatable = "netweave.Ctx",
+		}) :: any
+	) :: Ctx
+end
+
+local function recordFor(player: any): Record
+	local existing = records[player]
+
+	if existing then
+		return existing
+	end
+
+	local live: Ctx = {
+		player = player,
+		channel = "",
+		character = nil,
+		humanoid = nil,
+		now = 0,
+	}
+
+	local record: Record = {
+		live = live,
+		generation = 0,
+	}
+
+	records[player] = record
+	return record
+end
+
+--[=[
+	@within Context
+	@function acquire
+	@param player Player
+	@param channel string -- the qualified channel name
+	@return Ctx
+	@private
+
+	Refreshes this player's context and hands it out. Called by the transport per packet.
+]=]
+function Context.acquire(player: any, channel: string): Ctx
+	local record = recordFor(player)
+	local live = record.live
+
+	live.channel = channel
+	live.now = os.clock()
+
+	--[[
+		Character and humanoid are refreshed here rather than looked up by each policy, because
+		`policy.alive` and `policy.originNearCharacter` would otherwise each pay for the same two
+		property reads on every packet.
+	]]
+	local character = (player :: any).Character
+	live.character = character
+	live.humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+
+	if GUARDED then
+		return guard(record)
+	end
+
+	return live
+end
+
+--[=[
+	@within Context
+	@function release
+	@param player Player
+	@private
+
+	Ends the context's validity. Every read through a retained `ctx` after this point is an error
+	in Studio, and reads a later packet's data in production.
+]=]
+function Context.release(player: any)
+	local record = records[player]
+
+	if record then
+		record.generation += 1
+	end
+end
+
+--[=[
+	@within Context
+	@function forget
+	@param player Player
+	@private
+
+	Drops the player's context entirely. Called when they leave, so the record does not outlive them.
+]=]
+function Context.forget(player: any)
+	records[player] = nil
+end
+
+--[=[
+	@within Context
+	@function guarded
+	@return boolean
+
+	Whether expired-context access is being checked. True in Studio, false in a live server.
+
+	Exposed so a test can assert which mode it is running in rather than infer it — the guard is
+	the kind of thing that quietly stops working.
+]=]
+function Context.guarded(): boolean
+	return GUARDED
+end
+
+return Context

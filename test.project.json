@@ -1,0 +1,21 @@
+{
+  "name": "netweave-test",
+  "emitLegacyScripts": false,
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "netweave": {
+        "$className": "Folder",
+
+        "src": {
+          "$path": "src"
+        },
+
+        "tests": {
+          "$path": "tests"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,306 @@
+--!strict
+
+--[[
+	The half of the codec lune cannot reach.
+
+		rojo build test.project.json -o netweave-test.rbxl
+
+	`Vector2`, `Vector3`, `CFrame`, `Color3` and a real `Instance` only exist inside Roblox, and a
+	codec test that skips them is not testing the codec. Everything else lives in
+	`tests/serdes_runtime.luau`, which runs faster and needs no Studio.
+
+	Same rule as there: encode raises on a value the schema forbids, decode never raises.
+]]
+
+local Buffer = require("../src/codec/Buffer")
+local Serdes = require("../src/codec/Serdes")
+local t = require("../src/types")
+
+local failures = 0
+
+local function fail(message: string)
+	failures += 1
+	warn(`FAIL  {message}`)
+end
+
+local function check(name: string, condition: boolean)
+	if not condition then
+		fail(name)
+	end
+end
+
+local function equals(name: string, actual: any, expected: any)
+	if actual ~= expected then
+		fail(`{name}: expected {tostring(expected)}, got {tostring(actual)}`)
+	end
+end
+
+local function encode(codec: Serdes.Codec, value: any): (buffer, { Instance })
+	codec.write(value)
+	return Buffer.take()
+end
+
+local function decode(codec: Serdes.Codec, bytes: buffer, instances: { Instance }?): (any, string?)
+	Buffer.beginRead(bytes, instances)
+	return codec.read()
+end
+
+--[[ Round trips one value and hands the result back, so each datatype can compare it its own way:
+     `CFrame` needs a tolerance, `Color3` does not. ]]
+local function roundTrip(descriptor: any, value: any, instances: { Instance }?): (any, string?, number)
+	local codec = Serdes.fromSchema(descriptor)
+	local packed, sidecar = encode(codec, value)
+	local decoded, failure = decode(codec, packed, instances or sidecar)
+	return decoded, failure, buffer.len(packed)
+end
+
+local function rejects(name: string, descriptor: any, bytes: buffer, instances: { Instance }?)
+	local codec = Serdes.fromSchema(descriptor)
+	local ok, value, failure = pcall(decode, codec, bytes, instances or {})
+
+	if not ok then
+		fail(`{name}: decode raised {tostring(value)}`)
+		return
+	end
+
+	if failure == nil then
+		fail(`{name}: decode accepted bytes it should have rejected`)
+	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Vectors
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local value, failure, size = roundTrip(t.vector2, Vector2.new(1.5, -2.25))
+	equals("vector2 is eight bytes", size, 8)
+	equals("vector2 decodes", failure, nil)
+	equals("vector2 round trips", value, Vector2.new(1.5, -2.25))
+end
+
+do
+	local value, failure, size = roundTrip(t.vector3, Vector3.new(1.5, -2.25, 1024))
+	equals("vector3 is twelve bytes", size, 12)
+	equals("vector3 decodes", failure, nil)
+	equals("vector3 round trips", value, Vector3.new(1.5, -2.25, 1024))
+end
+
+do
+	local direction = Vector3.new(1, 2, 3).Unit
+	local value, failure = roundTrip(t.unitVector3, direction)
+	equals("a unit vector decodes", failure, nil)
+	check("a unit vector round trips", (value - direction).Magnitude < 1e-4)
+end
+
+do
+	--[[
+		A direction that is not a direction is an exploit primitive: a handler that trusts
+		`t.unitVector3` and multiplies by its own range gets an arbitrary displacement out of a
+		magnitude of 400. The schema said unit, so the decoder enforces unit.
+	]]
+	local hostile = buffer.create(12)
+	buffer.writef32(hostile, 0, 0)
+	buffer.writef32(hostile, 4, 0)
+	buffer.writef32(hostile, 8, 400)
+
+	rejects("a unit vector with a magnitude of 400", t.unitVector3, hostile)
+end
+
+do
+	--[[ NaN passes every comparison a downstream check is likely to write, so it has to stop
+	     here. ]]
+	local hostile = buffer.create(12)
+	buffer.writef32(hostile, 0, 0 / 0)
+	buffer.writef32(hostile, 4, 0)
+	buffer.writef32(hostile, 8, 0)
+
+	rejects("a vector3 carrying NaN", t.vector3, hostile)
+
+	local infinite = buffer.create(12)
+	buffer.writef32(infinite, 0, math.huge)
+	buffer.writef32(infinite, 4, 0)
+	buffer.writef32(infinite, 8, 0)
+
+	rejects("a vector3 carrying infinity", t.vector3, infinite)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Colours
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local value, failure, size = roundTrip(t.color3, Color3.fromRGB(200, 100, 50))
+	equals("color3 is three bytes", size, 3)
+	equals("color3 decodes", failure, nil)
+	equals("color3 round trips exactly", value, Color3.fromRGB(200, 100, 50))
+end
+
+do
+	--[[ Eight bits per channel is the wire format, so a colour that was never an integer comes back
+	     rounded. Recorded as a test rather than left to be discovered. ]]
+	local value = roundTrip(t.color3, Color3.new(0.5, 0.5, 0.5))
+	check("a fractional colour rounds to the nearest 1/255", math.abs(value.R - 0.5) < 1 / 255)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- CFrames
+-- ---------------------------------------------------------------------------------------------
+
+local function cframesMatch(a: CFrame, b: CFrame): boolean
+	if (a.Position - b.Position).Magnitude > 1e-3 then
+		return false
+	end
+
+	return (a.LookVector - b.LookVector).Magnitude < 1e-3
+		and (a.UpVector - b.UpVector).Magnitude < 1e-3
+		and (a.RightVector - b.RightVector).Magnitude < 1e-3
+end
+
+do
+	local value, failure, size = roundTrip(t.cframe, CFrame.identity)
+	equals("cframe is twenty-four bytes", size, 24)
+	equals("the identity decodes", failure, nil)
+	check("the identity round trips", cframesMatch(value, CFrame.identity))
+end
+
+do
+	--[[ Position and rotation are carried separately, so a translation with no rotation is the case
+	     where the axis-angle vector is zero and the reconstruction has to not divide by it. ]]
+	local translated = CFrame.new(10, -20, 30)
+	local value = roundTrip(t.cframe, translated)
+	check("a translation round trips", cframesMatch(value, translated))
+end
+
+do
+	local rotated = CFrame.new(1, 2, 3) * CFrame.Angles(0.4, -1.2, 2.9)
+	local value = roundTrip(t.cframe, rotated)
+	check("a rotation round trips", cframesMatch(value, rotated))
+end
+
+do
+	--[[ Near-π is where an axis-angle encoding loses precision, so it is the case worth pinning
+	     rather than the comfortable middle of the range. ]]
+	local extreme = CFrame.fromAxisAngle(Vector3.new(0, 1, 0), math.pi - 1e-3)
+	local value = roundTrip(t.cframe, extreme)
+	check("a rotation near pi round trips", cframesMatch(value, extreme))
+end
+
+do
+	local hostile = buffer.create(24)
+	buffer.writef32(hostile, 0, 0 / 0)
+	rejects("a cframe carrying NaN", t.cframe, hostile)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Instances
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local part = Instance.new("Part")
+	local sound = Instance.new("Sound")
+
+	local value, failure, size = roundTrip(t.struct({ a = t.instance, b = t.instance }), {
+		a = part,
+		b = sound,
+	})
+
+	equals("instances take no buffer bytes", size, 0)
+	equals("instances decode", failure, nil)
+	check("the first instance survives", value.a == part)
+	check("the second instance survives", value.b == sound)
+
+	part:Destroy()
+	sound:Destroy()
+end
+
+do
+	--[[
+		A client can reference any instance it can see, so `t.instance("Sound")` is checked here or
+		it is not checked at all. This is the case no surveyed library covers: they all confirm the
+		reference is an Instance and stop.
+	]]
+	local part = Instance.new("Part")
+
+	rejects("an instance of the wrong class", t.instance("Sound"), buffer.create(0), { part })
+
+	local sound = Instance.new("Sound")
+	local value, failure = roundTrip(t.instance("Sound"), sound, { sound })
+	equals("an instance of the right class decodes", failure, nil)
+	check("and survives", value == sound)
+
+	--[[ A subclass satisfies its parent class, because `IsA` is what the schema means. ]]
+	local mesh = Instance.new("MeshPart")
+	local base, baseFailure = roundTrip(t.instance("BasePart"), mesh, { mesh })
+	equals("a subclass satisfies its parent class", baseFailure, nil)
+	check("and survives", base == mesh)
+
+	part:Destroy()
+	sound:Destroy()
+	mesh:Destroy()
+end
+
+do
+	--[[ The sidecar is attacker-influenced too: fewer instances than the schema declares must not
+	     hand a handler a nil where it declared an Instance. ]]
+	rejects("a missing instance", t.instance, buffer.create(0), {})
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The datatypes in a schema together
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ Datatypes carry no flags, so this is really a check that they do not disturb the bitfield
+	     that surrounds them. ]]
+	local shot = t.struct({
+		origin = t.vector3,
+		direction = t.unitVector3,
+		muzzle = t.optional(t.instance),
+		tracer = t.color3,
+		charged = t.boolean,
+		seq = t.u16,
+	})
+
+	local emitter = Instance.new("Attachment")
+
+	local value, failure = roundTrip(shot, {
+		origin = Vector3.new(4, 5, 6),
+		direction = Vector3.new(0, 0, -1),
+		muzzle = emitter,
+		tracer = Color3.fromRGB(255, 0, 0),
+		charged = true,
+		seq = 4321,
+	})
+
+	equals("a mixed schema decodes", failure, nil)
+	equals("its vector survives", value.origin, Vector3.new(4, 5, 6))
+	equals("its colour survives", value.tracer, Color3.fromRGB(255, 0, 0))
+	equals("its flag survives", value.charged, true)
+	equals("its number survives", value.seq, 4321)
+	check("its instance survives", value.muzzle == emitter)
+
+	local absent = roundTrip(shot, {
+		origin = Vector3.zero,
+		direction = Vector3.zAxis,
+		muzzle = nil,
+		tracer = Color3.new(),
+		charged = false,
+		seq = 0,
+	}, {})
+
+	equals("an absent optional instance stays absent", absent.muzzle, nil)
+	equals("and the flags beside it are unaffected", absent.charged, false)
+
+	emitter:Destroy()
+end
+
+-- ---------------------------------------------------------------------------------------------
+
+if failures > 0 then
+	error(`{failures} roblox assertions failed`)
+end
+
+print("OK      roblox_runtime")
+
+return true
