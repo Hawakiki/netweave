@@ -1,8 +1,8 @@
 # PLAN-M1 — Declaration Surface and L1 Codec
 
-**Status:** phases 1-5 done; phase 6 (measurement) next. The Studio half of the suite has been run:
-`tests/roblox_runtime.luau` passes there. `api_runtime` failed on a Studio-only defect, which is fixed;
-the re-run confirming it is outstanding.
+**Status: closed.** Six of eight acceptance criteria met, one partially, one missed. The miss is
+`ArrayHeavy` encode throughput; its cause was isolated by a second measurement rather than guessed,
+and implementing the fix is M2's opening item. See §9.
 **Depends on:** M0 (baseline harness and numbers), `docs/DESIGN-API.md` (agreed API shape)
 **Blocks:** M2 (transport: batching, budgets, audience evaluation, intent coalescing)
 
@@ -269,9 +269,45 @@ And one assumption is now measured rather than assumed: **`src/netweave.luau` re
 `init.luau` reaching its own children still does not, which is why there is not one.
 
 ### Phase 6 — measurement
-- [ ] `bench/src/shared/Modes/netweave.luau`
-- [ ] Rerun the M0 matrix, update `bench/RESULTS.md` and `bench/runs/`
-- [ ] Record the codegen gap as a percentage per schema family, and revise `§3.7-D`
+- [x] `bench/src/shared/Modes/netweave.luau` — the six benchmark channels declared through the real
+      surface (`command` with a policy attached, per R-3), plus a stand-in transport installed
+      through `nw.internal.transport`. The stand-in is the harness's, not netweave's: M2 owns
+      batching, budgets, audience evaluation and coalescing, and every number here has to be read
+      with that in mind. Blink and Zap both batch and flush on `Heartbeat`, so a netweave measured
+      without batching would be measuring the absence of a milestone rather than a library.
+- [x] `bench/envelope.luau` — the batch envelope under lune, so a framing bug fails in a second
+      rather than as "the payload garbled" after a Studio run. It found one immediately: a
+      rejection is sticky, so a refused packet stopped the whole batch at the *next* packet's id
+      read. That is the exact failure G5 and the length prefix are paid for, reintroduced by the
+      code meant to honour them.
+- [x] `bench/report.luau` and `bench/src/shared/WireTap.luau` know about netweave
+- [x] `Config.SMOKE` and `Config.ONLY_MODES`, because a full matrix is a quarter of an hour and
+      finding a broken adapter at the end of one is the worst order to learn it in
+- [x] M0 matrix rerun with all five modes — `bench/runs/2026-09-04.json`, `bench/RESULTS.md`
+      rewritten around it
+- [x] Codegen gap recorded as a percentage per schema family, and `§3.7-D` revised — the new
+      `RESEARCH §3.10` records it. The claim is narrowed rather than deleted: allocation coalescing
+      is a code generator's advantage **on encode only**, and on the same payload in the same run
+      the runtime schema wins decode.
+- [x] **Re-measured `ArrayHeavy` after the encode fix** — `bench/runs/2026-09-04-recheck.json`.
+      **netweave stayed at exactly 85** while Blink went 139 to 144 and Zap 116 to 120 on a
+      slightly quicker machine, so the gap widened to 1.69x. The discriminating test came back
+      against the adapter hypothesis and left the other standing.
+
+      ~~The bench adapter's two `Buffer.save()` tables per send are the likeliest cause of the one
+      acceptance criterion this milestone misses.~~ **Too small to be.** Two tables per send is a
+      constant, and the gap appears only on the payload with six hundred fields. Reading `Serdes`
+      afterwards found the real one: **it never calls `Buffer.allocate`.** Every scalar goes through
+      `Buffer.writeU8` and friends, which allocate their own bytes — 600 allocations for one
+      `ArrayHeavy` packet, 120,000 a frame, against six for a flag packet.
+
+      That is D-2's first layout pass, computed and then not used: `Ir.lower` produces `fixedSize`,
+      `Serdes.build` copies it onto the `Codec`, and nothing reads it.
+
+      **Confirmed.** The fix landed where it should — on the flag schemas, where the two tables
+      *were* the whole measurement, encode allocation fell from 609.3 B to 81.92 B, which is Zap's
+      figure to the decimal — and moved the `ArrayHeavy` framerate not at all. Implementing D-2's
+      first pass is M2's opening item.
 
 ## 7. Acceptance criteria
 
@@ -317,3 +353,73 @@ On a 7-byte `FlagIdiomatic` payload, one or two extra bytes is 15-30%. Mitigatio
 measures it before phase 4 commits, and a varint keeps the common case to one byte. The
 guarantee it buys — one bad packet cannot kill a batch — is worth stating in those terms
 rather than hiding the cost.
+
+## 9. Result
+
+**Shipped.** A schema declared in plain Luau yields the payload type, the validation and the
+buffer serdes; six channel classes carry the security obligation in the type; and the whole thing
+is measured next to Blink, Zap, ByteNet and a raw `RemoteEvent` rather than argued about.
+
+### Against the acceptance criteria
+
+| | | |
+|---|---|---|
+| 1 | Missing `rate`, `authorize` or `audience` fails analysis | **met** — `tests/api_reject.luau`, 13 diagnostics, counted exactly |
+| 2 | Round-trip at every constraint boundary | **met** — `tests/serdes_runtime.luau` and `tests/roblox_runtime.luau`, the latter run in Studio |
+| 3 | No adversarial input reaches `error()` | **met** — truncation, out-of-range, non-finite, unknown tag, missing instance, plus a 4,200-case fuzz |
+| 4 | Bytes equal to Blink and Zap on `ArrayHeavy`, within one byte of Zap on `FlagIdiomatic` | **met** — 601 and 601, 8 against 7 |
+| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.69x of Blink on encode, confirmed by re-measurement. Met on both flag families, where the whole field is inside the harness's own 14% noise |
+| 6 | Decode allocation at or below ByteNet's | **met** — 389 B against 520 B, though Zap's 65 B in the same run resets what the bar should be |
+| 7 | No allocation on the receive hot path | **receive path met; send path improved, not closed** — the adapter's two tables per send are gone, measured; `Serdes` still allocates per field, deferred to M2 |
+| 8 | `stylua --check`, `selene`, `lune run bench/check` pass | **met** |
+
+**Six of eight met, one partially, one missed**, and both open items are on the encode side.
+
+The first is small and fixed: the bench adapter allocated two tables per send. The second is
+D-2's own first layout pass, and it was never implemented. **`Serdes` computes `fixedSize` and
+never calls `Buffer.allocate`** — every scalar allocates its own bytes through `Buffer.writeU8`,
+so one `ArrayHeavy` packet costs 600 allocations and a frame of them costs 120,000, while a flag
+packet costs six. That is why the gap appears on exactly one schema family and nowhere else, and
+it is a code change in `src/codec/`, not a benchmark artifact.
+
+A second run separated the two causes rather than leaving the attribution to argument: with the
+adapter fixed, the flag schemas' encode allocation fell to Zap's exact figure and `ArrayHeavy`
+throughput did not move by one frame. That is what makes the remaining item a known task instead
+of an open question.
+
+Doing it is deliberately left to M2 rather than smuggled into M1's closing hours. The theme of this
+project is that the guarantees come first and the optimisation follows the measurement; the
+measurement now exists and says precisely where to spend.
+
+And it says one more thing worth carrying forward: **the harness cannot resolve differences under
+about 15%.** netweave's two flag cells run the same schema through the same code and differ by 14%
+in the same run. Every claim M2 makes from this harness has to clear that bar.
+
+### Against the risks
+
+- **R-1 — the spike fails and per-field inference is impossible.** Did not happen. `type function`
+  under `LuauSolverV2` maps a declaration table to per-channel directional views, and G6 is a
+  compile-time guarantee (`DESIGN-API.md` §7).
+- **R-2 — the layout passes do not close the gap.** Half true, and the half that is true is
+  narrower than feared. Bytes reached parity with Zap; encode CPU did not close on `ArrayHeavy`.
+- **R-3 — security enforcement costs more than the codec saves.** No evidence of it. Every
+  benchmark channel is a `command` with a policy attached and a context acquired per packet, and
+  netweave still ties or wins on both flag families.
+- **R-4 — the length prefix is a visible byte cost on small packets.** Real and exactly as costed:
+  one byte, 14% of a 7-byte payload, zero on a static schema.
+
+### What M1 changed about the plan
+
+Four claims did not survive contact with a measurement, and each is corrected where it was made:
+
+- `DESIGN-API.md` §6 — `Untrusted<number>` normalises to `never`. Both brands are type functions
+  that bind to table payloads only.
+- `DESIGN-API.md` §3 — three internal primitives, not four.
+- `RESEARCH §3.7-D` — allocation coalescing is a code generator's advantage on **encode**; the
+  runtime schema wins decode on the same payload (`§3.10-BB`).
+- `PLAN-M0`'s "raw beats every library on small payloads" reproduced as a tie, not a win.
+
+And one hazard is worth carrying into M2: an `export type function` that its own module never
+references becomes `any` across a `require`, with no diagnostic. It silently disabled five of the
+thirteen guarantees in `tests/api_reject.luau`, and the exact count is what caught it.
+

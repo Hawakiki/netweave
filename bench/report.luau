@@ -18,7 +18,9 @@ local fs = require("@lune/fs")
 local process = require("@lune/process")
 local serde = require("@lune/serde")
 
-local MODES = { "blink", "zap", "bytenet", "raw" }
+--[[ netweave first, because the tables exist to answer what it costs. `raw` last, because it is
+     the floor rather than a competitor. ]]
+local MODES = { "netweave", "blink", "zap", "bytenet", "raw" }
 local SCHEMAS = { "ArrayHeavy", "FlagIdiomatic", "FlagNaive" }
 
 local path = process.args[1]
@@ -50,6 +52,12 @@ end
 
 push(`Run: {os.date("!%Y-%m-%d", run.generatedAt)}`)
 push(`Load: {run.config.packetsPerFrame} packets/frame, {run.config.runSeconds} s window`)
+
+if run.config.smoke then
+	push("")
+	push("**SMOKE RUN — not a measurement.** Short windows and few samples; kept only to show an")
+	push("adapter round-trips. Re-run with `Config.SMOKE = false` before quoting anything here.")
+end
 push("")
 
 push("## Bytes on the wire")

@@ -222,4 +222,27 @@ function Context.guarded(): boolean
 	return GUARDED
 end
 
+--[=[
+	@within Context
+	@function setGuarded
+	@param enabled boolean
+	@private
+
+	Turns the expired-context check off, or back on.
+
+	The only reason this exists is measurement. The guard allocates two tables per packet, in
+	Studio, and Studio is where the benchmark runs — so a run with it on charges netweave for a
+	debug facility no competitor has and no live server pays. `bench/` turns it off for the
+	comparison and reports its cost as a line of its own.
+
+	:::caution
+	This is not a performance knob for a game. Studio is not where throughput is decided, and the
+	guard is the only thing standing between a retained `ctx` and a handler quietly reading another
+	player's request.
+	:::
+]=]
+function Context.setGuarded(enabled: boolean)
+	GUARDED = enabled
+end
+
 return Context

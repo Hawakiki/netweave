@@ -53,8 +53,10 @@ docs/
   milestone/
     PLAN-M0.md                one file per milestone, English
     PLAN-M1.md
-bench/                        M0 benchmark harness, with its own project file
+bench/                        the benchmark harness, with its own project file
   default.project.json
+  envelope.luau               the netweave batch envelope, checked under lune
+  report.luau                 a run document to the tables in RESULTS.md
 tools/                        globalTypes.d.luau for the analyzer
 _refsrc/                      READ-ONLY vendored competitor sources — never edit
   _generated/                 codegen output used as evidence in the research log
@@ -209,6 +211,7 @@ lune run tests/buffer_runtime
 lune run tests/ir_runtime
 lune run tests/serdes_runtime
 lune run tests/api_runtime
+lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike
 selene src tests

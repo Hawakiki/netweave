@@ -130,13 +130,34 @@ local entries = Modes.load()
 local adapters: { [string]: Modes.Adapter } = {}
 local unavailable: { [string]: string } = {}
 
+--[[
+	`Config.ONLY_MODES` narrows the run while an adapter is being debugged. A skipped mode is
+	recorded in `unavailable` with the reason rather than dropped, so a run document can never look
+	like a full matrix that happens to be missing a column.
+]]
+local function requested(name: string): boolean
+	local only = Config.ONLY_MODES
+
+	if not only then
+		return true
+	end
+
+	return table.find(only, name) ~= nil
+end
+
 for _, entry in entries do
-	if entry.available and entry.adapter then
+	if not requested(entry.name) then
+		unavailable[entry.name] = "not in Config.ONLY_MODES"
+	elseif entry.available and entry.adapter then
 		adapters[entry.name] = entry.adapter
 	else
 		unavailable[entry.name] = entry.error or "unknown"
 		warn(`[bench] mode "{entry.name}" unavailable: {entry.error}`)
 	end
+end
+
+if Config.SMOKE then
+	warn("[bench] SMOKE run: short windows, few samples. These numbers do not belong in RESULTS.md.")
 end
 
 local taps: { [string]: WireTap.Tap? } = {}
@@ -273,6 +294,10 @@ local results = {
 		packetsPerFrame = Config.PACKETS_PER_FRAME,
 		runSeconds = Config.RUN_SECONDS,
 		targetFramerate = Metrics.TARGET_FRAMERATE,
+
+		--[[ Carried into the run document so a smoke pass cannot be filed as a measurement. The
+		     report prints it, and `bench/runs/` keeps it. ]]
+		smoke = Config.SMOKE,
 	},
 	versions = {},
 	unavailable = unavailable,
