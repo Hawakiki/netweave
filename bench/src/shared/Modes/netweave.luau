@@ -78,6 +78,17 @@ return function(canonical): Adapter
 
 	local isServer = RunService:IsServer()
 
+	--[[
+		The expired-context guard is Studio-only and allocates two tables per packet, and the
+		benchmark runs in Studio. Leaving it on charges netweave for a debug facility no competitor
+		has and no live server pays, inside the one number — decode allocation per packet — where
+		two tables are the whole measurement.
+
+		Turned off here and disclosed in `bench/RESULTS.md`, rather than left on and explained away
+		in a footnote under a number nobody would then trust.
+	]]
+	nw.internal.context.setGuarded(false)
+
 	-- -----------------------------------------------------------------------------------------
 	-- Schemas
 	-- -----------------------------------------------------------------------------------------
