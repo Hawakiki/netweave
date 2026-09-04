@@ -110,9 +110,18 @@ function Budget.new(clock: (() -> number)?): Budget
 			local record = byChannel[channel]
 			local at = now()
 
-			--[[ The depth of the bucket. Declaring it is how a game says "this channel is bursty";
-			     omitting it says one second's worth, which is the safe reading of silence. ]]
-			local burst = channel.burst or rate
+			--[[
+				The depth of the bucket. Declaring it is how a game says "this channel is bursty";
+				omitting it says one second's worth, which is the safe reading of silence.
+
+				**At least one token, whatever the rate.** A rate below one packet per second is legal
+				and ordinary — "one purchase every two seconds" — and a bucket 0.5 deep can never hold
+				the whole token the admission test wants, so the channel would be refused forever after
+				its first packet. That is Warp's failure (`RESEARCH §3.7-K`) reintroduced by the fix
+				meant to make it unreachable, and it took an audit rather than a test to find.
+			]]
+			local declared = channel.burst or rate
+			local burst = if declared < 1 then 1 else declared
 
 			if not record then
 				byChannel[channel] = {

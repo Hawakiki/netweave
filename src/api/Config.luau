@@ -104,9 +104,19 @@ export type Rules = {
 	.unreliableBytes number? -- the largest unreliable payload that will be sent
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
 
-	Numbers, not severities, and kept in their own field so that a limit can never be mistaken for
-	a switch. Every one of them is read when the transport is built, so setting them after
-	`require(netweave)` has no effect — configure before the first channel is declared.
+	Numbers, not severities, and kept in their own field so that a limit can never be mistaken for a
+	switch.
+
+	They are not read at the same moment, and the difference matters:
+
+	| Limit | Read |
+	|---|---|
+	| `queueCapacity` | when a channel's queue is first created, which is its first refusal to a missing listener. A queue that already exists keeps the depth it was made with |
+	| `unreliableBytes` | on every unreliable send, so it takes effect immediately and can only *lower* the ceiling — 908 is Roblox's limit, not netweave's |
+	| `repeatsPerDiagnostic` | on every report |
+
+	Configuring before the first channel is declared makes all three behave the same way, which is
+	why that is the advice rather than the rule.
 ]=]
 export type Limits = {
 	queueCapacity: number?,
@@ -432,9 +442,10 @@ end
 	behaviour that gets them fixed.
 
 	:::caution Configure before you declare
-	Limits are read when the transport is built. Setting `queueCapacity` after the first channel
-	has been declared changes the number this function reports and not the queue that already
-	exists.
+	Limits are read when the thing they limit needs them, and that is not the same moment for each —
+	see [Config.Limits]. Raising `queueCapacity` after a channel has already built its queue moves
+	the number this function reports and not that queue. Configuring first makes all three behave
+	alike.
 	:::
 ]=]
 function Config.configure(settings: Settings)

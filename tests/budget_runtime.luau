@@ -423,6 +423,55 @@ do
 end
 -- ---------------------------------------------------------------------------------------------
 
+do
+	--[[
+		A rate below one packet per second is legal — `checkedRate` asks for positive and finite, and
+		"one purchase every two seconds" is a rate a game writes on purpose.
+
+		The bucket's depth defaults to the rate, and a depth of 0.5 can never hold a whole token: the
+		refill is capped at 0.5, the admission test wants 1, and the channel is refused forever after
+		its first packet. That is Warp's exact failure (`RESEARCH §3.7-K`) — a player blackholed with
+		nothing saying so — reintroduced by the fix that was supposed to make it unreachable, and
+		found by auditing the phase rather than by a test that already existed.
+
+		The depth is at least one token now. Against the pre-fix code every line below refuses.
+	]]
+	local budget = Budget.new(now)
+	local channel = channelOf("shop.purchase", 0.5)
+
+	clock = 0
+	equals("the first packet is admitted", budget.admit(channel, alice, 4), nil)
+
+	clock = 1
+	check("a second later is too soon at half a packet per second", budget.admit(channel, alice, 4) ~= nil)
+
+	clock = 2
+	equals("two seconds is one packet, and it arrives", budget.admit(channel, alice, 4), nil)
+
+	clock = 3600
+	equals("and an hour later the channel is still alive", budget.admit(channel, alice, 4), nil)
+end
+
+do
+	--[[ The depth floor is a floor, not an override: a declared burst above it still stands, and a
+	     rate above one still gets a depth of `rate`. ]]
+	local budget = Budget.new(now)
+	local channel = channelOf("shop.slowBurst", 0.25)
+	channel.burst = 3
+
+	clock = 0
+
+	local admitted = 0
+
+	for _ = 1, 10 do
+		if budget.admit(channel, alice, 4) == nil then
+			admitted += 1
+		end
+	end
+
+	equals("a declared burst outranks the floor", admitted, 3)
+end
+
 if failures > 0 then
 	error(`{failures} budget assertions failed`)
 end
