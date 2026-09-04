@@ -119,6 +119,27 @@ nw.validate = Trust.validate
 
 nw.observe = Observer.observe
 
+--[=[
+	@within netweave
+	@function diagnostics
+	@return Observer.Diagnostics
+
+	Every refusal since the counters were last reset, by channel and stage.
+
+	```lua
+	for channel, stages in nw.diagnostics().channels do
+		for stage, tally in stages do
+			print(channel, stage, tally.count, tally.bytes)
+		end
+	end
+	```
+
+	The console goes quiet after a few reports per channel and stage so a flood does not become the
+	outage, which makes this the only way to answer "is this channel refusing more than it was" —
+	the question that separates a bug from an attack.
+]=]
+nw.diagnostics = Observer.diagnostics
+
 -- Settings --------------------------------------------------------------------------------------
 
 --[=[
@@ -245,6 +266,8 @@ export type Ctx = Context.Ctx
 export type Verdict = Policy.Verdict
 export type Rejection = Observer.Rejection
 export type Stage = Observer.Stage
+export type Diagnostics = Observer.Diagnostics
+export type Tally = Observer.Tally
 export type Protocol = Namespace.Protocol
 export type Views<D> = View.Views<D>
 export type Severity = Config.Severity

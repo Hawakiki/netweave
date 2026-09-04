@@ -43,7 +43,7 @@ four more that are live in `develop` today.
 | Decode-work accounting: a per-tick cap, and a claim that costs nothing until it is paid for | `src/codec/Serdes.luau`, `src/transport/Inbound.luau` |
 | A bound on what one batch may hold live before dispatch | `src/transport/Inbound.luau` |
 | Per-channel `maxBytes`, and a total-element bound that nesting cannot evade | `src/api/Channel.luau`, `src/codec/Ir.luau` |
-| Counters, an immutable snapshot, and a default sink that warns | `src/api/Observer.luau`, `src/api/Diagnostics.luau` |
+| Counters, an immutable snapshot, and a default sink that warns | `src/api/Observer.luau` — ~~`src/api/Diagnostics.luau`~~, which would have been a file re-exporting one function rather than a boundary |
 | Global settings: severities per rule, limits, an immutable snapshot | `src/api/Config.luau` — **landed early**, see D-11 |
 | `query`: varint call ids, a pending table, a declared timeout, cancellation on disconnect | `src/transport/Query.luau`, `src/transport/Driver.luau` |
 | A protocol hash over types, not only names, checked at join | `src/api/Protocol.luau` |
@@ -207,16 +207,24 @@ settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
       next one — M2 phase 3's wrong-player attribution, reintroduced one packet at a time by an
       exception path, and invisible in production because the guard is Studio-only
 
-### Phase 1 — observability that is on by default
+### Phase 1 — observability that is on by default — **done**
 
-- [ ] `Observer` keeps counters per channel per stage, not only the live callback
+- [x] `Observer` keeps counters per channel per stage, not only the live callback — two integers,
+      allocated once per channel and refilled after, so a sustained flood allocates nothing
 - [x] An immutable snapshot exists as `nw.config.snapshot()` — frozen at every level, and a second
       call is a second table so two diagnostic screens cannot share a moment
-- [ ] `nw.diagnostics()` returns the same for the *counters*; mutating it does not touch them
+- [x] `nw.diagnostics()` returns the counters, frozen at every level; mutating it at any depth
+      raises and the live tallies are untouched. Built on read rather than kept assembled, so
+      counting a refusal stays two increments
+- [x] **A rule set to `"off"` still counts.** Severity is about output; if it reached the counters
+      it would be a way to make a channel's refusals vanish from a diagnostic screen, which is the
+      one thing D-11 says a severity must never do
 - [x] A default sink warns on the first refusal of each `(channel, stage)` pair, with the reason.
       Silence is opt-in, not default — `src/api/Observer.luau`, and `DESIGN-API.md` §9.1 carries the
       strikethrough
-- [ ] A `"protocol"` stage for handshake refusals (phase 5 fills it)
+- [x] A `"protocol"` stage for handshake refusals (phase 5 fills it), defaulting to `"error"` —
+      every one, because a mismatch means that client cannot play at all and the rate is bounded by
+      joins rather than by packets
 - [x] Rate-limit the default sink itself — the thing that reports a flood must not become one.
       Three per `(channel, stage)`, then a line saying so; `limits.repeatsPerDiagnostic` moves it
 

@@ -78,9 +78,10 @@ export type Severity = "off" | "warn" | "error"
 	.handler Severity? -- the game's own handler threw
 	.queue Severity? -- a channel with no listener overflowed its queue
 	.send Severity? -- an outgoing payload was refused before it left
+	.protocol Severity? -- a peer joined on a different set of channel definitions
 	.rateUnbounded Severity? -- a `rate` so large it cannot bind, declared as if it were a limit
 
-	Six of the seven are the stages of [Observer.Stage], because a rejection already carries the
+	Seven of the eight are the stages of [Observer.Stage], because a rejection already carries the
 	stage it happened at and inventing a second vocabulary for the same six things would only make
 	them drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the
 	game's own code, and is the only rule here that raises at `"error"`.
@@ -92,6 +93,7 @@ export type Rules = {
 	handler: Severity?,
 	queue: Severity?,
 	send: Severity?,
+	protocol: Severity?,
 	rateUnbounded: Severity?,
 }
 
@@ -193,6 +195,7 @@ export type function CheckedSettings(spec, snapshot)
 		handler = true,
 		queue = true,
 		send = true,
+		protocol = true,
 		rateUnbounded = true,
 	}
 	local limitNames = { queueCapacity = true, unreliableBytes = true, repeatsPerDiagnostic = true }
@@ -295,6 +298,15 @@ local RULES: { [string]: Rule } = {
 		floor = "off",
 		wire = true,
 		summary = "a channel with no listener overflowed its queue",
+	},
+	protocol = {
+		--[[ Every one, because a mismatch means that client cannot play at all and the rate is
+		     bounded by joins rather than by packets. The repeat suppression would otherwise hide it
+		     after three, and the fourth player is as stuck as the first. ]]
+		default = "error",
+		floor = "off",
+		wire = true,
+		summary = "a peer joined on a different set of channel definitions",
 	},
 	send = {
 		default = "warn",
