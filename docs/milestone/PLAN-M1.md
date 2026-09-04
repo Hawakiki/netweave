@@ -55,7 +55,8 @@ Security and structure lead this project; the codec exists so that enforcing the
 | `audience` evaluation and recipient sets | M2 |
 | `intent` tick coalescing | M2 |
 | Delta state replication | M4 |
-| roblox-ts typings, publishing | M5 |
+| roblox-ts typings | ~~M5~~ **not planned** — not the audience yet |
+| Wally and npm publishing | ~~M5~~ **not planned** — there is no publishing path; see `CLAUDE.md` §8 |
 
 M1 defines the *types* for budgets and audiences — a declaration missing them must not compile
 — but the runtime that enforces them belongs with the transport that owns the frame loop.

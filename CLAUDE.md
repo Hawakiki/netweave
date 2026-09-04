@@ -53,6 +53,7 @@ docs/
   milestone/
     PLAN-M0.md                one file per milestone, English
     PLAN-M1.md
+    PLAN-M2.md
 bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
