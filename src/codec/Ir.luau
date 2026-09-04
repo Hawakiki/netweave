@@ -172,6 +172,7 @@ export type Layout = {
 	root: Node,
 	scope: Scope?,
 	fixedSize: number?,
+	instances: number?,
 	framing: "static" | "counted",
 }
 
@@ -426,14 +427,24 @@ local function lowerArray(descriptor: Descriptor): Node
 
 			node.elements = elements
 		end
-	elseif element.bits > 0 then
+	else
 		--[[
-			A dynamic array cannot fold its elements' flags into the enclosing scope, because the
-			count is not known until runtime. Each element opens a scope of its own, so `boolean[]`
-			costs a byte per element. Zap has the same limitation; carrying flags across elements is
-			possible and deferred (`RESEARCH §3.9-P`).
+			A count that varies leaves the byte size unknown, but not always the instance count: an
+			element that carries no instances carries none however many times it repeats. Saying nil
+			here instead would put an always-zero varint in every such packet's frame, which is a byte
+			on the wire for information the schema already has (`docs/WIRE-FORMAT.md` §2).
 		]]
-		element.scope = makeScope(element.bits)
+		node.instances = if element.instances == 0 then 0 else nil
+
+		if element.bits > 0 then
+			--[[
+				A dynamic array cannot fold its elements' flags into the enclosing scope, because the
+				count is not known until runtime. Each element opens a scope of its own, so `boolean[]`
+				costs a byte per element. Zap has the same limitation; carrying flags across elements
+				is possible and deferred (`RESEARCH §3.9-P`).
+			]]
+			element.scope = makeScope(element.bits)
+		end
 	end
 
 	return node
@@ -456,6 +467,10 @@ local function lowerMap(descriptor: Descriptor): Node
 		bits = 0,
 		key = key,
 		value = value,
+
+		--[[ Same derivation as a dynamic array: entries that carry no instances carry none however
+		     many there are, and saying nil would put an always-zero varint in the frame. ]]
+		instances = if key.instances == 0 and value.instances == 0 then 0 else nil,
 	}
 
 	lowerLength(node, descriptor.min :: number, descriptor.max :: number)
@@ -681,6 +696,15 @@ function Ir.lower(descriptor: Descriptor): Layout
 		root = root,
 		scope = scope,
 		fixedSize = fixedSize,
+
+		--[[
+			How many instances the payload always consumes, or nil when it depends on the data. The
+			transport needs it to skip a refused packet: a packet that is discarded must take its
+			sidecar entries with it, or every instance after it is read against the wrong field
+			(`docs/WIRE-FORMAT.md` §2).
+		]]
+		instances = root.instances,
+
 		--[[
 			A statically sized packet carries no length prefix: the reader already knows where it
 			ends, so the framing guarantee is free for it (`docs/WIRE-FORMAT.md` §2).

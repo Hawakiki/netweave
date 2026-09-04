@@ -905,6 +905,7 @@ end
 	@within Serdes
 	.framing "static" | "counted" -- whether the transport has to length-prefix this payload
 	.fixedSize number? -- payload bytes, when they never vary
+	.instances number? -- sidecar entries always consumed, when that never varies
 	.write (value: any) -> ()
 	.read () -> (any, string?)
 	.check (value: any) -> string? -- nil when the value satisfies the schema
@@ -912,6 +913,7 @@ end
 export type Codec = {
 	framing: "static" | "counted",
 	fixedSize: number?,
+	instances: number?,
 	write: (value: any) -> (),
 	read: () -> (any, string?),
 	check: (value: any) -> string?,
@@ -1002,6 +1004,7 @@ function Serdes.build(layout: Ir.Layout): Codec
 	return {
 		framing = layout.framing,
 		fixedSize = layout.fixedSize,
+		instances = layout.instances,
 
 		write = function(value: any)
 			write(value, NO_FLAGS)

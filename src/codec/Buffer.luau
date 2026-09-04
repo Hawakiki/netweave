@@ -200,6 +200,22 @@ end
 
 --[=[
 	@within CodecBuffer
+	@function discardBlock
+
+	Forgets any open block without checking that it was filled.
+
+	[CodecBuffer.closeBlock] is the ordinary way out and it verifies the claim; this is for the
+	other way out. An encode that raises on a value the schema forbids — the ordinary posture, not
+	an exception — leaves a block open with nobody to close it, and the next thing to call
+	[CodecBuffer.reserve] would then take its bytes from a stale cursor. A packet boundary is where
+	that gets cleaned up.
+]=]
+function Codec.discardBlock()
+	blockDepth = 0
+end
+
+--[=[
+	@within CodecBuffer
 	@function writeU8
 	@param value number
 ]=]
@@ -516,6 +532,61 @@ end
 ]=]
 function Codec.patchU32(offset: number, value: number)
 	buffer.writeu32(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function shift
+	@param from number -- absolute offset of the first byte to move
+	@param by number -- how many bytes to open up
+
+	Opens `by` bytes at `from`, moving everything after it along.
+
+	This exists for one case and should stay that way: a `counted` packet reserves one byte for its
+	length before the payload is written, and a payload of 128 bytes or more needs two. Widening
+	the reservation after the fact is cheaper than the alternatives — serialising into a scratch
+	buffer and copying costs a move on **every** counted packet, while this costs one only on the
+	large ones.
+
+	:::caution
+	Absolute offsets taken before the shift are stale afterwards if they sit at or past `from`.
+	:::
+]=]
+function Codec.shift(from: number, by: number)
+	local moving = outgoingUsed - from
+
+	--[[ Grows first, so the destination exists before anything is moved into it. `buffer.copy`
+	     handles an overlapping move on one buffer — verified under lune, not assumed. ]]
+	allocate(by)
+
+	if moving > 0 then
+		buffer.copy(outgoing, from + by, outgoing, from, moving)
+	end
+end
+
+--[=[
+	@within CodecBuffer
+	@function instancesWritten
+	@return number
+
+	How many instances the outgoing sidecar holds. A packet that wants to record its own instance
+	count reads this before and after writing its payload.
+]=]
+function Codec.instancesWritten(): number
+	return outgoingInstanceCount
+end
+
+--[=[
+	@within CodecBuffer
+	@function seekInstances
+	@param position number
+
+	Moves the incoming sidecar cursor, the way [CodecBuffer.seek] moves the byte cursor. A refused
+	packet has to take its instances with it, or every instance after it is read against the wrong
+	field.
+]=]
+function Codec.seekInstances(position: number)
+	incomingInstanceCursor = position
 end
 
 --[=[
