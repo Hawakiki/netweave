@@ -663,8 +663,24 @@ do
 
 	equals("a declaration tightens it", tightened.maxBytes, 300)
 
-	refuses("a ceiling above what the schema can reach", function()
-		nw.command({ data = t.struct({ seq = t.u16 }), rate = 20, maxBytes = 5000, authorize = allows })
+	--[[ Fourteen bytes every time, and a ceiling of four is *below* that — so the upper-bound check
+	     does not catch it. It is inert for a different reason: a static payload carries no length
+	     prefix, so there is no claim to check and the ceiling is never consulted. Accepted and
+	     silently ignored until an audit found it. ]]
+	refuses("a ceiling on a statically framed channel", function()
+		nw.command({
+			data = t.struct({ origin = t.vector3, seq = t.u16 }),
+			rate = 20,
+			maxBytes = 4,
+			authorize = allows,
+		})
+	end)
+
+	--[[ The upper bound, on a schema where the check does run. Found by audit: the lower form of
+	     the same mistake — a ceiling below what a static schema always sends — was accepted and then
+	     never consulted, so the author had a limit that did nothing. ]]
+	refuses("a ceiling above what a counted schema can reach", function()
+		nw.command({ data = t.array(t.u8, 0, 10), rate = 20, maxBytes = 5000, authorize = allows })
 	end)
 
 	refuses("a fractional ceiling", function()

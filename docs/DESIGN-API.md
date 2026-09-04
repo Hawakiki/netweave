@@ -89,9 +89,11 @@ decoded, at stage `budget`, with the game having declared nothing. `RESEARCH §3
 surveyed library checks a payload size at all; the reason is that they would have to ask the author
 for the number.
 
-An inbound class may declare **`maxBytes`** to *tighten* that ceiling, and only to tighten it: asking
-for more than the schema can produce is refused rather than clamped, because a ceiling that can never
-be reached would let an author believe they had set a limit. It is for the schema whose bound is
+An inbound class may declare **`maxBytes`** to *tighten* that ceiling, and only to tighten it. Two
+declarations are refused rather than accepted, because both would let an author believe they had set
+a limit: a ceiling above what the schema can produce, and **any** ceiling on a statically framed
+channel — a static payload carries no length prefix, so there is no claim to check and the number
+would never be consulted. It is for the schema whose bound is
 honest and useless — `t.array(t.array(t.u8, 0, 1000), 0, 1000)` derives 1,002,002, and `maxBytes = 2048`
 at `rate = 20` turns that into 40,960 bytes per second.
 
@@ -263,8 +265,9 @@ export type function Trusted(payload)     -- T otherwise
 ```
 
 Only three things produce `Trusted<T>`: a `command` handler, a `query` handler, and
-`nw.validate(schema, value)`. **There is no `nw.untrust`.** An unwrap function would be used
-reflexively and the brand would become decoration.
+`nw.validate(schema, value)` — plus an explicit cast for server-authored data. **There is no
+`nw.untrust`.** An unwrap function would be used reflexively and the brand would become
+decoration; a cast has to be written out, which is why it is the escape hatch.
 
 ```lua
 local function giveItem(player: Player, request: nw.Trusted<{ id: number, count: number }>) end
@@ -278,17 +281,66 @@ end)
 ~~The example above used `data = t.u8` and a `Trusted<number>` parameter.~~ It could not have
 worked, for the reason just given. A channel whose payload you intend to brand carries a struct.
 
+### What `Trusted<T>` actually asserts
+
+Not "this data is well-formed" — the codec already guaranteed that. By the time a handler runs, a
+`t.u8(0, 100)` field **is** in 0..100; anything else was refused at the `parse` stage and the
+handler was never called. `Untrusted<T>` does not mean unvalidated.
+
+It means: **the server has not taken responsibility for this value.** The hazard is authorization
+confusion, not malformed data. Both producers confer trust on that reading — a `command` handler
+because a policy ran and allowed it, `nw.validate` because the caller ran a check and wrote the
+failure branch. A `signal` payload is structurally perfect and nobody vouched for it.
+
+### The tag is required
+
+~~`Untrusted<T>` is deliberately a subtype of `T`, and only three things produce `Trusted<T>`.~~
+The first half stands; **the second was false until M3 phase 3.** The tag was
+`{ __nwTrusted: true? }`, and an optional property is one a table literal is inferred to satisfy by
+not having it:
+
+```lua
+giveItem({ screen = 1 })                        -- compiled
+giveItem({ screen = untrusted.screen })         -- compiled
+```
+
+The second line is the one that matters. The brand is on the container, so taking an untrusted
+payload apart and putting it back together laundered it, in a line a programmer writes without
+thinking. Making the property required rejects both; `tests/api_reject.luau` cases 16 and 17 are
+those two lines, and cases 13 and 18 pin the two brands separately so neither can quietly become
+`any`.
+
+`Trusted<T>` is still a subtype of `T`, so reading fields, logging and arithmetic work with no
+ceremony — that has not changed and is what a wrapper would have cost.
+
+**The price** is a type that asserts a field the runtime has not got: `__nwTrusted` reads `nil`
+where the type promises `true`. A phantom on a name nobody reads, against a wrapper that would have
+misdescribed the entire value and allocated one per packet.
+
+**Server-authored data uses a cast**, `(value :: any) :: nw.Trusted<T>`, pinned in
+`tests/api_ok.luau`. Deliberately a cast rather than an `nw.trust()` helper, for the same reason
+there is no `nw.untrust`: a function gets reached for reflexively and a cast does not.
+
 ### The limits, stated plainly
 
 **A scalar payload is unbranded.** `Trusted<number>` *is* `number`, and the type says so rather
-than pretending to a guarantee Luau cannot express. Wrap a scalar in a one-field struct if the
-brand matters on that channel — which is also the shape that survives adding a second field later.
+than pretending to a guarantee Luau cannot express. `number & { tag }` normalises to `never`, which
+would satisfy every parameter rather than none. Wrap a scalar in a one-field struct if the brand
+matters on that channel — which is also the shape that survives adding a second field later.
 
-**Enforcement is opt-in on the game's side.** Luau is structurally typed, so a value usable as `T`
-is accepted anywhere `T` is. `Untrusted<T>` is deliberately a subtype of `T` — that is what makes
-field access, logging and UI work without ceremony — and the price is that it also satisfies an
-un-annotated `f(x: T)`. Functions that carry authority have to declare `Trusted<T>`. netweave
-cannot make that automatic, and claiming otherwise would be false. Deciding which of your
+**Reading a field escapes the brand, and no encoding fixes that.** `untrusted.amount` is a plain
+`number`, because a scalar cannot carry the tag. Taint does not propagate into fields and cannot be
+made to. The brand catches confusion about a *payload*; it cannot catch confusion about a number
+that came out of one.
+
+**A spelled-out forgery still compiles.** `giveItem({ screen = 1, __nwTrusted = true })`
+type-checks. That is the cast escape hatch wearing a different hat, and the difference from the old
+behaviour is the one that counts: a forgery you have to write is one a reviewer sees and `grep`
+finds, where an omitted optional property was invisible.
+
+**Enforcement is opt-in on the game's side.** Luau is structurally typed, so `Untrusted<T>`
+satisfies an un-annotated `f(x: T)`. Functions that carry authority have to declare `Trusted<T>`.
+netweave cannot make that automatic, and claiming otherwise would be false. Deciding which of your
 functions are authoritative is the discipline this library is selling, so requiring it to be
 written down is acceptable.
 
@@ -296,8 +348,13 @@ written down is acceptable.
 the module defining it does not reference anywhere reduces to `any` for a module that requires it,
 with no diagnostic — so `nw.Trusted<T>` would keep compiling and stop meaning anything. This is
 guarded in `src/api/Trust.luau` by two local aliases whose only job is to be that reference, and in
-`src/api/View.luau` by `Views<D>`. `tests/api_reject.luau` is what would catch a regression:
-its count would drop, and `analyze` fails on that. See `spike/declare/README.md` Q5.
+`src/api/View.luau` by `Views<D>`. `tests/api_reject.luau` is what would catch a regression: its
+count would drop, and `analyze` fails on that. See `spike/declare/README.md` Q5.
+
+**Four places build the tag and they cannot share code.** A `type function` body sees only the
+`types` library, so `src/api/View.luau` builds its own copy of what `src/api/Trust.luau` builds.
+`tests/api_ok.luau` asserts they agree by assigning one to the other; changing one side alone fails
+it, which was verified rather than assumed.
 
 *(The alternative — typing `Untrusted<T>` as a table with arithmetic metamethods while it is a
 bare number at runtime — buys automatic rejection at the cost of a type that lies about the
