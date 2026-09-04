@@ -496,6 +496,11 @@ end
 
 do
 	Namespace.reset()
+
+	--[[ Whatever was installed goes back at the end. In a place where the real transport is running
+	     — the benchmark runs this suite and the matrix in one session — leaving it uninstalled would
+	     send everything after this file into a hole. ]]
+	local previous = Transport.peek()
 	Transport.uninstall()
 
 	local ns = nw.namespace("handlers", {
@@ -549,6 +554,10 @@ do
 	end, "already installed")
 
 	Transport.uninstall()
+
+	if previous then
+		Transport.install(previous)
+	end
 end
 
 -- ---------------------------------------------------------------------------------------------

@@ -89,8 +89,26 @@ for _, module in modules do
 	end
 end
 
+local summary = if failed > 0 then `{failed} failed, {passed} passed` else `{passed} passed`
+
 if failed > 0 then
-	warn(`[netweave] {failed} failed, {passed} passed`)
+	warn(`[netweave] {summary}`)
 else
-	print(`[netweave] {passed} passed`)
+	print(`[netweave] {summary}`)
 end
+
+--[[
+	A marker, so a place that runs this suite *and* something else can order the two.
+
+	The benchmark place maps `tests/` in beside `src/` precisely so that one Play produces both the
+	suite and the matrix. Its two drivers wait on this before loading their modes, because this file
+	installs and uninstalls transports and declares and resets namespaces — global state the
+	benchmark then depends on.
+
+	Published on failure too. A benchmark blocked forever on a suite that threw would look like a
+	hang rather than a failure.
+]]
+local marker = Instance.new("StringValue")
+marker.Name = "netweaveTests"
+marker.Value = summary
+marker.Parent = ReplicatedStorage

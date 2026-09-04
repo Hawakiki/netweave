@@ -1,6 +1,7 @@
 # PLAN-M2 — L2 Transport
 
-**Status:** not started
+**Status:** phases 0-5 written and audited; every check that does not need Roblox is green. What
+remains is one Studio run — the suite and the matrix together — and the numbers it produces.
 **Depends on:** M1 (declaration surface and codec), `docs/WIRE-FORMAT.md` (frozen v1)
 **Blocks:** M3 (security and reliability), M4 (delta state replication)
 
@@ -44,7 +45,7 @@ make this the next milestone rather than a later one:
 | D5 | Byte accounting and rate budgets | `src/transport/Budget.luau` |
 | D6 | Audience evaluation and recipient sets | `src/api/Audience.luau`, `src/transport/Outbound.luau` |
 | D7 | `intent` tick coalescing | `src/transport/Inbound.luau` |
-| D8 | The driver, installed for real | `src/transport/init.luau`, `src/netweave.luau` |
+| D8 | The driver, installed for real | `src/transport/Driver.luau`, `src/netweave.luau` |
 | D9 | Tests, including a hostile-batch suite | `tests/transport_runtime.luau`, `tests/budget_runtime.luau` |
 | D10 | The benchmark adapter drops its stand-in, and the matrix is rerun | `bench/src/shared/Modes/netweave.luau`, `bench/RESULTS.md` |
 
@@ -77,11 +78,22 @@ serialise once but still issue N memcpys and N remote calls for 100 players, whi
 one (`RESEARCH §3.7-E`). netweave already knows which channels qualify — `nw.audience.everyone`
 is a singleton in the type, and it is the same tag that decides whether `broadcast` exists.
 
-**D-3. Unreliable batching is a per-packet opt-in, off by default.**
+**D-3. Unreliable is declared per channel, and is never batched.**
 Batching unreliable traffic is a semantic error, not an optimisation: losing one datagram loses
 N events instead of one. Blink not batching unreliable looks like a choice rather than an
-omission (`RESEARCH §3.7-E`). netweave hands the decision to the author per packet rather than
-choosing for them.
+omission (`RESEARCH §3.7-E`).
+
+~~netweave hands the decision to the author per packet.~~ **Narrowed during phase 2.** Reliability
+is a property of what a channel carries, not of one call — a channel whose loss is acceptable is
+acceptable to lose every time — so it is declared with the channel and forbidden on `command` and
+`query`, which must arrive. The per-*packet* opt-in the roadmap named would need an options table
+at every call site, which allocates on the send path to express something the declaration already
+knows.
+
+The batching opt-in for unreliable is not implemented at all, and the semantic default is the
+reason: batching is what makes one lost datagram cost N events, so the case for turning it on has
+to be made by a measurement nobody has taken yet. Deferred to M3 with that reason rather than
+built on the assumption that someone will want it.
 
 **D-4. Ring-buffer receive queue with drop-oldest.**
 Blink's queue for a listener-less event is `table.insert` with no bound: past 256 it warns on
@@ -130,45 +142,89 @@ means something rather than a cap nobody hits.
 
 ## 6. Tasks
 
-### Phase 0 — the codec carry-over, measured alone
-- [ ] `Buffer`: offset-addressed writes, so a caller that has allocated a block can fill it
-- [ ] `Serdes`: read `layout.fixedSize` and allocate the fixed-size prefix once per payload
-- [ ] `tests/serdes_runtime.luau` and `tests/roblox_runtime.luau` still pass unchanged — the wire
-      format must not move by one byte, and `bench/envelope.luau` is what proves it
-- [ ] Re-run the three-mode matrix with the transport untouched. This is the number that closes or
-      keeps acceptance criterion 5 of M1, and it has to be attributable
+### Phase 0 — the codec carry-over, measured alone — **done**
+- [x] `Buffer` blocks: `openBlock` claims a payload in one `allocate`, and a `put*` family writes
+      into the claim without re-checking space it already owns
+- [x] `Serdes` reads `layout.fixedSize` and picks between the two families once per node at
+      closure-build time. A field went from three calls to two, and an `ArrayHeavy` packet from 600
+      allocations to one
+- [x] The wire format did not move — `bench/envelope.luau` asserts absolute byte counts and field
+      offsets against a literal layout, and neither is symmetric with the writer
+- [ ] **Re-measure.** Folded into the single Studio run at the end of phase 5
 
-### Phase 1 — the envelope, out of the benchmark
-- [ ] `src/transport/Batch.luau` — write and read the `WIRE-FORMAT.md` §1-§2 envelope
-- [ ] Carry over the two defects `bench/envelope.luau` found: clear the rejection after a skipped
-      packet, and stop the batch on a `static` packet that cannot be resynchronised
-- [ ] The one-byte length reservation the benchmark could not generalise: a `counted` payload past
-      127 bytes needs the reserved byte widened, which needs a shift the benchmark refused to add
+### Phase 1 — the envelope, out of the benchmark — **done**
+- [x] `src/transport/Batch.luau` — `WIRE-FORMAT.md` §1-§2, and the only place that knows it
+- [x] The two defects `bench/envelope.luau` found, carried over: clear the sticky rejection after a
+      skipped packet, and bound what a packet may claim
+- [x] The one-byte length reservation is widened with `Buffer.shift` when a `counted` payload passes
+      127 bytes — a move on the large payloads only, rather than a scratch copy on every one
+- [x] **Correction: both framing modes resynchronise.** The stand-in stopped the batch on a refused
+      `static` packet and said the format could not do better. A `static` channel's size is fixed at
+      definition time and the id names the channel, so the reader already knows where it ends. The
+      one unrecoverable case is an unresolvable id, and it is reported
+- [x] **A lying instance count was a real attack.** A packet is stepped over by advancing the
+      sidecar cursor past what it claimed, so overstating it hands the packets behind it *another
+      packet's Instance* — decoding successfully, with no failure on either side. The sidecar's
+      length is known, so the claim is checkable and is checked
 
-### Phase 2 — outbound
-- [ ] Per-player parked buffers, swapped rather than reallocated (`PLAN-M1` D-4)
-- [ ] Serialize once, `buffer.copy` per recipient (D-1)
-- [ ] `FireAllClients` path for `nw.audience.everyone` (D-2)
-- [ ] Audience evaluation: `owner`, `nearby(studs)`, `select(fn)` to recipient sets
-- [ ] Flush on `PostSimulation`; unreliable is immediate unless the packet opts in (D-3)
-- [ ] 908-byte refusal with a reason, before the send rather than after the drop (D-5)
+### Phase 2 — outbound — **done**
+- [x] Per-recipient parked buffers, owned and refilled with `Buffer.saveInto` rather than rebuilt
+- [x] Serialize once, `buffer.copy` per recipient (D-1)
+- [x] `FireAllClients` for `nw.audience.everyone` (D-2)
+- [x] Audience evaluation: `owner`, `nearby(studs)`, `select(fn)`, behind a `Roster` so the rules
+      are testable without Roblox
+- [x] Flush on `PostSimulation`; unreliable is immediate and unbatched (D-3)
+- [x] 908-byte refusal before the send, reported at a new `send` stage (D-5)
+- [x] **The M1 regression came back and was caught.** The rewind that keeps a raised encode from
+      leaving a half-written packet in the batch was a `Buffer.save()`, which allocates — the same
+      cost M1 measured as a flat 609.3 B. `Buffer.mark`/`rollback` replace it with two numbers
+- [x] **A destination of `nil` is indistinguishable from no destination.** A client sends to one
+      place, and passing `nil` for it made the swap see a match, skip the load, and write the packet
+      into whichever buffer happened to be current. Both destinations are sentinels now
+- [x] **`allocate` could not grow from zero.** `0 * 2` is `0`, so the doubling loop spun rather than
+      grew, and a zero-size buffer is reachable. A hung server, not a wrong answer
 
-### Phase 3 — inbound
-- [ ] Receive loop with per-packet isolation (D-7)
-- [ ] Ring-buffer queue, drop-oldest, reported (D-4)
-- [ ] `ctx` acquired and released per packet, policies run, handler dispatched
-- [ ] `intent` coalescing (D-9)
+### Phase 3 — inbound — **done**
+- [x] Receive loop with per-packet isolation (D-7)
+- [x] Ring-buffer queue, drop-oldest, reported (D-4)
+- [x] `ctx` acquired and released per packet, policies run, handler dispatched
+- [x] `intent` coalescing (D-9)
+- [x] A handler that throws is caught and reported rather than taking the batch — G5 applied to the
+      game's own code, not only to a peer's
+- [x] **A yielding handler made packets arrive as the wrong player's.** Roblox runs each remote
+      callback on its own coroutine, so a yield lets the next batch in — and the decoder's cursor is
+      global. Reading and dispatching in one pass meant the first batch resumed onto the *second*
+      batch's bytes while attributing them to the first batch's sender. A batch is now read to
+      completion before anything is dispatched; the read phase calls no game code and therefore
+      cannot yield
 
-### Phase 4 — budgets
-- [ ] Real `buffer.len` accumulation per player per channel (D-6)
-- [ ] Time-based windows, reset on a path that runs whether or not the server is sending
-- [ ] Every refusal reaches `nw.observe` at stage `"budget"`
-- [ ] Runs in Studio. A guard that only runs in production is a guard nobody has tested
+### Phase 4 — budgets — **done**
+- [x] Real `buffer.len` accumulation per player per channel (D-6)
+- [x] A window that resets on the charge itself, so there is no separate path to skip — Warp's bug
+      made unreachable rather than merely fixed
+- [x] Every refusal reaches `nw.observe` at stage `"budget"`, before the payload is decoded
+- [x] It runs where it is tested. No environment branch at all, and the suite runs under lune
+- [x] `usage` reports packets, bytes and refusals for the current window
+- [x] **A client's packets have no sender, and the accounting table is keyed by sender.** A crafted
+      channel id can name a channel that declares a rate, so `perSender[nil]` was reachable by a
+      peer — an error thrown on the receive path, which is the one place nothing may throw
 
 ### Phase 5 — install and measure
-- [ ] `src/transport/init.luau` installs the driver; `nw` exposes nothing new
-- [ ] `bench/src/shared/Modes/netweave.luau` deletes its stand-in
-- [ ] Rerun the full matrix; update `bench/RESULTS.md` and `bench/runs/`
+- [x] `src/transport/Driver.luau` assembles the transport and installs it; `nw` exposes nothing new
+- [x] Requiring netweave inside Roblox installs it. The guard is a check rather than a `pcall`, so a
+      genuine failure inside `install` stays loud
+- [x] Channels can declare `unreliable`, forbidden on `command` and `query` — a class that changes
+      authoritative state or waits for an answer must not be delivered at best effort
+- [x] `bench/src/shared/Modes/netweave.luau` deletes its stand-in
+- [x] **The benchmark place runs the test suite too**, so one Play produces both. The suite installs
+      and uninstalls transports and declares and resets namespaces, so both bench drivers wait on a
+      marker before loading any mode — and `tests/api_runtime.luau` now puts back the transport it
+      displaced, which it should have done anyway
+- [x] **The audience is a declaration, so the benchmark needs two sets of outbound channels.** The
+      other libraries choose between `Fire(player, ...)` and `FireAll(...)` at the call site; an
+      audience of `everyone` resolves to one broadcast whatever subject is handed to `publish`, so
+      collapsing them would have made the `Down` cell secretly a `FireAll` cell
+- [ ] Run the matrix; update `bench/RESULTS.md` and `bench/runs/`
 - [ ] Record what changed against the stand-in, per schema family
 
 ## 7. Acceptance criteria

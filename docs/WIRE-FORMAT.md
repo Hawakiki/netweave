@@ -48,6 +48,27 @@ variability is optional presence — is described in §7. It is not part of v1.
 Channels that can carry a variable number of instances also carry `instances:varint` in the
 frame, for the same reason the length is there: a skipped packet must skip its instances too.
 
+**Order within the frame: length, then instances.** Both are self-delimiting varints so either
+order decodes, and this one is fixed by M2 rather than left to whoever writes the second
+implementation.
+
+A claimed instance count is bounded by what the sidecar actually holds, and a packet claiming more
+stops the batch. Overstating it would move the sidecar cursor past entries belonging to the packets
+behind it, and those would then decode successfully while holding **another packet's Instance** —
+a wrong association rather than a failure, which neither side would see.
+
+### Both framing modes resynchronise
+
+~~A `static` packet cannot be skipped.~~ **Wrong, corrected in M2 phase 1.** A `static` channel's
+size is fixed at definition time and the id names the channel, so once the id resolves the reader
+already knows where the packet ends — no prefix is needed to step over it. The claim came from
+`bench/src/shared/Modes/netweave.luau`'s stand-in, which stopped the batch there; that was a limit
+of the stand-in, not of the format.
+
+The one unrecoverable case is an **unresolvable id**. Without a channel there is no framing, so the
+end of the packet is unknowable and everything behind it is unreachable. It is reported rather than
+hidden.
+
 ### Why the length is there at all
 
 Blink and Zap have no length field, so a failed decode cannot find the next packet boundary and
