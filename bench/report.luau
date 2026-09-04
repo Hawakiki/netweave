@@ -52,6 +52,12 @@ end
 
 push(`Run: {os.date("!%Y-%m-%d", run.generatedAt)}`)
 push(`Load: {run.config.packetsPerFrame} packets/frame, {run.config.runSeconds} s window`)
+
+if run.config.smoke then
+	push("")
+	push("**SMOKE RUN — not a measurement.** Short windows and few samples; kept only to show an")
+	push("adapter round-trips. Re-run with `Config.SMOKE = false` before quoting anything here.")
+end
 push("")
 
 push("## Bytes on the wire")
