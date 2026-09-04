@@ -289,10 +289,21 @@ And one assumption is now measured rather than assumed: **`src/netweave.luau` re
       `RESEARCH §3.10` records it. The claim is narrowed rather than deleted: allocation coalescing
       is a code generator's advantage **on encode only**, and on the same payload in the same run
       the runtime schema wins decode.
-- [ ] **Re-measure `ArrayHeavy` after the encode fix.** The run above was taken with a defect in
-      the bench adapter — two `Buffer.save()` tables per send — that is the likeliest cause of the
-      one acceptance criterion this milestone misses. `bench/Recheck.rbxl` runs netweave against
-      Blink and Zap in about six minutes.
+- [ ] **Re-measure `ArrayHeavy` after the encode fix.** `bench/Recheck.rbxl` runs netweave against
+      Blink and Zap over nine cells, about ten minutes.
+
+      ~~The bench adapter's two `Buffer.save()` tables per send are the likeliest cause of the one
+      acceptance criterion this milestone misses.~~ **Too small to be.** Two tables per send is a
+      constant, and the gap appears only on the payload with six hundred fields. Reading `Serdes`
+      afterwards found the real one: **it never calls `Buffer.allocate`.** Every scalar goes through
+      `Buffer.writeU8` and friends, which allocate their own bytes — 600 allocations for one
+      `ArrayHeavy` packet, 120,000 a frame, against six for a flag packet.
+
+      That is D-2's first layout pass, computed and then not used: `Ir.lower` produces `fixedSize`,
+      `Serdes.build` copies it onto the `Codec`, and nothing reads it. The re-measurement is
+      therefore a **discriminating test rather than a confirmation** — if `ArrayHeavy` encode stays
+      near 85 while encode allocation drops to near zero, the adapter was not the cause and the
+      missing pre-allocation is.
 
 ## 7. Acceptance criteria
 
@@ -355,12 +366,21 @@ is measured next to Blink, Zap, ByteNet and a raw `RemoteEvent` rather than argu
 | 4 | Bytes equal to Blink and Zap on `ArrayHeavy`, within one byte of Zap on `FlagIdiomatic` | **met** — 601 and 601, 8 against 7 |
 | 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.64x of Blink on encode. Met on both flag families, and netweave is fastest of all five on `FlagNaive` |
 | 6 | Decode allocation at or below ByteNet's | **met** — 389 B against 520 B, though Zap's 65 B in the same run resets what the bar should be |
-| 7 | No allocation on the receive hot path | **receive path met; send path not** — the bench's stand-in transport allocated two tables per send, since fixed and not yet re-measured |
+| 7 | No allocation on the receive hot path | **receive path met; send path not** — two causes, one fixed in the bench adapter and one in `Serdes` itself, deferred to M2 |
 | 8 | `stylua --check`, `selene`, `lune run bench/check` pass | **met** |
 
-**Six of eight met, one partially, one missed.** Both open items are the same defect on the encode
-side, and it is identified rather than suspected: an encode-allocation figure that stayed at
-609.3 B whether the payload was 600 bytes or 6.
+**Six of eight met, one partially, one missed**, and both open items are on the encode side.
+
+The first is small and fixed: the bench adapter allocated two tables per send. The second is
+D-2's own first layout pass, and it was never implemented. **`Serdes` computes `fixedSize` and
+never calls `Buffer.allocate`** — every scalar allocates its own bytes through `Buffer.writeU8`,
+so one `ArrayHeavy` packet costs 600 allocations and a frame of them costs 120,000, while a flag
+packet costs six. That is why the gap appears on exactly one schema family and nowhere else, and
+it is a code change in `src/codec/`, not a benchmark artifact.
+
+Doing it is deliberately left to M2 rather than smuggled into M1's closing hours. The theme of
+this project is that the guarantees come first and the optimisation follows the measurement; the
+measurement now exists and says precisely where to spend.
 
 ### Against the risks
 
