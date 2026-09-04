@@ -57,11 +57,18 @@ make this the next milestone rather than a later one:
 | Backpressure on the send side | M3 |
 | `query` timeouts and varint call ids | M3 |
 | Malicious-client fuzzing as a suite | M3 |
+| Observability that is on by default | M3 |
 | Delta state replication | M4 |
 
 M2 makes the budget real and observable. M3 decides what to *do* about a player who keeps
 exceeding it. The split is deliberate: a budget nobody can measure is not a security feature, and
 a punishment built on an unmeasured budget is worse than none.
+
+**Observable is not observed, and that gap is M2's own doing.** `nw.observe` is opt-in, so a game
+that never attaches one gets silent drops at every stage this milestone added — budget, authorize,
+handler, queue and send. That is the failure `RESEARCH §3.7-K` criticises Warp for, reproduced by
+building the signal and then not raising it. It belongs with M3 because M3 owns what happens to a
+player who keeps overrunning, and a default that warns is the first half of that.
 
 ## 5. Design decisions
 

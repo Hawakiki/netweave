@@ -387,6 +387,15 @@ end)
    The intended answer is disclosure rather than enforcement: an `nw.audit()` that prints a
    namespace's security profile (`commands 3, intents 1, signals 9`) turns a silent failure
    into a visible smell. Deferred past M1.
+7. **Observability is opt-in, and silence is the default.** `nw.observe` reports six stages of
+   refusal, and a game that never attaches one sees none of them: a packet over its rate budget,
+   refused by a policy, thrown out of a handler, dropped from a full queue or too large to send all
+   vanish quietly. **This is the failure `RESEARCH §3.7-K` criticises Warp for** — a player silently
+   blackholed with nothing anywhere saying so — reproduced by building the signal and then not
+   raising it. The intended answer is a default observer that warns in Studio and goes quiet the
+   moment the game attaches its own, so a rule broken for the first time is heard rather than
+   memorised in advance. Deferred to M3, which owns what happens to a player who keeps overrunning.
+
 6. **No prototyping escape hatch.** There is deliberately no "skip authorization" helper. If
    one is ever added it takes the Rust `unsafe` shape — an ugly, greppable name that also
    reports through `nw.observe` — because a pleasant name would make it the default, the same
