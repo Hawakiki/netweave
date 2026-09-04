@@ -193,6 +193,10 @@ export type Protocol = {
 
 local protocol: Protocol? = nil
 
+--[[ Wire id to channel, built when the protocol is sealed. The receive path resolves through this
+     once per packet, so it is a flat array-like table rather than a search. ]]
+local byId: { [number]: any } = {}
+
 --[=[
 	@within Namespace
 	@function seal
@@ -227,8 +231,12 @@ function Namespace.seal(): Protocol
 	     wrong type, and nothing reports it. ]]
 	table.sort(names)
 
+	table.clear(byId)
+
 	for id, qualified in names do
-		byName[qualified].id = id
+		local channel = byName[qualified]
+		channel.id = id
+		byId[id] = channel
 	end
 
 	local computed: Protocol = table.freeze({
@@ -260,6 +268,28 @@ end
 
 --[=[
 	@within Namespace
+	@function channelById
+	@param id number
+	@return Channel?
+	@private
+
+	The channel a wire id names, sealing the protocol if that has not happened yet.
+
+	Sealing here rather than at load is what lets a game declare its namespaces in any order and in
+	any file: an id depends on every other channel in the program (`docs/WIRE-FORMAT.md` §3), so the
+	numbering cannot be fixed until the last declaration has run. The first packet in either
+	direction is the latest that can be.
+]=]
+function Namespace.channelById(id: number): any?
+	if not protocol then
+		Namespace.seal()
+	end
+
+	return byId[id]
+end
+
+--[=[
+	@within Namespace
 	@function get
 	@param name string
 	@return Namespace?
@@ -280,6 +310,7 @@ end
 function Namespace.reset()
 	table.clear(namespaces)
 	table.clear(order)
+	table.clear(byId)
 	protocol = nil
 	sealed = false
 end

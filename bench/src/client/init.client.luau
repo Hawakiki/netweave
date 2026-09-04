@@ -33,6 +33,8 @@ local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
 local Stats = game:GetService("Stats")
 
+local TESTS_TIMEOUT = 120
+
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Alloc = require(Shared:WaitForChild("Alloc"))
 local Config = require(Shared:WaitForChild("Config"))
@@ -125,6 +127,23 @@ local function sample(apply: () -> number): (Metrics.Summary, Metrics.Summary, n
 end
 
 quietTheClient()
+
+--[[
+	The benchmark place maps `tests/` in beside `src/` so that one Play produces both the suite and
+	the matrix. The suite installs and uninstalls transports and declares and resets namespaces, so
+	it has to finish before any mode is loaded.
+
+	The wait is conditional on the folder being there: a place built without the tests has nothing
+	to wait for, and a timeout rather than an indefinite wait means a suite that hangs shows up as a
+	slow start rather than a benchmark that never runs.
+]]
+local netweaveFolder = ReplicatedStorage:FindFirstChild("netweave")
+
+if netweaveFolder and netweaveFolder:FindFirstChild("tests") then
+	print("[bench] waiting for the netweave test suite")
+	local marker = ReplicatedStorage:WaitForChild("netweaveTests", TESTS_TIMEOUT)
+	print(`[bench] tests: {if marker then (marker :: StringValue).Value else "timed out"}`)
+end
 
 local entries = Modes.load()
 local adapters: { [string]: Modes.Adapter } = {}

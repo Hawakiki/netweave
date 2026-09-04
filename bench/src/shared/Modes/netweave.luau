@@ -2,7 +2,7 @@
 --!optimize 2
 
 --[=[
-	netweave M1 adapter.
+	netweave adapter.
 
 	Unlike the other four modes this one is not vendored — it is the working tree, mapped into the
 	bench place by `bench/default.project.json`. There is no version to pin because there is no
@@ -10,23 +10,19 @@
 ]=]
 
 --[[
-	The transport at the bottom of this file is the harness's stand-in for M2, not netweave.
+	**M2 removed the stand-in.** M1 measured netweave behind a transport this file implemented,
+	because batching, budgets, audience evaluation and coalescing were a milestone away and Blink,
+	Zap and ByteNet all batch — so measuring netweave unbatched would have measured the absence of
+	a milestone rather than a library. Every netweave number in the 2026-09-04 runs carries that
+	asterisk.
 
-	M1 ships the declaration surface and the codec; batching, flush scheduling, budget enforcement,
-	audience evaluation and intent coalescing are M2 (`PLAN-M1` §4). But Blink, Zap and ByteNet all
-	batch a frame's worth of sends into one remote call, so a netweave measured *without* batching
-	would not be measuring the same thing — it would be measuring the absence of a milestone.
+	What is left here is an adapter and nothing else: the channels declared the way
+	`docs/DESIGN-API.md` §4 says to declare them, and calls into the views. Requiring netweave
+	installs the transport, so there is nothing to wire.
 
-	So this file installs a driver through `nw.internal.transport`, which is exactly the seam M2
-	attaches to, and implements the smallest thing that satisfies `docs/WIRE-FORMAT.md`: a version
-	byte, varint channel ids, and a length prefix on channels whose size varies. Nothing else. What
-	it deliberately does not do is written down at the point it matters, so a number produced here is
-	not mistaken for a number M2 will reproduce.
-
-	The channels are declared the way `docs/DESIGN-API.md` §4 says to declare them — `command` with
-	a real policy attached, not a bare channel — because `PLAN-M1` R-3 says the risk is that
-	authorization costs more than the codec saves, and a benchmark of an unauthorized channel would
-	not answer that.
+	The channels are `command`s with a real policy attached rather than bare ones, because
+	`PLAN-M1` R-3 says the risk is that authorization costs more than the codec saves and a
+	benchmark of an unauthorized channel would not answer that.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -40,40 +36,21 @@ type SchemaName = Modes.SchemaName
 type Direction = Modes.Direction
 
 local WAIT_TIMEOUT = 30
-local FOLDER_NAME = "NETWEAVE"
-local RELIABLE_NAME = "NETWEAVE_RELIABLE"
 
 --[[
-	Wire format v1 (`docs/WIRE-FORMAT.md` §1): one version byte per batch, not per packet.
+	`rate` is enforced from M2 on, so it has to be above what the harness offers or the run would
+	measure the budget rather than the library. `Config.PACKETS_PER_FRAME` at a few hundred steps a
+	second is far past anything a game would declare; this is the budget that load implies, written
+	down rather than fudged.
 ]]
-local WIRE_VERSION = 1
-
---[[
-	A `counted` packet reserves one byte for its length before the payload is written, and the
-	length is only known afterwards. One byte holds 127 in a varint, so a larger payload would need
-	the reserved byte widened and everything after it shifted.
-
-	`Buffer` exposes no shift, and adding one is M2's decision rather than the benchmark's. Every
-	`counted` schema here encodes to six bytes, so the limit is never approached; a schema that
-	crossed it fails loudly instead of writing a corrupt length.
-]]
-local MAX_COUNTED = 127
-
---[[
-	`rate` is declarative in M1 — nothing enforces it until M2 owns the frame loop — but it is not
-	optional, so it has to be a number that means something. The benchmark fires
-	`Config.PACKETS_PER_FRAME` per step at a few hundred steps a second, which is far past anything
-	a game would declare; this is the budget that load implies, written down rather than fudged.
-]]
-local BENCH_RATE = 60000
+local BENCH_RATE = 1e6
 
 return function(canonical): Adapter
-	local vendor = Modes.vendor()
-	local package = vendor:WaitForChild("netweave", WAIT_TIMEOUT) :: Folder
+	local package = ReplicatedStorage:WaitForChild("netweave", WAIT_TIMEOUT) :: Folder
 	assert(package, "netweave is not in the bench place; check bench/default.project.json")
 
-	local nw = require(package:WaitForChild("netweave")) :: any
-	local Buffer = require(package:WaitForChild("codec"):WaitForChild("Buffer")) :: any
+	local src = package:WaitForChild("src", WAIT_TIMEOUT) :: Folder
+	local nw = require(src:WaitForChild("netweave")) :: any
 	local t = nw.types
 
 	local isServer = RunService:IsServer()
@@ -83,9 +60,6 @@ return function(canonical): Adapter
 		benchmark runs in Studio. Leaving it on charges netweave for a debug facility no competitor
 		has and no live server pays, inside the one number — decode allocation per packet — where
 		two tables are the whole measurement.
-
-		Turned off here and disclosed in `bench/RESULTS.md`, rather than left on and explained away
-		in a footnote under a number nobody would then trust.
 	]]
 	nw.internal.context.setGuarded(false)
 
@@ -95,8 +69,8 @@ return function(canonical): Adapter
 
 	--[[
 		`t.array(Entity, 100, 100)` — an exact length, so the count is not written at all and the
-		schema is `static`: no length prefix, and the top level allocates once. Declaring the bound
-		is what buys that, which is the incentive the bound exists to create.
+		schema is `static`: no length prefix, and the payload is claimed in one allocation.
+		Declaring the bound is what buys that, which is the incentive the bound exists to create.
 	]]
 	local ArrayHeavy = t.array(
 		t.struct({
@@ -145,9 +119,9 @@ return function(canonical): Adapter
 	-- -----------------------------------------------------------------------------------------
 
 	--[[
-		A policy that always allows, so the measurement is the *cost* of running one rather than
-		the cost of a particular check. It still pays for everything a real policy pays for: the
-		context acquisition, the call, and the shared verdict.
+		A policy that always allows, so the measurement is the *cost* of running one rather than the
+		cost of a particular check. It still pays for everything a real policy pays for: the context
+		acquisition, the call, and the shared verdict.
 	]]
 	local accept = nw.policy(function()
 		return function()
@@ -156,35 +130,42 @@ return function(canonical): Adapter
 	end)
 
 	--[[
-		Written out six times rather than built in a loop. A computed declaration table is `any`,
+		Written out one by one rather than built in a loop. A computed declaration table is `any`,
 		and the whole point of the surface is that the views are typed — a benchmark that bypassed
-		that would not be exercising what M1 shipped.
+		that would not be exercising what the milestones shipped.
 	]]
 	local bench = nw.namespace("bench", {
 		ArrayHeavyUp = nw.command({ data = ArrayHeavy, rate = BENCH_RATE, authorize = accept }),
 		FlagIdiomaticUp = nw.command({ data = Flags, rate = BENCH_RATE, authorize = accept }),
 		FlagNaiveUp = nw.command({ data = Flags, rate = BENCH_RATE, authorize = accept }),
 
+		--[[
+			Two sets of server-to-client channels, because in netweave the audience is a *declaration*
+			rather than a call-site choice (G3). The other libraries pick between `Fire(player, ...)`
+			and `FireAll(...)` on the same event; the equivalent here is two channels, and declaring
+			both is what makes the harness measure the two paths it means to.
+
+			Collapsing them would have made the `Down` cell secretly a `FireAll` cell: an audience of
+			everyone resolves to one broadcast whatever subject is handed to `publish`.
+		]]
+		ArrayHeavyOwn = nw.event({ data = ArrayHeavy, audience = nw.audience.owner }),
+		FlagIdiomaticOwn = nw.event({ data = Flags, audience = nw.audience.owner }),
+		FlagNaiveOwn = nw.event({ data = Flags, audience = nw.audience.owner }),
+
 		ArrayHeavyDown = nw.event({ data = ArrayHeavy, audience = nw.audience.everyone }),
 		FlagIdiomaticDown = nw.event({ data = Flags, audience = nw.audience.everyone }),
 		FlagNaiveDown = nw.event({ data = Flags, audience = nw.audience.everyone }),
 	})
 
-	--[[ Both peers number the channels from the same sorted names, so this only has to be read. ]]
 	local protocol = nw.protocol()
-	local byId: { [number]: any } = {}
-
-	for _, channel in bench.channels :: any do
-		byId[channel.id] = channel
-	end
 
 	-- -----------------------------------------------------------------------------------------
 	-- Payload shaping, once at load
 	-- -----------------------------------------------------------------------------------------
 
 	--[[ `Payloads` carries enum choices as 0-based integers because ByteNet has no enum type.
-	     netweave's enum payload is a union of string singletons, so convert here rather than in
-	     the measured loop (`PLAN-M0` R-3). ]]
+	     netweave's enum payload is a union of string singletons, so convert here rather than in the
+	     measured loop (`PLAN-M0` R-3). ]]
 	local function toNetweaveFlags(flags: Payloads.Flags): any
 		local shaped = table.clone(flags) :: any
 		shaped.weapon = Payloads.WEAPONS[flags.weapon + 1]
@@ -199,291 +180,6 @@ return function(canonical): Adapter
 	}
 
 	-- -----------------------------------------------------------------------------------------
-	-- The stand-in transport
-	-- -----------------------------------------------------------------------------------------
-
-	local folder: Folder
-	local reliable: RemoteEvent
-
-	if isServer then
-		local existing = ReplicatedStorage:FindFirstChild(FOLDER_NAME)
-
-		if existing then
-			folder = existing :: Folder
-		else
-			folder = Instance.new("Folder")
-			folder.Name = FOLDER_NAME
-			folder.Parent = ReplicatedStorage
-		end
-
-		local remote = folder:FindFirstChild(RELIABLE_NAME)
-
-		if remote then
-			reliable = remote :: RemoteEvent
-		else
-			local created = Instance.new("RemoteEvent")
-			created.Name = RELIABLE_NAME
-			created.Parent = folder
-			reliable = created
-		end
-	else
-		folder = ReplicatedStorage:WaitForChild(FOLDER_NAME, WAIT_TIMEOUT) :: Folder
-		assert(folder, "netweave remotes never replicated to the client")
-		reliable = folder:WaitForChild(RELIABLE_NAME, WAIT_TIMEOUT) :: RemoteEvent
-		assert(reliable, "netweave reliable remote never replicated")
-	end
-
-	--[[
-		One parked buffer per destination — the client has exactly one, the server one per
-		recipient. This is what `Buffer.save`/`load` were built for (`PLAN-M1` D-4): the outgoing
-		buffer is global and swapping is how per-player multiplexing works, so a second buffer
-		implementation here would be measuring something netweave does not do.
-
-		Broadcast is keyed under `false` rather than serialised once and copied per player. M2
-		should do the copy — `RESEARCH §3.7-E` — and until it does, the fan-out cost measured here
-		is a per-recipient encode, which is worse than what M2 will produce, not better.
-	]]
-	local parked: { [any]: any } = {}
-
-	--[[
-		Which destination's buffer is currently loaded, so consecutive sends to the same one cost
-		nothing.
-
-		The first version swapped on every send: `Buffer.save()` before, `Buffer.save()` again
-		after, two tables per packet regardless of payload size. The 2026-09-04 run measured it as
-		a flat **609.3 B per encode call on all three schemas** — a figure that does not move with
-		the payload is not measuring the payload — and at 200 packets a frame it is 400 tables a
-		frame of pure waste. It is also the likeliest part of why netweave's `ArrayHeavy` encode
-		framerate missed acceptance criterion 5.
-
-		The harness fires one destination at a time, and so does a game inside a single channel's
-		fan-out, so tracking the current one removes the swap from the common path entirely.
-	]]
-	local loaded: any = nil
-
-	local function switchTo(destination: any)
-		if loaded == destination then
-			return
-		end
-
-		if loaded ~= nil then
-			parked[loaded] = Buffer.save()
-		end
-
-		local existing = parked[destination]
-
-		--[[ `load(nil)` starts a fresh empty buffer, which is exactly what a destination with no
-		     parked batch needs. ]]
-		Buffer.load(existing)
-		loaded = destination
-	end
-
-	local function write(destination: any, channel: any, value: any)
-		switchTo(destination)
-
-		if Buffer.used() == 0 then
-			Buffer.writeU8(WIRE_VERSION)
-		end
-
-		Buffer.writeVarint(channel.id)
-
-		if channel.codec.framing == "counted" then
-			local at = Buffer.reserve(1)
-			local start = Buffer.used()
-
-			channel.codec.write(value)
-
-			local length = Buffer.used() - start
-			assert(length <= MAX_COUNTED, `netweave bench: {channel.qualified} encoded {length} bytes`)
-			Buffer.patchU8(at, length)
-		else
-			channel.codec.write(value)
-		end
-	end
-
-	--[[
-		Once a frame, send whatever each destination accumulated.
-
-		This is where the saves belong: one per destination per frame rather than two per packet.
-		A destination that received nothing this frame is skipped without touching the buffer at
-		all, and `take` leaves a fresh empty buffer behind, so the parked entry is dropped rather
-		than re-saved.
-	]]
-	local function flush()
-		if loaded ~= nil then
-			parked[loaded] = Buffer.save()
-			loaded = nil
-		end
-
-		for destination, save in parked do
-			Buffer.load(save)
-
-			if Buffer.used() > 0 then
-				local packed, instances = Buffer.take()
-
-				if isServer then
-					if destination == false then
-						reliable:FireAllClients(packed, instances)
-					else
-						reliable:FireClient(destination :: Player, packed, instances)
-					end
-				else
-					reliable:FireServer(packed, instances)
-				end
-			end
-
-			parked[destination] = nil
-		end
-	end
-
-	--[[
-		Reading a batch.
-
-		Every failure here is a value, never a raise: `docs/DESIGN-API.md` G4 and G5 say one
-		malformed packet must not stop the rest of its batch, and the length prefix is what makes
-		resynchronising possible. A rejected packet skips to its own end and the loop continues; a
-		`static` packet cannot be skipped, so the batch stops there, which is the honest limit of
-		what framing can recover.
-	]]
-	local function receive(packed: buffer, instances: { Instance }?, player: Player?)
-		local size = buffer.len(packed)
-
-		if size == 0 then
-			return
-		end
-
-		Buffer.beginRead(packed, instances)
-
-		local version = Buffer.readU8()
-
-		if Buffer.rejected() or version ~= WIRE_VERSION then
-			return
-		end
-
-		while Buffer.cursor() < size do
-			Buffer.setLimit(size)
-
-			local id = Buffer.readVarint()
-			local channel = byId[id]
-
-			if Buffer.rejected() or not channel then
-				return
-			end
-
-			local finish = size
-
-			if channel.codec.framing == "counted" then
-				local length = Buffer.readVarint()
-
-				if Buffer.rejected() then
-					return
-				end
-
-				finish = Buffer.cursor() + length
-
-				if finish > size then
-					return
-				end
-
-				Buffer.setLimit(finish)
-			end
-
-			local value, failure = channel.codec.read()
-			local recoverable = channel.codec.framing == "counted"
-
-			if recoverable then
-				--[[
-					Skip to this packet's end and clear the rejection. Both halves matter: a rejection
-					is sticky, so without the clear the next packet's id read reports the previous
-					packet's failure and the whole batch stops — which is precisely the G5 failure the
-					length prefix is paid for. Caught by `bench/envelope.luau` before Studio saw it.
-				]]
-				Buffer.seek(finish)
-				Buffer.setLimit(size)
-				Buffer.clearRejection()
-			end
-
-			if failure and not recoverable then
-				--[[ A `static` packet has no length to resynchronise on, and the cursor is wherever
-				     the failed read stopped. This is the honest limit of what framing recovers. ]]
-				nw.internal.observer.emit(channel.qualified, player, "parse", failure, size)
-				return
-			end
-
-			if failure then
-				nw.internal.observer.emit(channel.qualified, player, "parse", failure, size)
-			elseif channel.handler then
-				--[[
-					`command` is authorized per packet, which is the R-3 measurement: the harness
-					sees the policy call, the context acquisition and the handler together, because
-					that is what a game pays.
-				]]
-				if channel.authorize then
-					local ctx = nw.internal.context.acquire(player, channel.qualified)
-					local verdict = channel.authorize(ctx, value)
-
-					if verdict.ok then
-						channel.handler(ctx, if verdict.value ~= nil then verdict.value else value)
-					else
-						nw.internal.observer.emit(
-							channel.qualified,
-							player,
-							"authorize",
-							verdict.reason or "denied",
-							size
-						)
-					end
-
-					nw.internal.context.release(player)
-				else
-					channel.handler(value)
-				end
-			end
-		end
-	end
-
-	--[[
-		One flush per frame, on the same event the harness fires from. Blink and Zap batch into one
-		buffer and flush on `Heartbeat` unless told otherwise, so measuring netweave without this
-		would be comparing a batched library against an unbatched one.
-
-		This connection is made at load, before the harness makes its own, so a frame's sends land in
-		the *next* frame's flush. Blink and Zap have the same one-frame property for the same reason;
-		it costs latency, not bytes, and the benchmark measures bytes and framerate.
-	]]
-	RunService.PostSimulation:Connect(flush)
-
-	if isServer then
-		reliable.OnServerEvent:Connect(function(player, packed, instances)
-			receive(packed :: buffer, instances :: { Instance }, player)
-		end)
-	else
-		reliable.OnClientEvent:Connect(function(packed, instances)
-			receive(packed :: buffer, instances :: { Instance }, nil)
-		end)
-	end
-
-	nw.internal.transport.install({
-		send = function(channel: any, value: any)
-			write("server", channel, value)
-		end,
-
-		publish = function(channel: any, subject: any, value: any)
-			write(subject, channel, value)
-		end,
-
-		broadcast = function(channel: any, value: any)
-			write(false, channel, value)
-		end,
-
-		invoke = function(): (any?, string?)
-			return nil, "netweave queries are not part of the M1 benchmark"
-		end,
-
-		dispatch = function() end,
-	})
-
-	-- -----------------------------------------------------------------------------------------
 	-- The adapter
 	-- -----------------------------------------------------------------------------------------
 
@@ -494,27 +190,34 @@ return function(canonical): Adapter
 	     channel by string. The side is chosen by where this code runs, never by the direction: the
 	     client half of an `Up` channel is the only half that can send, and the server half is the
 	     only half that can listen. That is guarantee G6, and it is why there is no branch here. ]]
-	local function view(schema: SchemaName, direction: Direction): any
-		local name = `{schema}{direction}`
+	local function named(name: string): any
 		local handle = (if isServer then server else client)[name]
 		assert(handle, `netweave has no channel "{name}"`)
 		return handle
 	end
 
+	local function view(schema: SchemaName, direction: Direction): any
+		return named(`{schema}{direction}`)
+	end
+
 	return {
 		name = "netweave",
-		version = `M1 (protocol {protocol.hash})`,
+		version = `M2 (protocol {protocol.hash})`,
 		payloads = payloads,
 
 		bindFire = function(schema, direction, player)
-			local handle = view(schema, direction)
-
 			if isServer then
 				assert(player, "server-side netweave fire needs a recipient")
+
+				--[[ The owner-audience twin, so one named recipient means one recipient. ]]
+				local handle = named(`{schema}Own`)
+
 				return function(payload)
 					handle:publish(player, payload)
 				end
 			end
+
+			local handle = view(schema, direction)
 
 			return function(payload)
 				handle:send(payload)
@@ -531,22 +234,27 @@ return function(canonical): Adapter
 			else nil,
 
 		onReceive = function(schema, direction, callback)
-			local handle = view(schema, direction)
-
 			if isServer then
-				handle:listen(function(ctx: any, payload: any)
+				view(schema, direction):listen(function(ctx: any, payload: any)
 					callback(payload, ctx.player)
 				end)
-			else
-				handle:listen(function(payload: any)
-					callback(payload, nil)
-				end)
+
+				return
 			end
+
+			local function receive(payload: any)
+				callback(payload, nil)
+			end
+
+			--[[ Both halves of the pair feed the harness's one counter for this cell, the way one
+			     event with two send methods does for the other libraries. ]]
+			view(schema, direction):listen(receive)
+			named(`{schema}Own`):listen(receive)
 		end,
 
 		--[[ Nil, like every other adapter: the harness declares the hook but never calls it, and
-		     Blink and Zap both flush on their own `Heartbeat` connection. netweave does the same,
-		     above, so all three are measured under the same batching behaviour. ]]
+		     netweave flushes on its own `PostSimulation` connection the way Blink and Zap flush on
+		     `Heartbeat`. All three are measured under the same batching behaviour. ]]
 		flush = nil,
 	}
 end
