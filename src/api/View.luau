@@ -59,7 +59,7 @@ type function brandedAs(payload, name)
 	end
 
 	local tag = types.newtable()
-	tag:setproperty(types.singleton(name), types.optional(types.singleton(true)))
+	tag:setproperty(types.singleton(name), types.singleton(true))
 
 	return types.intersectionof(value, tag)
 end

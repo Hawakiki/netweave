@@ -598,9 +598,23 @@ local function make(
 		because every netweave type is bounded and the layout can add them up. A declared `maxBytes`
 		can only lower it — asking for more than the schema can produce is a number that could never
 		be reached, and accepting it would let an author believe they had set a limit.
+
+		The same disease has a second form, and it was live until an audit found it: a declaration on a
+		**statically framed** channel is inert. A static payload carries no length prefix — the reader
+		already knows where it ends — so there is no claim to check and the ceiling is never consulted.
+		`maxBytes = 4` on a schema fixed at fourteen bytes was accepted, stored, and did nothing.
 	]]
 	local derived = channel.codec.maxSize
 	local declared = channel.maxBytes
+
+	if declared and channel.codec.framing == "static" then
+		error(
+			`nw.{class} declares maxBytes = {declared}, and this schema is a fixed {derived} bytes every `
+				.. `time. A static payload carries no length to police — the size is guaranteed by the `
+				.. `framing rather than by a check, so the declaration would do nothing. Remove it.`,
+			3
+		)
+	end
 
 	if declared and declared > derived then
 		error(

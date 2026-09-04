@@ -163,17 +163,40 @@ netweave encrypted would be decryptable by the client that holds the key. The tr
 milestone, because a security milestone that stays silent about what it does not do invites the
 assumption that it does.
 
-### D-9 — `Untrusted<T>` stays a subtype — **needs the owner's confirmation**
+### D-9 — `Untrusted<T>` stays a subtype, and the tag becomes required — **decided**
 
-The shared plan asks that `Untrusted<T>`'s fields be *inaccessible*. `docs/DESIGN-API.md` §6 chose
-the opposite deliberately: the brand is a subtype, so logging, arithmetic and comparison work
-without ceremony, and the wrapper alternative was rejected because it lies about the runtime value
-— there is no wrapper at runtime, and a type that claims otherwise makes every `print` a puzzle.
+The shared plan asked that `Untrusted<T>`'s fields be *inaccessible*. That is rejected, and
+something smaller and measured is done instead.
 
-Making access impossible requires that wrapper. **The recommendation is to keep §6** and get the
-guarantee from D-2 and the validation boundary instead: what must be impossible is *acting* on
-untrusted data, not *reading* it. If the owner prefers the stricter reading, §6 is what changes,
-and it changes before phase 3 starts rather than during it.
+**Why not the wrapper.** Making field access impossible needs a runtime wrapper, which allocates
+per packet — the cost `CLAUDE.md` §4 forbids and that M1 and M2 spent two milestones removing. A
+type-only wrapper instead lies about the value, which §6 already rejected. And neither helps: a
+scalar cannot carry a brand (`number & { tag }` is `never`), so after unwrapping you are holding
+plain numbers again. The proposal delays the leak rather than closing it.
+
+**What the audit found instead.** Probing eight cases through `analyze` showed §6's central claim
+was already false. The tag was `{ __nwTrusted: true? }` — optional — and a table literal checked
+against an optional property satisfies it by not having it:
+
+| case | optional tag | required tag |
+|---|---|---|
+| `giveItem({ screen = 1 })` | compiles | **rejected** |
+| `giveItem({ screen = untrusted.screen })` | compiles | **rejected** |
+| a `command` handler's payload | compiles | compiles |
+| `nw.validate` output | compiles | compiles |
+| `api_reject` | 15 | 15 |
+
+The second row is the one that matters: the brand is on the container, so taking an untrusted
+payload apart and rebuilding it laundered it in a line a programmer writes without thinking.
+
+**Decision: the tag is required.** Four lines across `src/api/Trust.luau` and `src/api/View.luau`,
+no runtime change. The price is a type asserting a field the runtime has not got, which is a much
+smaller lie than the wrapper. A spelled-out `__nwTrusted = true` still compiles, and that is the
+escape hatch: a forgery you have to write is one a reviewer sees.
+
+**Measured honestly, the whole apparatus buys one diagnostic.** Making both brands identity drops
+`api_reject` from 15 to 14. It is kept because it is the only mechanism that travels with the
+value — every other guarantee lives in the declaration and is visible only at the call site.
 
 ### D-10 — Failure paths outnumber success paths, and the ratio is asserted
 
@@ -264,6 +287,11 @@ settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
       from the schema** rather than declared, so a game that asks for nothing still gets one. A
       declared `maxBytes` may only tighten it, and asking for more than the schema can produce is
       refused (D-5)
+- [x] **A ceiling on a statically framed channel is refused too.** Found by the phase 3 audit: a
+      static payload carries no length prefix, so there is no claim to check and the declaration
+      was accepted, stored and never consulted — `maxBytes = 4` on a schema fixed at fourteen bytes
+      did nothing at all. The same disease as a ceiling above what the schema can reach, in the
+      form the upper-bound check could not see
 - [x] ~~A per-tick decode-work ceiling, charged per element and per table.~~ **Not built, and D-5
       carries the measurement.** After D-4 the hostile nested packet costs 0.0238 us per byte and
       the honest one 0.0480 — decode work is proportional to payload size, so bounding the bytes
@@ -279,16 +307,29 @@ settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
 - [ ] Re-measure `ArrayHeavy` decode allocation against the M2 figure of 9309.2 B and record both
       — folded into the single Studio run at the end of the milestone
 
-### Phase 3 — the trust boundary, decided
+### Phase 3 — the trust boundary, decided — **done**
 
-- [ ] **Resolve D-9 first.** Either `docs/DESIGN-API.md` §6 gets a strikethrough and a wrapper, or
-      this plan's D-9 stands. Nothing else in this phase starts until it is settled
-- [ ] `Trusted<T>` is producible only where the value has actually been validated, and the
-      producers are enumerated in one place
-- [ ] `nw.validate` reconciled — the shared plan says `nw.validate(policy)`, the implementation is
-      `nw.validate(schema, value)`. Pick one, write it in `DESIGN-API.md`, and make the other a
-      type error
-- [ ] A `*_reject.luau` case per producer, with the diagnostic count updated in the header
+- [x] **D-9 resolved before anything else in the phase.** Not the wrapper the shared plan asked for
+      — it allocates per packet, lies about the value, and does not help scalars. The tag becomes
+      **required** instead, which closes a hole the audit found while answering the question
+- [x] `Trusted<T>` is producible only where the value has actually been validated. It was not
+      before: an optional tag is satisfied by a table literal that omits it, so `giveItem({ screen = 1 })`
+      and the one-line laundering `giveItem({ screen = untrusted.screen })` both compiled. Cases 16
+      and 17
+- [x] The producers are enumerated in `src/api/Trust.luau` and `DESIGN-API.md` §6, and the fourth
+      — an explicit cast for server-authored data — is written down rather than left to be
+      discovered. It is a cast and not an `nw.trust()` helper for the same reason there is no
+      `nw.untrust`
+- [x] `nw.validate` reconciled in favour of `nw.validate(schema, value)`, and the other reading was
+      **already** a type error — `TrustedPayload` refuses a first argument with no `__payload`.
+      Verified rather than built, and pinned as case 19. What is new is §6 saying what `Trusted<T>`
+      *asserts*, which it never did: not "well-formed" — the codec guaranteed that — but "the server
+      has taken responsibility". Both producers confer trust on that reading
+- [x] Four cases added, count 15 to 19. Case 18 exists because case 13 was not what it claimed:
+      it fails on the *absence* of `__nwTrusted`, so it would still pass if `Untrusted` became `any`
+      tomorrow. Case 18 fails only on `__nwUntrusted`, so the two brands are pinned separately
+- [x] `tests/api_ok.luau` pins the positive half — reading fields through the brand, all three
+      producers, and the cast escape hatch
 
 ### Phase 4 — `query`, with the timeout the field does not have
 
