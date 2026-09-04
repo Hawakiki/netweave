@@ -114,11 +114,23 @@ the 13% decode lead is real but only just.
 
 One cell, one direction. That is the whole measured gap, and it has an identified cause.
 
-The encode side has a known defect that is the adapter's, not the codec's: the stand-in transport
-calls `Buffer.save()` twice per send to swap destination buffers, allocating two tables per packet
-whatever the payload size. The flat 609.3 B encode figure below is that, and at 200 packets a
-frame it is 400 tables a frame of pure waste. It is fixed after this run, and re-measuring the
-`ArrayHeavy` cell is the first item of M2's benchmark work.
+Two things are wrong on the encode side, and the second is much larger than the first.
+
+**The adapter allocated two tables per send.** The stand-in transport called `Buffer.save()` twice
+to swap destination buffers, whatever the payload size — the flat 609.3 B encode figure below is
+that, and at 200 packets a frame it is 400 tables a frame of waste. Fixed after this run.
+
+**`Serdes` never calls `Buffer.allocate`.** Every scalar goes through `Buffer.writeU8` and friends,
+and each of those allocates its own one to eight bytes: bounds check, growth check, cursor update,
+per field. One `ArrayHeavy` packet is 100 structs of six `u8`, so **600 allocations per packet and
+120,000 per frame**; a flag packet is six, so 1,200 per frame. Blink and Zap emit one allocation
+for a whole block and then write at `offset + k`.
+
+That is `PLAN-M1` D-2's first layout pass — "fixed-size prefix calculation so the top level
+allocates once" — computed and then not used. `Ir.lower` produces `fixedSize`, `Serdes.build`
+copies it onto the `Codec`, and nothing reads it. **It explains the shape of the data in a way the
+adapter defect cannot:** the gap appears only where the payload has hundreds of fields, and
+vanishes where it has six.
 
 **The M0 finding that raw beats every library on small payloads did not reproduce.** On
 `FlagIdiomatic` raw is 233 against ByteNet's 234 and netweave's 218 — a tie rather than a win, and
