@@ -45,6 +45,11 @@ local REMOTE_PATHS: { [string]: { string } } = {
 	blink = { "BLINK_RELIABLE_REMOTE" },
 	zap = { "ZAP", "ZAP_RELIABLE" },
 	bytenet = { "ByteNetReliable" },
+
+	--[[ netweave has no code generator, so this path is the one `bench/src/shared/Modes/netweave.luau`
+	     creates. `WIRE-FORMAT.md` §1 gives every peer two remotes, reliable and unreliable; the
+	     benchmark only sends on the reliable one. ]]
+	netweave = { "NETWEAVE", "NETWEAVE_RELIABLE" },
 }
 
 export type Tap = {
