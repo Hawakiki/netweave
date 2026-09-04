@@ -2,6 +2,7 @@
 netweave.rbxm
 netweave-test.rbxl
 bench/Benchmark.rbxl
+bench/Smoke.rbxl
 
 # Studio writes one of these beside a place file while it has it open
 *.rbxl.lock
