@@ -588,6 +588,80 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Fixed-size blocks
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		A payload whose size is known claims all of it in one allocation and fills it with writers
+		that skip the bounds check (`src/codec/Buffer.luau`, Blocks). Two things about that are
+		worth pinning, because both fail silently.
+	]]
+	local Fixed = t.struct({ a = t.u8, b = t.u16, c = t.f32 })
+	local codec = Serdes.fromSchema(Fixed)
+
+	equals("a fixed schema knows its size", codec.fixedSize, 7)
+	equals("and needs no length prefix", codec.framing, "static")
+
+	--[[
+		The one that bit: **encode raises on a value the schema forbids, and a raise between
+		opening a block and closing it leaves the block open.** Nothing closes it, so the next
+		payload writes through a stale cursor into space nobody claimed — and produces a buffer of
+		length zero, because the allocation that would have moved `used` never ran.
+
+		This is not an edge case. Raising on bad input is the encode-side posture, so the leak is
+		on the ordinary path.
+	]]
+	local ok = pcall(function()
+		codec.write({ a = 999, b = 1, c = 1 })
+	end)
+
+	check("an out-of-range field still refuses", not ok)
+
+	--[[ A raised write leaves the bytes it managed to emit, block or no block, so the caller
+	     discards them. That part is the documented contract; what is under test is that the
+	     *block state* did not survive to corrupt what comes next. ]]
+	Buffer.take()
+
+	codec.write({ a = 1, b = 2, c = 3 })
+	local packed = Buffer.take()
+
+	equals("and the payload after it is unharmed", buffer.len(packed), 7)
+
+	Buffer.beginRead(packed, nil)
+	local value, failure = codec.read()
+
+	equals("and decodes", failure, nil)
+	equals("field a", value.a, 1)
+	equals("field b", value.b, 2)
+	equals("field c", value.c, 3)
+end
+
+do
+	--[[
+		A block filled short is a codec bug that corrupts the wire *silently*: the reader is
+		symmetric, so it would read the missing bytes back from the same wrong place without
+		complaining. `closeBlock` compares the cursor against the claim so that it fails loudly
+		instead (`PLAN-M2` R-4).
+	]]
+	Buffer.openBlock(4)
+	Buffer.putU8(1)
+
+	local short = pcall(Buffer.closeBlock)
+	check("a block filled short is refused", not short)
+
+	--[[ And the refusal leaves the buffer usable rather than wedged. ]]
+	Buffer.take()
+
+	local codec = Serdes.fromSchema(t.u8)
+	codec.write(9)
+	--[[ Parenthesised: `take` returns the buffer *and* the instance sidecar, and passing both to
+	     `buffer.len` is an argument-count error rather than a truncation. ]]
+	local recovered = Buffer.take()
+	equals("the buffer still works afterwards", buffer.len(recovered), 1)
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 if failures > 0 then
 	error(`{failures} serdes assertions failed`)

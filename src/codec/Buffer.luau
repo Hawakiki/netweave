@@ -29,9 +29,14 @@
 
 	Consequence: the compiled closures live in a *different* module and reach these through
 	function calls, so each primitive costs one call. ByteNet pays the same and M0 measured it
-	competitive. If phase 6 shows the call is what separates us from Blink, the fix is to move
-	compilation into this module so the state becomes an upvalue; that is a measurement away, not
-	a guess away.
+	competitive.
+
+	**M1 phase 6 measured it and the call was not competitive on large payloads.** netweave encoded
+	`ArrayHeavy` at 85 FPS against Blink's 144, and the cause was one level below this note: every
+	primitive called `allocate` as well, so a 600-byte packet paid 1,200 calls rather than 600. The
+	`put*` family below removes the second one. Moving closure synthesis into this module, so the
+	buffer state becomes an upvalue and the first call goes too, remains available and remains a
+	measurement away rather than a guess away.
 ]]
 
 local Codec = {}
@@ -99,10 +104,17 @@ local function allocate(length: number): number
 	local needed = offset + length
 
 	if needed > outgoingSize then
-		local size = outgoingSize
-		repeat
+		--[[
+			Doubling from the current size, but never from zero: `0 * 2` is `0`, so a buffer that
+			somehow has no capacity would spin here forever rather than grow. A zero-size buffer is
+			reachable — a parked record starts as one — and a growth loop that cannot terminate is a
+			hung server rather than a wrong answer.
+		]]
+		local size = math.max(outgoingSize, INITIAL_SIZE)
+
+		while size < needed do
 			size *= 2
-		until size >= needed
+		end
 
 		local grown = buffer.create(size)
 		buffer.copy(grown, 0, outgoing, 0, offset)
@@ -116,6 +128,98 @@ local function allocate(length: number): number
 end
 
 Codec.allocate = allocate
+
+-- ---------------------------------------------------------------------------------------------
+-- Blocks
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	A block is a run of bytes whose total size is known before the first one is written, claimed in
+	one `allocate` so that everything inside it can skip the bookkeeping.
+
+	This is `PLAN-M1` D-2's first layout pass, and it was missing until M2. `Ir.lower` has always
+	computed `fixedSize`; nothing read it, so a 100-entity `ArrayHeavy` packet made **600 separate
+	allocations** — six hundred bounds checks, growth checks and cursor stores for six hundred
+	bytes, and 120,000 of them a frame at the benchmark's load. Blink and Zap emit one allocation
+	for a block and then write at `offset + k` (`RESEARCH §3.7-D`, §3.8-T).
+
+	Inside a block the buffer cannot grow, because the space is already claimed. That is what makes
+	the `put*` writers below safe without a bounds check.
+
+	**A block does not survive an error, and it must not.** Encode raises on a value the schema
+	forbids — that is the security posture, not an exception — and a raise between `openBlock` and
+	`closeBlock` leaves the block open with no one to close it. Every later payload would then write
+	through a stale cursor into space nobody claimed. So the state is self-healing: `openBlock`
+	starts fresh rather than nesting, and `load` and `take` clear it, which covers the transport
+	because both are how a payload boundary is crossed. Found by `tests/serdes_runtime.luau`, which
+	has a refusal test immediately before a byte-count assertion.
+]]
+local blockCursor = 0
+local blockDepth = 0
+
+--[=[
+	@within CodecBuffer
+	@function openBlock
+	@param length number -- exact bytes the block will contain
+	@return number -- the offset the block starts at
+
+	Claims `length` bytes and switches the `put*` writers on. Every write until the matching
+	[CodecBuffer.closeBlock] lands inside the claim, in order, with no further allocation.
+
+	Blocks do not nest. Opening one starts it fresh, which is what makes a block left open by a
+	raising encode harmless rather than corrupting.
+
+	:::caution
+	A block must be filled **exactly**. `closeBlock` raises if it was not, because a short block
+	leaves the cursor before the end of the claim and every subsequent byte lands one place too
+	early — which a symmetric reader would read back without complaint.
+	:::
+]=]
+function Codec.openBlock(length: number): number
+	local base = allocate(length)
+	blockCursor = base
+	blockDepth = 1
+
+	return base
+end
+
+--[=[
+	@within CodecBuffer
+	@function closeBlock
+
+	Ends the innermost block, and checks that it was filled exactly.
+]=]
+function Codec.closeBlock()
+	blockDepth = 0
+
+	--[[
+		`allocate` already moved `outgoingUsed` to the end of the claim, so the two agreeing is the
+		whole invariant. They disagree only if a writer wrote fewer bytes than the layout said it
+		would, which is a codec bug that corrupts the wire silently — the reader is symmetric and
+		would read the wrong bytes back from the same wrong place without failing (`PLAN-M2` R-4).
+	]]
+	if blockCursor ~= outgoingUsed then
+		local shortfall = outgoingUsed - blockCursor
+		blockCursor = outgoingUsed
+		error(`[netweave] a fixed-size block was short by {shortfall} bytes; this is a codec bug`)
+	end
+end
+
+--[=[
+	@within CodecBuffer
+	@function discardBlock
+
+	Forgets any open block without checking that it was filled.
+
+	[CodecBuffer.closeBlock] is the ordinary way out and it verifies the claim; this is for the
+	other way out. An encode that raises on a value the schema forbids — the ordinary posture, not
+	an exception — leaves a block open with nobody to close it, and the next thing to call
+	[CodecBuffer.reserve] would then take its bytes from a stale cursor. A packet boundary is where
+	that gets cleaned up.
+]=]
+function Codec.discardBlock()
+	blockDepth = 0
+end
 
 --[=[
 	@within CodecBuffer
@@ -256,6 +360,134 @@ function Codec.writeInstance(value: Instance)
 	outgoingInstances[outgoingInstanceCount] = value
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Block writers
+-- ---------------------------------------------------------------------------------------------
+
+--[=[
+	@within CodecBuffer
+	@function putU8
+	@param value number
+
+	Writes at the block cursor. Valid only between [CodecBuffer.openBlock] and
+	[CodecBuffer.closeBlock], where the space is already claimed.
+
+	There is one of these for every `write*` that takes a fixed number of bytes. They exist to
+	remove a call, not a branch: `writeU8` costs a call into `allocate` on top of its own, and that
+	second call is charged six hundred times for one `ArrayHeavy` packet. `Serdes` picks between the
+	two families once, at closure-build time, from the layout.
+]=]
+local function putU8(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 1
+	buffer.writeu8(outgoing, offset, value)
+end
+
+Codec.putU8 = putU8
+
+--[=[
+	@within CodecBuffer
+	@function putU16
+	@param value number
+]=]
+function Codec.putU16(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 2
+	buffer.writeu16(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putU32
+	@param value number
+]=]
+function Codec.putU32(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 4
+	buffer.writeu32(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putI8
+	@param value number
+]=]
+function Codec.putI8(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 1
+	buffer.writei8(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putI16
+	@param value number
+]=]
+function Codec.putI16(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 2
+	buffer.writei16(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putI32
+	@param value number
+]=]
+function Codec.putI32(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 4
+	buffer.writei32(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putF32
+	@param value number
+]=]
+local function putF32(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 4
+	buffer.writef32(outgoing, offset, value)
+end
+
+Codec.putF32 = putF32
+
+--[=[
+	@within CodecBuffer
+	@function putF64
+	@param value number
+]=]
+function Codec.putF64(value: number)
+	local offset = blockCursor
+	blockCursor = offset + 8
+	buffer.writef64(outgoing, offset, value)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putString
+	@param value string
+	@param length number
+]=]
+function Codec.putString(value: string, length: number)
+	local offset = blockCursor
+	blockCursor = offset + length
+	buffer.writestring(outgoing, offset, value, length)
+end
+
+--[=[
+	@within CodecBuffer
+	@function putBuffer
+	@param value buffer
+	@param length number
+]=]
+function Codec.putBuffer(value: buffer, length: number)
+	local offset = blockCursor
+	blockCursor = offset + length
+	buffer.copy(outgoing, offset, value, 0, length)
+end
+
 --[=[
 	@within CodecBuffer
 	@function reserve
@@ -267,6 +499,15 @@ end
 	(`docs/WIRE-FORMAT.md` §5).
 ]=]
 function Codec.reserve(length: number): number
+	if blockDepth > 0 then
+		--[[ Inside a block the space is already claimed, so a reservation is a cursor step. One
+		     branch per scope rather than per field: scopes open at a payload root and at dynamic
+		     array elements, never at a value. ]]
+		local offset = blockCursor
+		blockCursor = offset + length
+		return offset
+	end
+
 	return allocate(length)
 end
 
@@ -302,6 +543,61 @@ end
 
 --[=[
 	@within CodecBuffer
+	@function shift
+	@param from number -- absolute offset of the first byte to move
+	@param by number -- how many bytes to open up
+
+	Opens `by` bytes at `from`, moving everything after it along.
+
+	This exists for one case and should stay that way: a `counted` packet reserves one byte for its
+	length before the payload is written, and a payload of 128 bytes or more needs two. Widening
+	the reservation after the fact is cheaper than the alternatives — serialising into a scratch
+	buffer and copying costs a move on **every** counted packet, while this costs one only on the
+	large ones.
+
+	:::caution
+	Absolute offsets taken before the shift are stale afterwards if they sit at or past `from`.
+	:::
+]=]
+function Codec.shift(from: number, by: number)
+	local moving = outgoingUsed - from
+
+	--[[ Grows first, so the destination exists before anything is moved into it. `buffer.copy`
+	     handles an overlapping move on one buffer — verified under lune, not assumed. ]]
+	allocate(by)
+
+	if moving > 0 then
+		buffer.copy(outgoing, from + by, outgoing, from, moving)
+	end
+end
+
+--[=[
+	@within CodecBuffer
+	@function instancesWritten
+	@return number
+
+	How many instances the outgoing sidecar holds. A packet that wants to record its own instance
+	count reads this before and after writing its payload.
+]=]
+function Codec.instancesWritten(): number
+	return outgoingInstanceCount
+end
+
+--[=[
+	@within CodecBuffer
+	@function seekInstances
+	@param position number
+
+	Moves the incoming sidecar cursor, the way [CodecBuffer.seek] moves the byte cursor. A refused
+	packet has to take its instances with it, or every instance after it is read against the wrong
+	field.
+]=]
+function Codec.seekInstances(position: number)
+	incomingInstanceCursor = position
+end
+
+--[=[
+	@within CodecBuffer
 	@function used
 	@return number -- bytes written so far
 ]=]
@@ -329,10 +625,92 @@ end
 
 --[=[
 	@within CodecBuffer
+	@function emptySave
+	@return Save
+
+	A parked record with nothing in it, ready to be loaded.
+
+	The transport keeps one per recipient and refills it with [CodecBuffer.saveInto], so this is
+	called once per destination rather than per packet. It exists so that the record's shape is
+	defined here rather than copied into every caller that needs one.
+]=]
+function Codec.emptySave(): Save
+	return {
+		buffer = buffer.create(INITIAL_SIZE),
+		size = INITIAL_SIZE,
+		used = 0,
+		instances = {},
+		instanceCount = 0,
+	}
+end
+
+--[=[
+	@within CodecBuffer
+	@function saveInto
+	@param record Save -- overwritten in place
+
+	[CodecBuffer.save] without the allocation.
+
+	`save` builds a table, and the transport parks one buffer per recipient and swaps between them
+	on the send path — so a `save` per swap is a table per packet, which is exactly the cost M1's
+	benchmark measured as a flat 609.3 B of encode allocation on every schema. A record owned by
+	the caller and refilled costs nothing after the first frame.
+]=]
+function Codec.saveInto(record: Save)
+	record.buffer = outgoing
+	record.size = outgoingSize
+	record.used = outgoingUsed
+	record.instances = outgoingInstances
+	record.instanceCount = outgoingInstanceCount
+end
+
+--[=[
+	@within CodecBuffer
+	@function mark
+	@return number -- bytes written
+	@return number -- instances written
+
+	Where the buffer is, as two numbers rather than a record.
+
+	Paired with [CodecBuffer.rollback] this is an allocation-free rewind, which the send path needs
+	on every packet: an encode that raises has to leave the batch as it found it, and the batch
+	behind the half-written packet is a real player's real traffic.
+]=]
+function Codec.mark(): (number, number)
+	return outgoingUsed, outgoingInstanceCount
+end
+
+--[=[
+	@within CodecBuffer
+	@function rollback
+	@param used number
+	@param instanceCount number
+
+	Rewinds to a [CodecBuffer.mark].
+
+	The buffer itself is not shrunk — it may have grown past the mark and that growth is worth
+	keeping. What is undone is the *content*: the bytes past `used` are unreachable and the sidecar
+	entries past `instanceCount` are cleared, so a retained Instance does not outlive the packet
+	that was abandoned.
+]=]
+function Codec.rollback(used: number, instanceCount: number)
+	for index = instanceCount + 1, outgoingInstanceCount do
+		outgoingInstances[index] = nil
+	end
+
+	outgoingUsed = used
+	outgoingInstanceCount = instanceCount
+	blockDepth = 0
+end
+
+--[=[
+	@within CodecBuffer
 	@function load
 	@param saved Save? -- nil starts a fresh, empty buffer
 ]=]
 function Codec.load(saved: Save?)
+	blockDepth = 0
+
 	if saved then
 		outgoing = saved.buffer
 		outgoingSize = saved.size
@@ -359,6 +737,8 @@ end
 	larger than its contents, and a remote must not carry the slack.
 ]=]
 function Codec.take(): (buffer, { Instance })
+	blockDepth = 0
+
 	local packed = buffer.create(outgoingUsed)
 	buffer.copy(packed, 0, outgoing, 0, outgoingUsed)
 

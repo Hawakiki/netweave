@@ -42,6 +42,7 @@ src/                          netweave itself
   types/                      the type vocabulary
   codec/                      Buffer (bytes), Ir (lowering + layout), Serdes (closures)
   api/                        channel classes, policies, trust, context, views, namespaces
+  transport/                  the wire: batching, budgets, audience evaluation, dispatch
 tests/                        *_ok / *_reject / *_runtime, plus run.server.luau
 spike/                        throwaway experiments; nothing here ships
   inference/                  can Luau infer a payload from a schema? (phase 1)
@@ -53,6 +54,7 @@ docs/
   milestone/
     PLAN-M0.md                one file per milestone, English
     PLAN-M1.md
+    PLAN-M2.md
 bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
@@ -211,6 +213,8 @@ lune run tests/buffer_runtime
 lune run tests/ir_runtime
 lune run tests/serdes_runtime
 lune run tests/api_runtime
+lune run tests/transport_runtime
+lune run tests/budget_runtime
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike
@@ -230,6 +234,11 @@ rojo serve bench/default.project.json              # the M0 harness
 under lune, and the codec has to round-trip all four. Everything that *can* run under lune
 should — it is faster and needs no Studio — but a codec test that skips those types is not
 testing the codec.
+
+**The benchmark place runs the test suite too.** `bench/default.project.json` maps `tests/` in
+beside `src/`, so one Play produces the suite and then the matrix — the suite installs and
+uninstalls transports and declares and resets namespaces, so both bench drivers wait on the
+`netweaveTests` marker before loading any mode.
 
 `tests/roblox_runtime.luau` is the file that cannot: it is the only test not in the lune list
 above. The Studio runner only picks up `*_runtime` modules, and each of those returns `true`,

@@ -27,7 +27,7 @@
 local Observer = {}
 
 --[=[
-	@type Stage "parse" | "budget" | "authorize"
+	@type Stage "parse" | "budget" | "authorize" | "handler" | "queue" | "send"
 	@within Observer
 
 	How far a packet got before it was refused.
@@ -37,12 +37,23 @@ local Observer = {}
 	| `parse` | the bytes did not decode against the channel's schema |
 	| `budget` | the sender is over the channel's declared `rate` |
 	| `authorize` | the payload decoded and was in budget, and a policy said no |
+	| `handler` | the packet was delivered and the game's own handler threw |
+	| `queue` | nothing is listening on that channel yet, and the backlog is full |
+	| `send` | netweave refused to put a packet on the wire |
 
-	The three are worth separating because they mean different things about the sender. `parse`
-	is a stale client or an attacker; `budget` is a flood; `authorize` is a player asking for
-	something they are not entitled to.
+	The first three are worth separating because they mean different things about the sender.
+	`parse` is a stale client or an attacker; `budget` is a flood; `authorize` is a player asking
+	for something they are not entitled to.
+
+	`handler` and `queue` are about this game rather than the sender: one says a handler threw, the
+	other that no handler is attached and the backlog has started dropping. Both are the kind of
+	thing that is otherwise noticed as "some packets do not seem to arrive".
+
+	`send` points the other way entirely — netweave refusing *this* game's own outgoing packet. The
+	only case in M2 is an unreliable payload over Roblox's size limit, which Roblox enforces by
+	dropping silently, so without a signal here it is invisible from both ends (`RESEARCH §3.7-F`).
 ]=]
-export type Stage = "parse" | "budget" | "authorize"
+export type Stage = "parse" | "budget" | "authorize" | "handler" | "queue" | "send"
 
 --[=[
 	@interface Rejection

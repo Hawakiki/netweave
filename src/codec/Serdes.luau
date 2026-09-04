@@ -76,6 +76,22 @@ local WRITE_NUMBER: { [string]: (value: number) -> () } = {
 	f64 = Buffer.writeF64,
 }
 
+--[[
+	The same eight writers, for bytes an enclosing block has already claimed. `Serdes` chooses
+	between the two families once per node at closure-build time, from the layout, so nothing
+	branches per packet (`src/codec/Buffer.luau`, Blocks).
+]]
+local PUT_NUMBER: { [string]: (value: number) -> () } = {
+	u8 = Buffer.putU8,
+	u16 = Buffer.putU16,
+	u32 = Buffer.putU32,
+	i8 = Buffer.putI8,
+	i16 = Buffer.putI16,
+	i32 = Buffer.putI32,
+	f32 = Buffer.putF32,
+	f64 = Buffer.putF64,
+}
+
 local READ_NUMBER: { [string]: () -> number } = {
 	u8 = Buffer.readU8,
 	u16 = Buffer.readU16,
@@ -103,16 +119,32 @@ local READ_CHUNK: { [number]: () -> number } = {
 local reserve = Buffer.reserve
 local reject = Buffer.reject
 local rejected = Buffer.rejected
+local openBlock = Buffer.openBlock
+local closeBlock = Buffer.closeBlock
 local writeString = Buffer.writeString
 local readString = Buffer.readString
 local writeBuffer = Buffer.writeBuffer
 local readBuffer = Buffer.readBuffer
 local writeInstance = Buffer.writeInstance
 local readInstance = Buffer.readInstance
+local putU8 = Buffer.putU8
+local putF32 = Buffer.putF32
+local putString = Buffer.putString
+local putBuffer = Buffer.putBuffer
 local writeF32 = Buffer.writeF32
 local readF32 = Buffer.readF32
 local writeU8 = Buffer.writeU8
 local readU8 = Buffer.readU8
+
+--[[
+	Whether the subtree currently being built sits inside a claimed block.
+
+	A build-time flag rather than a parameter threaded through nine builders, and safe because
+	synthesis is synchronous: `Serdes.build` runs to completion before anything else can call it. It
+	selects `PUT_NUMBER` over `WRITE_NUMBER` and `putString` over `writeString`, and is read only
+	while closures are being made — never while one runs.
+]]
+local blocked = false
 
 local Serdes = {}
 
@@ -218,7 +250,8 @@ local function lengthWriter(node: Node): (count: number, label: string) -> ()
 		end
 	end
 
-	local write = WRITE_NUMBER[node.lengthStorage :: Encoding]
+	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
+	local write = family[node.lengthStorage :: Encoding]
 	local offset = node.lengthOffset :: number
 	local min = node.min :: number
 	local max = node.max :: number
@@ -265,7 +298,8 @@ end
 -- -------------------------------------------------------------------------------------------------
 
 local function numberWriter(node: Node): Writer
-	local write = WRITE_NUMBER[node.storage :: Encoding]
+	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
+	local write = family[node.storage :: Encoding]
 	local offset = node.offset :: number
 	local min = node.min :: number
 	local max = node.max :: number
@@ -437,50 +471,60 @@ function buildWriter(node: Node): Writer
 		return numberWriter(node)
 	elseif kind == "string" then
 		local writeLength = lengthWriter(node)
+		local bytes: (value: string, length: number) -> () = if blocked then putString else writeString
 
 		return function(value: any, _flags: Flags)
 			local length = #value
 			writeLength(length, "string")
-			writeString(value, length)
+			bytes(value, length)
 		end
 	elseif kind == "buffer" then
 		local writeLength = lengthWriter(node)
+		local bytes: (value: buffer, length: number) -> () = if blocked then putBuffer else writeBuffer
 
 		return function(value: any, _flags: Flags)
 			local length = buffer.len(value)
 			writeLength(length, "buffer")
-			writeBuffer(value, length)
+			bytes(value, length)
 		end
 	elseif kind == "vector2" then
+		local f32: (value: number) -> () = if blocked then putF32 else writeF32
+
 		return function(value: any, _flags: Flags)
-			writeF32(value.X)
-			writeF32(value.Y)
+			f32(value.X)
+			f32(value.Y)
 		end
 	elseif kind == "vector3" then
+		local f32: (value: number) -> () = if blocked then putF32 else writeF32
+
 		return function(value: any, _flags: Flags)
-			writeF32(value.X)
-			writeF32(value.Y)
-			writeF32(value.Z)
+			f32(value.X)
+			f32(value.Y)
+			f32(value.Z)
 		end
 	elseif kind == "color3" then
+		local u8: (value: number) -> () = if blocked then putU8 else writeU8
+
 		return function(value: any, _flags: Flags)
-			writeU8(math.clamp(math.round(value.R * 255), 0, 255))
-			writeU8(math.clamp(math.round(value.G * 255), 0, 255))
-			writeU8(math.clamp(math.round(value.B * 255), 0, 255))
+			u8(math.clamp(math.round(value.R * 255), 0, 255))
+			u8(math.clamp(math.round(value.G * 255), 0, 255))
+			u8(math.clamp(math.round(value.B * 255), 0, 255))
 		end
 	elseif kind == "cframe" then
+		local f32: (value: number) -> () = if blocked then putF32 else writeF32
+
 		return function(value: any, _flags: Flags)
 			local position = value.Position
-			writeF32(position.X)
-			writeF32(position.Y)
-			writeF32(position.Z)
+			f32(position.X)
+			f32(position.Y)
+			f32(position.Z)
 
 			--[[ Axis times angle: one vector carries the whole rotation, and the identity falls
 			     out as the zero vector rather than needing a special case on either side. ]]
 			local axis, angle = value:ToAxisAngle()
-			writeF32(axis.X * angle)
-			writeF32(axis.Y * angle)
-			writeF32(axis.Z * angle)
+			f32(axis.X * angle)
+			f32(axis.Y * angle)
+			f32(axis.Z * angle)
 		end
 	elseif kind == "instance" then
 		return function(value: any, _flags: Flags)
@@ -861,6 +905,7 @@ end
 	@within Serdes
 	.framing "static" | "counted" -- whether the transport has to length-prefix this payload
 	.fixedSize number? -- payload bytes, when they never vary
+	.instances number? -- sidecar entries always consumed, when that never varies
 	.write (value: any) -> ()
 	.read () -> (any, string?)
 	.check (value: any) -> string? -- nil when the value satisfies the schema
@@ -868,6 +913,7 @@ end
 export type Codec = {
 	framing: "static" | "counted",
 	fixedSize: number?,
+	instances: number?,
 	write: (value: any) -> (),
 	read: () -> (any, string?),
 	check: (value: any) -> string?,
@@ -898,10 +944,30 @@ export type Codec = {
 	`write` raises on a value the schema forbids — that is game code passing a bad number, and
 	silent wraparound would be worse. `read` never raises: it returns `nil` and a reason.
 	:::
+
+	:::caution
+	A `write` that raises leaves behind whatever bytes it emitted before the bad field. The caller
+	owns the rewind: park the buffer with `Buffer.save` first, or `take` and discard. `check` below
+	does the former, and a transport must do one of them — a partial payload left in the batch is a
+	packet nobody can decode.
+	:::
 ]=]
 function Serdes.build(layout: Ir.Layout): Codec
 	local root = layout.root
 	local scope = layout.scope
+	local fixedSize = layout.fixedSize
+
+	--[[
+		A payload whose size is known claims all of it in one `allocate` and fills it with the
+		`put*` writers, which skip the bounds and growth checks the space has already paid for.
+
+		`blocked` is set for the whole of synthesis and cleared after, so every closure below this
+		point is built against the right family. It is restored rather than assigned `false`
+		because `Serdes.build` can be re-entered — `Trust.validate` builds a codec lazily, and a
+		schema can be lowered while another is being built.
+	]]
+	local outer = blocked
+	blocked = fixedSize ~= nil
 
 	local write = buildWriter(root)
 	local read = buildReader(root)
@@ -911,9 +977,34 @@ function Serdes.build(layout: Ir.Layout): Codec
 		read = scopedReader(scope, read)
 	end
 
+	blocked = outer
+
+	if fixedSize then
+		local inner = write
+		local size = fixedSize
+
+		--[[ Annotated `Writer` rather than left to inference: an anonymous function whose return
+		     type is exactly `()` makes `pcall(write, ...)` in `check` below resolve to one value. ]]
+		local blockWrite: Writer = function(value: any, flags: Flags)
+			openBlock(size)
+			inner(value, flags)
+			closeBlock()
+		end
+
+		write = blockWrite
+	end
+
+	--[[
+		`pcall` of a function whose return pack is empty is typed as returning `boolean` alone, so
+		destructuring the error out of it does not check. The alias widens the pack without changing
+		what runs, and is hoisted here so `check` does not build one per call.
+	]]
+	local attempt: (...any) -> ...any = write
+
 	return {
 		framing = layout.framing,
 		fixedSize = layout.fixedSize,
+		instances = layout.instances,
 
 		write = function(value: any)
 			write(value, NO_FLAGS)
@@ -944,7 +1035,7 @@ function Serdes.build(layout: Ir.Layout): Codec
 		]]
 		check = function(value: any): string?
 			local parked = Buffer.save()
-			local ok, failure = pcall(write, value, NO_FLAGS)
+			local ok, failure = pcall(attempt, value, NO_FLAGS)
 			Buffer.load(parked)
 
 			if ok then

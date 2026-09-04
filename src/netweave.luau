@@ -51,6 +51,7 @@
 ]]
 
 local Audience = require("./api/Audience")
+local Driver = require("./transport/Driver")
 local Channel = require("./api/Channel")
 local Context = require("./api/Context")
 local Namespace = require("./api/Namespace")
@@ -60,6 +61,19 @@ local Transport = require("./api/Transport")
 local Trust = require("./api/Trust")
 local Types = require("./types")
 local View = require("./api/View")
+
+--[[
+	Requiring netweave inside Roblox installs the transport. There is nothing to configure and no
+	step to remember: a game that declared its channels correctly has already said everything the
+	transport needs, and an install call in every game would be a step to forget.
+
+	The guard is a check rather than a `pcall`, so that a genuine failure inside `install` is loud.
+	Under lune there is no `game`, and the whole transport is testable there because Roblox lives
+	behind `Link` and `Recipients` (`tests/transport_runtime.luau`).
+]]
+if typeof(game) == "Instance" then
+	Driver.install()
+end
 
 local nw = {}
 

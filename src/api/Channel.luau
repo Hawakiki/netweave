@@ -190,6 +190,9 @@ type function forbid(spec, class, field)
 		returns = "Only a query replies.",
 		args = "This class carries `data`, not `args`.",
 		data = "A query carries `args` and `returns`, not `data`.",
+		unreliable = "This class must arrive. A command changes authoritative state and a query is "
+			.. "waiting for an answer; delivering either at best effort would make the class name a "
+			.. "promise it does not keep.",
 	}
 
 	error(`nw.{class:value()} forbids \`{name}\`. {reason[name]}`)
@@ -228,6 +231,7 @@ export type function CommandPayload(spec)
 	forbid(spec, command, types.singleton("args"))
 	forbid(spec, command, types.singleton("returns"))
 	forbid(spec, command, types.singleton("timeout"))
+	forbid(spec, command, types.singleton("unreliable"))
 
 	return requireData(spec, command, types.singleton("data"), types.singleton("what the client sends"))
 end
@@ -288,6 +292,7 @@ export type function QueryArgs(spec)
 
 	forbid(spec, query, types.singleton("data"))
 	forbid(spec, query, types.singleton("audience"))
+	forbid(spec, query, types.singleton("unreliable"))
 
 	return requireData(spec, query, types.singleton("args"), types.singleton("the request"))
 end
@@ -414,6 +419,21 @@ local FORBIDDEN_REASON: { [string]: string } = {
 	data = "A query carries `args` and `returns`, not `data`.",
 }
 
+--[[
+	Optional, and false unless it is exactly `true`. An unreliable channel is delivered at best
+	effort and is not batched — one lost datagram would otherwise cost N events instead of one
+	(`RESEARCH §3.7-E`) — so it is a per-channel decision the author makes on purpose.
+]]
+local function checkedUnreliable(spec: any, class: string): boolean
+	local value = spec.unreliable
+
+	if value ~= nil and type(value) ~= "boolean" then
+		error(`nw.{class} takes unreliable as a boolean, got {typeof(value)}`, 3)
+	end
+
+	return value == true
+end
+
 local function requireAudience(spec: any, class: string): any
 	local audience = spec.audience
 
@@ -488,7 +508,7 @@ end
 ]=]
 function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<S>, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "command", { "audience", "args", "returns", "timeout" })
+	rejectForbidden(raw, "command", { "audience", "args", "returns", "timeout", "unreliable" })
 
 	return make("command", "AuthorizedInbound", requireType(raw, "data", "command"), {
 		rate = checkedRate(raw, "command"),
@@ -525,6 +545,7 @@ function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>,
 
 	return make("intent", "AuthorizedInbound", requireType(raw, "data", "intent"), {
 		rate = checkedRate(raw, "intent"),
+		unreliable = checkedUnreliable(raw, "intent"),
 	})
 end
 
@@ -558,6 +579,7 @@ function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>,
 
 	return make("signal", "UntrustedInbound", requireType(raw, "data", "signal"), {
 		rate = checkedRate(raw, "signal"),
+		unreliable = checkedUnreliable(raw, "signal"),
 	})
 end
 
@@ -582,7 +604,7 @@ end
 ]=]
 function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, QueryReturns<S>>
 	local raw: any = spec
-	rejectForbidden(raw, "query", { "data", "audience" })
+	rejectForbidden(raw, "query", { "data", "audience", "unreliable" })
 
 	local timeout = raw.timeout
 
@@ -632,6 +654,7 @@ function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundP
 
 	return make("state", "Outbound", requireType(raw, "data", "state"), {
 		audience = requireAudience(raw, "state"),
+		unreliable = checkedUnreliable(raw, "state"),
 	})
 end
 
@@ -659,6 +682,7 @@ function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundP
 
 	return make("event", "Outbound", requireType(raw, "data", "event"), {
 		audience = requireAudience(raw, "event"),
+		unreliable = checkedUnreliable(raw, "event"),
 	})
 end
 

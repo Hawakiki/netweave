@@ -98,6 +98,20 @@ end
 
 --[=[
 	@within Transport
+	@function peek
+	@return Driver?
+	@private
+
+	The installed driver, or nil. [Transport.driver] raises when there is none, which is right for
+	the send path and wrong for a caller that wants to put back what it found — a test that installs
+	a fake has to leave the real one where it was, or everything after it sends into a hole.
+]=]
+function Transport.peek(): Driver?
+	return driver
+end
+
+--[=[
+	@within Transport
 	@function uninstall
 	@private
 
