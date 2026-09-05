@@ -148,8 +148,8 @@ nw.replicate = Channel.replicate
 	Where the game keeps what `nw.replicate` replicates. `nw.store.of` for a plain table,
 	`nw.store.charm` for a Charm atom, `nw.store.replica` for ReplicaService.
 
-	netweave never requires either library — the game passes Charm's own `subscribe` — so a store is
-	a shape rather than a dependency, and anything with `subjects()` and `read(subject)` is one.
+	netweave never requires either library, and asks nothing of them either: a store is a shape
+	rather than a dependency, and anything with `subjects()` and `read(subject)` is one.
 ]=]
 nw.store = Store
 

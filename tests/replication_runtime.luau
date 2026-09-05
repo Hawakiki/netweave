@@ -45,6 +45,11 @@ local bob = { name = "bob" }
 --[[ The world the game owns. netweave reads it and never writes it. ]]
 local world: { [number]: any } = {}
 
+--[[ A second world, replicated to everybody. The tick branches on the audience kind — a broadcast's
+     recipients *are* the roster, so the pass that hunts for players who have stopped being
+     recipients is skipped outright — and a branch with no test is where the next defect goes. ]]
+local commons: { [number]: any } = {}
+
 --[[ Who can see what, standing in for `nw.audience.nearby` — moving a player in or out of a
      subject's audience is one assignment here, where in a game it is a position. ]]
 local visible: { [number]: { [any]: boolean } } = {}
@@ -76,14 +81,35 @@ local declared = Namespace.declare("game", {
 
 		store = nw.store.of(world),
 	}),
+
+	--[[ The same shape with the other audience kind. `entities` above is a `select`, which is what
+	     lets this file move a player in and out of an audience; this one is the branch where there
+	     is no such thing as a player who is not a recipient. ]]
+	commons = nw.replicate({
+		subject = t.u16,
+		data = t.struct({
+			hp = t.u8,
+			gold = t.u16,
+			pos = t.struct({ x = t.u8, y = t.u8 }),
+			tag = t.optional(t.u8),
+		}),
+
+		audience = nw.audience.everyone,
+		store = nw.store.of(commons),
+	}),
 })
 
 Namespace.seal()
 
 local channel = declared.channels.entities :: any
+local shared = declared.channels.commons :: any
 
 local function channelById(id: number): any?
-	return if id == channel.id then channel else nil
+	if id == channel.id then
+		return channel
+	end
+
+	return if id == shared.id then shared else nil
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -146,6 +172,7 @@ type Peer = {
 	inbound: Inbound.Inbound,
 	baselines: Baseline.Baseline,
 	mirror: { [number]: any },
+	broadcast: { [number]: any },
 	resyncs: number,
 }
 
@@ -159,12 +186,17 @@ channel.handler = function(subject: number, value: any)
 	receiving.mirror[subject] = value
 end
 
+shared.handler = function(subject: number, value: any)
+	receiving.broadcast[subject] = value
+end
+
 local function peerFor(who: any): Peer
 	local peer: Peer = {
 		who = who,
 		inbound = nil :: any,
 		baselines = Baseline.new(false),
 		mirror = {},
+		broadcast = {},
 		resyncs = 0,
 	}
 
@@ -202,12 +234,34 @@ local serverIn = Inbound.new({
 	baselines = serverBaselines,
 })
 
+--[[
+	The real `Outbound`, with one question asked of it on the way past: **how many times did the tick
+	attempt a change.**
+
+	A count rather than a clock, which is `CLAUDE.md` §9 — count it instead of weighing it. The M4
+	report's finding was that the tick attempted one encode per (subject, recipient) pair whether or
+	not anything had moved, and "the tick got faster" is a claim that needs a machine, a spread and a
+	control group. "The tick asked twice where it used to ask a hundred times" needs none of them,
+	and it is the same fact.
+
+	`change` is the only thing the tick calls on an outbound, so this is the whole surface — and if
+	that stops being true, the tick raises here rather than quietly measuring less than it says.
+]]
+local attempts = 0
+
+local watched = {
+	change = function(on: any, destination: any, subject: any, old: any, new: any): boolean
+		attempts += 1
+		return serverOut.change(on, destination, subject, old, new)
+	end,
+}
+
 local tick = Tick.new({
-	outbound = serverOut,
+	outbound = watched,
 	baselines = serverBaselines,
 	roster = roster,
 	channels = function()
-		return { channel }
+		return { channel, shared }
 	end,
 })
 
@@ -569,8 +623,221 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- What a tick costs when nothing moved, which was an encode attempt per pair (M4 report)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	--[[
+		The finding, in the one unit that needs no machine: **how many times the tick asked
+		`Outbound.change` whether there was anything to send.**
+
+		Before M4 phase 8 the answer was subjects × recipients, every tick, for a world at rest — a
+		`switchTo`, a `pcall`, a `Buffer.mark`, the whole differ walk and a `rollback` per pair, to
+		conclude nothing. `bench/tick.luau` prices it: fifty players and five hundred subjects cost
+		36.3 ms a tick with **nothing moving**, twice a frame at 60 FPS, and a tenth of the world
+		moving cost the same 36.5. The price was the asking, not the answering.
+
+		What replaced it is one comparison per subject against the snapshot every settled client
+		holds, and a pointer comparison per recipient asking whether that is what they hold. So
+		almost everything below is about **when the gate must not fire**: a gate that skips one
+		packet it owed is worse than every millisecond it saves, because the client is then wrong
+		for ever and neither side knows.
+
+		Each of those was confirmed against a gate written one line too eager —
+		`local settled = held ~= nil`, which trusts the snapshot instead of comparing it against the
+		store — and every "arrives" case here goes red under it.
+	]]
+	local leftovers: { number } = {}
+
+	for subject in world do
+		table.insert(leftovers, subject)
+	end
+
+	for _, subject in leftovers do
+		world[subject] = nil
+		visible[subject] = nil
+	end
+
+	frame()
+
+	local function shares(who: any, subject: number): boolean
+		local truth = commons[subject]
+		local seen = peers[who].broadcast[subject]
+
+		if truth == nil or seen == nil then
+			return truth == seen
+		end
+
+		return truth.hp == seen.hp and truth.gold == seen.gold
+	end
+
+	world[700] = { hp = 10, gold = 500, pos = { x = 1, y = 1 }, tag = 3 }
+	sees(700, alice, bob)
+	frame()
+
+	check("both clients hold the subject", agrees(alice, 700) and agrees(bob, 700))
+
+	suite.failing()
+
+	attempts = 0
+	local quiet = frame()
+
+	equals("a tick over a world at rest sends nothing", quiet, 0)
+	equals("and does not ask whether it should", attempts, 0)
+
+	suite.passing()
+
+	--[[ One field, then a nested one — the comparison recurses, and a shallow one would pass the
+	     second of these and freeze the subject at its old position on every client. ]]
+	world[700].hp = 7
+	frame()
+
+	equals("a field that moved arrives", mirrorOf(alice)[700].hp, 7)
+	equals("at both clients", mirrorOf(bob)[700].hp, 7)
+
+	world[700].pos.x = 9
+	frame()
+	equals("so does a nested one", mirrorOf(alice)[700].pos.x, 9)
+
+	--[[ And a field *removed*. An optional set to nil is a key that is no longer in the table, which
+	     a walk over the current value cannot see — so the comparison walks the baseline as well. ]]
+	world[700].tag = nil
+	frame()
+
+	equals("and a field that went away", mirrorOf(alice)[700].tag, nil)
+	check("with the rest of the subject intact", agrees(alice, 700))
+
+	suite.failing()
+
+	attempts = 0
+	frame()
+	equals("after which it is quiet again", attempts, 0)
+
+	--[[ Out of the audience: the removal the gate must never swallow, because the client keeps the
+	     subject at whatever value it had when they left and nothing on either side would know. ]]
+	sees(700, alice)
+	frame()
+	equals("a client that walked out is told to forget", mirrorOf(bob)[700], nil)
+
+	suite.passing()
+
+	--[[
+		And back in. `settled` is true — the subject has not moved — and the gate must still not
+		fire, because what it proves is "this recipient already holds this value" and bob holds
+		nothing.
+	]]
+	sees(700, alice, bob)
+	attempts = 0
+	frame()
+
+	check("a client that walked back in is sent it again", agrees(bob, 700))
+	equals("and that took one attempt, not one per recipient", attempts, 1)
+
+	--[[
+		What he was handed is **the table alice already holds**, not a second one equal to it.
+
+		This is the assertion that makes the gate worth having rather than merely correct. Two
+		snapshots put the two clients in different identity classes, and from then on every tick
+		costs alice an attempt that writes nothing, for ever — the gate would be present, passing its
+		own tests, and buying nothing. Seeding the tick's per-subject copy with the snapshot it
+		already had is the one line that prevents it, and this is the only thing that would notice
+		that line going away.
+	]]
+	check(
+		"and he was handed the snapshot alice holds, not a copy of it",
+		serverBaselines.of(bob, channel, 700) == serverBaselines.of(alice, channel, 700)
+	)
+
+	suite.failing()
+
+	attempts = 0
+	frame()
+	equals("so the tick after a client joins is quiet too", attempts, 0)
+
+	suite.passing()
+
+	--[[ A client that gave up on the channel. The gate reads the baseline rather than a flag it
+	     keeps, so a baseline that went away is a full send — which is the whole of why a resync
+	     works. ]]
+	serverBaselines.desync(alice, channel)
+	attempts = 0
+	frame()
+
+	check("a client that resynced is sent the subject again", agrees(alice, 700))
+	equals("and nobody else was asked", attempts, 1)
+
+	--[[
+		The other audience kind, and the branch it selects: a broadcast's recipients *are* the
+		roster, so the pass that hunts for players who have stopped being recipients is skipped
+		outright — it is O(players) `among` scans over an array of the same players, O(players²) per
+		subject, to conclude nothing. What a broadcast can still have is the removal below.
+	]]
+	commons[800] = { hp = 4, gold = 40, pos = { x = 2, y = 2 }, tag = nil }
+	frame()
+
+	check("a broadcast subject reaches both clients", shares(alice, 800) and shares(bob, 800))
+
+	suite.failing()
+
+	attempts = 0
+	frame()
+	equals("and a broadcast at rest asks nothing either", attempts, 0)
+
+	commons[800] = nil
+	frame()
+
+	equals("a broadcast subject that stops existing is removed", peers[alice].broadcast[800], nil)
+	equals("from everyone", peers[bob].broadcast[800], nil)
+
+	suite.passing()
+
+	commons[800] = { hp = 6, gold = 60, pos = { x = 3, y = 3 }, tag = nil }
+	frame()
+	check("and comes back whole when it exists again", shares(alice, 800) and shares(bob, 800))
+
+	suite.failing()
+
+	--[[
+		A value the schema cannot encode, which is the one path where the tick asks and gets neither
+		a yes nor a no. `Outbound.change` reports it and answers false, and because nothing was
+		written no snapshot is recorded — so the next tick compares against the last value the
+		clients actually have and tries again, rather than believing it sent something.
+
+		The guard that skips recording is about allocation rather than correctness, and saying so is
+		the point: a subject nobody can see would otherwise deep-clone itself once a tick for the
+		life of the server. What this section can check is the behaviour, which is that a refused
+		encode is loud and is retried.
+	]]
+	local reported = 0
+
+	Observer.observe(function()
+		reported += 1
+	end)
+
+	world[700].hp = 300
+	frame()
+
+	check("a value the schema refuses is reported", reported > 0)
+	equals("and does not reach the client", mirrorOf(alice)[700].hp, 7)
+
+	suite.passing()
+
+	world[700].hp = 9
+	frame()
+
+	equals("and the next value that fits arrives", mirrorOf(alice)[700].hp, 9)
+	check("at both clients", agrees(bob, 700))
+
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 channel.handler = nil
+shared.handler = nil
 Namespace.reset()
 Buffer.take()
 Buffer.load(nil)

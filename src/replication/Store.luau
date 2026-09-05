@@ -29,15 +29,39 @@
 	baseline in `Baseline.luau` and the diff in `Delta.luau` need. So netweave **replaces**
 	`charm-sync` rather than riding it, and the same is true of ReplicaService's six RemoteEvents.
 
-	What that leaves is two functions, and one of them is optional:
+	~~What that leaves is two functions, and one of them is optional: `subjects` and `read`, plus a
+	`changed` for the store that can say when something moved. A seam that required `changed` would
+	have supported one of the two libraries it was designed for.~~
 
-	  * `subjects` and `read`, because a diff needs the current value;
-	  * `changed`, because Charm can say when something moved (`charm/packages/charm/src/init.luau:821`)
-	    and ReplicaService cannot — the game calls `SetValue` and nothing observes it server-side
-	    (`ReplicaService/src/ServerScriptService/ReplicaService.lua:403`). A store that cannot say is
-	    polled once a tick, which is what the transport does anyway.
+	**Two functions, and neither is optional.** `changed` is gone as of M4 phase 8, and it went on a
+	measurement rather than an opinion.
 
-	A seam that required `changed` would have supported one of the two libraries it was designed for.
+	It was declared here, documented as an optimisation, and checked at declaration by
+	`nw.replicate` — for four phases, without one line ever reading it. `Store.charm`'s caution
+	promised that passing Charm's `subscribe` made a tick where nothing moved cost one branch; the
+	tick walked every subject regardless, so a game that passed it got exactly the walk it was told
+	it had avoided. Both ways out were open, so the tick was built both ways and timed
+	(`bench/tick.luau`, fifty players and five hundred subjects, nothing moving):
+
+	  | idle tick | ms |
+	  |---|---|
+	  | before the phase 8 gate | 36.26 |
+	  | comparing each subject against the snapshot its settled clients hold | 1.63 |
+	  | trusting a perfect change signal instead of comparing | 1.40 |
+
+	0.23 ms, and only while **nothing at all** is moving. A whole-store signal is set by any subject
+	moving, so in a world where anything happens it reads dirty every tick and buys nothing — and a
+	tick's cost only matters in a world where something happens.
+
+	Against that: a signal that misses a mutation is a subject that stops replicating, silently and
+	for ever, on every client. A game keeping a plain table inside a Charm atom and writing to it in
+	place would do exactly that, and neither side would report it. `CLAUDE.md` §9's rule is that a
+	claim which cannot be probed is a claim to drop — and there is no probe for "the store told the
+	truth", because when it does not, the freeze is the behaviour.
+
+	So the seam is `subjects` and `read`, which every store can answer, and netweave does the
+	comparing. Charm's immutable atoms still make it cheap, for the reason they always did: a
+	subject whose table was replaced fails the comparison on the first key.
 ]]
 
 local Store = {}
@@ -47,15 +71,19 @@ local Store = {}
 	@within Store
 	.subjects () -> { any } -- every subject that exists right now
 	.read (subject: any) -> any -- the current value, or nil if it is gone
-	.changed ((callback: () -> ()) -> () -> ())? -- optional; returns a function that stops listening
 
 	`subjects` is called once a tick and its result is not retained, so a store may return the same
 	table every time.
+
+	:::note
+	There is no change signal, and the note above says why one was removed rather than added.
+	netweave compares each subject once a tick against the snapshot its up-to-date clients hold, so
+	a store only has to say what it has — never when it moved.
+	:::
 ]=]
 export type Store = {
 	subjects: () -> { any },
 	read: (subject: any) -> any,
-	changed: ((callback: () -> ()) -> () -> ())?,
 }
 
 --[=[
@@ -104,27 +132,30 @@ end
 	@within Store
 	@function charm
 	@param getter () -> { [any]: any } -- an atom, or any Charm getter, holding subject to value
-	@param subscribe ((getter: any, callback: (state: any, last: any) -> ()) -> () -> ())? -- Charm's own
 	@return Store
 
 	Charm, adapted at the **atom** rather than at `charm-sync`.
 
 	```lua
 	local world = Charm.atom({})
-	local store = Store.charm(world, Charm.subscribe)
+	local store = Store.charm(world)
 	```
 
 	netweave never requires Charm — there is no package path for it (`CLAUDE.md` §8) and it should
-	not need one. The game passes its own `subscribe`, so the adapter is a shape rather than a
-	dependency, and a store that happens to have the same shape works without being Charm at all.
+	not need one. The whole adapter is one call of the getter, so it is a shape rather than a
+	dependency, and anything that returns a subject-to-value table works without being Charm at all.
 
-	:::caution
-	Pass `subscribe` if you have it. Without it netweave diffs every subject every tick; with it,
-	a tick where nothing moved costs one branch. Charm's `subscribe` is at
-	`charm/packages/charm/src/init.luau:821`.
+	:::note
+	~~Pass `Charm.subscribe` if you have it: without it netweave diffs every subject every tick, and
+	with it a tick where nothing moved costs one branch.~~ **There is no second parameter.** The
+	signal was never read, and when it was finally measured it was worth 0.23 ms of an idle tick
+	against a silent freeze if it ever missed one — see the note at the top of this file.
+
+	Charm still gets the cheap path, from the property that makes it Charm: an atom's tables are
+	replaced rather than written to, so a subject that moved differs on its first key.
 	:::
 ]=]
-function Store.charm(getter: () -> { [any]: any }, subscribe: any?): Store
+function Store.charm(getter: () -> { [any]: any }): Store
 	local function subjects(): { any }
 		local out = {}
 
@@ -135,28 +166,12 @@ function Store.charm(getter: () -> { [any]: any }, subscribe: any?): Store
 		return out
 	end
 
-	local changed: ((callback: () -> ()) -> () -> ())? = nil
-
-	if subscribe then
-		changed = function(callback: () -> ()): () -> ()
-			--[[ Charm hands the callback the new and previous states; netweave wants neither,
-			     because it diffs per client against what that client has rather than against what
-			     the server last held. Dropping both arguments here is the whole difference between
-			     this and `charm-sync`. ]]
-			return (subscribe :: any)(getter, function()
-				callback()
-			end)
-		end
-	end
-
 	return {
 		subjects = subjects,
 
 		read = function(subject: any): any
 			return getter()[subject]
 		end,
-
-		changed = changed,
 	}
 end
 

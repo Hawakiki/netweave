@@ -1024,15 +1024,11 @@ local function requireStore(spec: any): any
 		)
 	end
 
-	if store.changed ~= nil and type(store.changed) ~= "function" then
-		error(
-			`nw.replicate's store has a \`changed\` that is {typeof(store.changed)} rather than a `
-				.. `function. Leave it out if the store cannot say when something moved — netweave polls `
-				.. `once a tick either way — but a broken one would be silently never called.`,
-			3
-		)
-	end
-
+	--[[ ~~And a `changed` that is present has to be callable.~~ **Removed with the field it
+	     checked** (M4 phase 8). It was the whole of what netweave ever did with a change signal —
+	     validate it at declaration and never call it — and its own message said a broken one "would
+	     be silently never called", which was true of a working one too. `src/replication/Store.luau`
+	     has the measurement that settled it. ]]
 	return store
 end
 
