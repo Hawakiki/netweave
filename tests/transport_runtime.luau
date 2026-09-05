@@ -2146,6 +2146,129 @@ do
 end
 reset()
 
+-- ---------------------------------------------------------------------------------------------
+-- What a select audience hands back, which is a table a game built (M4 report)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		`select` is the escape hatch: the other three rules build their answer out of the roster, so
+		what they return is a recipient by construction. This one gets a table from game code, and
+		before M4 phase 8 every part of it was trusted.
+
+		Measured against the real `Outbound` before the fix:
+
+		  | returned | what happened |
+		  |---|---|
+		  | `{ alice, nil, bob }` | **raised** `Outbound:173: table index is nil` — `#` over a hole is unspecified in Luau, and `switchTo` wrote `parked[nil]` |
+		  | `{ alice, alice }` | the packet twice in one batch, three bytes became five |
+		  | `{ 5, "text", {} }` | three parked send buffers, one per value, none ever forgotten |
+		  | 5,000 fresh values | **3.8 MB retained** |
+
+		The walk is `pairs` now, which a hole cannot fool, and a value has to look like a recipient
+		*and* be one the roster still has.
+	]]
+	local chosen: { any } = {}
+
+	local audience = {
+		scope = "select",
+		kind = "select",
+		select = function(): { any }
+			return chosen
+		end,
+	}
+
+	--[[ The roster this file already declares, plus the question only `select` asks. `carol` is
+	     deliberately not in it: she is a player who has left, still named by a stale list. ]]
+	local present: Recipients.Roster = {
+		all = roster.all,
+		owner = roster.owner,
+		within = roster.within,
+
+		has = function(who: any): boolean
+			return who == alice or who == bob
+		end,
+	}
+
+	local out: { any } = {}
+
+	local function resolve(list: { any }): { any }
+		chosen = list
+		table.clear(out)
+
+		local count = Recipients.of(audience, 1, present, out)
+		local named: { any } = {}
+
+		for index = 1, count do
+			table.insert(named, out[index])
+		end
+
+		return named
+	end
+
+	local hole = resolve({ alice, nil :: any, bob })
+	equals("a hole does not decide how many there are", #hole, 2)
+	check("and neither side of it is lost", hole[1] == alice and hole[2] == bob)
+
+	equals("a value that is not a recipient is not one", #resolve({ 5, "text", {} }), 0)
+	equals("nor is nothing at all", #resolve({}), 0)
+
+	local twice = resolve({ alice, alice, bob, alice })
+	equals("the same player named four times is one recipient", #twice, 2)
+	check("in the order they were first named", twice[1] == alice and twice[2] == bob)
+
+	--[[ The half a shape test cannot answer: carol is the same kind of value alice is. What
+	     separates them is that she is not here any more, which is the roster's question — and a
+	     stale list naming her rebuilt the send buffer `forget` had just removed. ]]
+	local left = resolve({ alice, carol })
+	equals("a player who has left is not sent to", #left, 1)
+	check("while the one who stayed is", left[1] == alice)
+
+	--[[ And a roster that does not answer it still refuses what could never have been a recipient,
+	     which is what a rig standing players in with tables gets. ]]
+	local lenient: Recipients.Roster = { all = roster.all, owner = roster.owner, within = roster.within }
+
+	chosen = { alice, 7, "text" }
+	table.clear(out)
+	equals("without `has`, the shape test still holds", Recipients.of(audience, 1, lenient, out), 1)
+
+	suite.passing()
+
+	--[[ Said once per audience, not once per publish: a selector that returns rubbish returns it on
+	     every tick, and a `state` channel publishes per subject per tick. Same lesson as
+	     `baselinesPerClient`, one file over. ]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	local said = 0
+	Observer.observe(function()
+		said += 1
+	end)
+
+	--[[ Its own audience, because the latch is per audience and the calls above have already
+	     tripped this one's — which is the behaviour, not an accident of the test. ]]
+	local noisy = {
+		scope = "select",
+		kind = "select",
+		select = function(): { any }
+			return { alice, 5, alice }
+		end,
+	}
+
+	for _ = 1, 50 do
+		table.clear(out)
+		Recipients.of(noisy, 1, present, out)
+	end
+
+	equals("fifty bad selections say it twice — once each for the two mistakes", said, 2)
+
+	Observer.reset()
+end
+
 suite.finish()
 
 return true

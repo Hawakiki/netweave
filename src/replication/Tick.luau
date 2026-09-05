@@ -175,7 +175,7 @@ function Tick.new(config: Config): () -> ()
 
 				present[subject] = true
 
-				local count = Recipients.of(channel.audience, subject, roster, recipients)
+				local count = Recipients.of(channel.audience, subject, roster, recipients, channel)
 
 				if count == -1 then
 					--[[ Everyone. Copied into the array so the removal pass below can ask "was this
