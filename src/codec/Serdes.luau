@@ -127,6 +127,7 @@ local READ_CHUNK: { [number]: () -> number } = {
 }
 
 local claim = Buffer.claim
+local span = Buffer.span
 local reserve = Buffer.reserve
 local reject = Buffer.reject
 local remaining = Buffer.remaining
@@ -502,6 +503,12 @@ type Row = {
 	at: number,
 	min: number,
 	max: number,
+	--[[ The same two bounds as the reader compares against, which for `f32` are not the same
+	     numbers. The writer validates what the game passed, exactly as declared; the reader has to
+	     accept what `buffer.writef32` rounded that to, or a schema refuses its own sender. See
+	     `numberReader`, which carries the measurement. ]]
+	lo: number,
+	hi: number,
 	offset: number,
 	integral: boolean,
 	storage: string,
@@ -513,6 +520,8 @@ local BLANK: Row = {
 	at = 0,
 	min = 0,
 	max = 0,
+	lo = 0,
+	hi = 0,
 	offset = 0,
 	integral = false,
 	storage = "u8",
@@ -548,11 +557,16 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 			return nil, 0
 		end
 
+		local min = node.min :: number
+		local max = node.max :: number
+
 		rows[index] = {
 			name = field.name,
 			at = at,
-			min = node.min :: number,
-			max = node.max :: number,
+			min = min,
+			max = max,
+			lo = if storage == "f32" then asF32(min) else min,
+			hi = if storage == "f32" then asF32(max) else max,
 			offset = node.offset :: number,
 			integral = not FRACTIONAL[storage :: string],
 			storage = storage :: string,
@@ -1144,10 +1158,294 @@ local function enumReader(node: Node): Reader
 	end
 end
 
+--[[
+	`fusedStructWriter`'s mirror, and the half of M2's block optimisation that never happened.
+
+	`Buffer.span` bounds the whole struct once, against a size the layout pass already knew, and the
+	fields are then read with `buffer.readu8` **named** — so the general reader's three costs per
+	value all go at once: the closure call, the `READ_NUMBER` lookup behind it, and the per-primitive
+	bounds check that asked the same question the span already answered.
+
+	Measured by `bench/decode.luau` on the tree before this existed, 100 entities of six `u8` fields:
+	the real reader 32,731 ns a packet against 8,100 for the same read written out with the range
+	guard kept — **4.0x** — where the encode of the same payload was already fused. Decode is what a
+	server pays per client per packet for a whole session, and it had never been taken apart.
+
+	The branch chain is not a matter of taste here either. `dispatched` in that file is this shape
+	with the primitive fetched from a table instead of named, and it costs **2.6x** — worse than the
+	1.6x the same substitution costs on the write side (`RESEARCH §3.11-GG`).
+
+	Two things differ from the writer, and both come from G4 — wire data never reaches `error()`:
+
+	  * a run that does not fit returns a struct of declared minimums rather than nil, and the packet
+	    is refused. **Not nil**, because a fused struct nested in a larger payload handing one up
+	    would drop its key, and the next field access on it raises — which is precisely what G4
+	    forbids. The contents are never seen either way: `Serdes.build`'s reader drops the value the
+	    moment a rejection exists, and `Buffer.reject` keeps the first reason, so what a peer is told
+	    is unchanged.
+	  * the range check compares against `lo`/`hi` rather than `min`/`max`, which for `f32` are the
+	    bounds the *encoding* can hold. `numberReader` carries the measurement that forced that.
+]]
+local function fusedStructReader(node: Node): Reader?
+	local rows, size = rowsOf(node.fields :: { Field })
+
+	if rows == nil then
+		return nil
+	end
+
+	local template = node.template :: { [string]: boolean }
+	local count = #rows
+
+	--[[ What a truncated run comes back as, built once at declaration rather than per packet. Every
+	     field at the minimum its schema declared, which is what the per-value reader returned for a
+	     value it had to refuse. ]]
+	local blank: { [string]: any } = table.clone(template) :: any
+
+	for _, row in rows do
+		blank[row.name] = row.lo
+	end
+
+	local r1, r2 = rows[1], rows[2] or BLANK
+	local r3, r4 = rows[3] or BLANK, rows[4] or BLANK
+	local r5, r6 = rows[5] or BLANK, rows[6] or BLANK
+	local r7, r8 = rows[7] or BLANK, rows[8] or BLANK
+
+	local n1, a1, o1, s1, lo1, hi1 = r1.name, r1.at, r1.offset, r1.code, r1.lo, r1.hi
+	local n2, a2, o2, s2, lo2, hi2 = r2.name, r2.at, r2.offset, r2.code, r2.lo, r2.hi
+	local n3, a3, o3, s3, lo3, hi3 = r3.name, r3.at, r3.offset, r3.code, r3.lo, r3.hi
+	local n4, a4, o4, s4, lo4, hi4 = r4.name, r4.at, r4.offset, r4.code, r4.lo, r4.hi
+	local n5, a5, o5, s5, lo5, hi5 = r5.name, r5.at, r5.offset, r5.code, r5.lo, r5.hi
+	local n6, a6, o6, s6, lo6, hi6 = r6.name, r6.at, r6.offset, r6.code, r6.lo, r6.hi
+	local n7, a7, o7, s7, lo7, hi7 = r7.name, r7.at, r7.offset, r7.code, r7.lo, r7.hi
+	local n8, a8, o8, s8, lo8, hi8 = r8.name, r8.at, r8.offset, r8.code, r8.lo, r8.hi
+
+	return function(_flags: Flags): any
+		local src, at = span(size)
+
+		if src == nil then
+			return table.clone(blank)
+		end
+
+		local result: any = table.clone(template)
+
+		local at1 = at + a1
+		local v1: number
+
+		if s1 == 1 then
+			v1 = buffer.readu8(src, at1) + o1
+		elseif s1 == 2 then
+			v1 = buffer.readu16(src, at1) + o1
+		elseif s1 == 3 then
+			v1 = buffer.readu32(src, at1) + o1
+		elseif s1 == 4 then
+			v1 = buffer.readf32(src, at1) + o1
+		else
+			v1 = buffer.readf64(src, at1) + o1
+		end
+
+		if not (v1 >= lo1 and v1 <= hi1) then
+			reject("number out of range")
+			v1 = lo1
+		end
+
+		result[n1] = v1
+
+		if count < 2 then
+			return result
+		end
+
+		local at2 = at + a2
+		local v2: number
+
+		if s2 == 1 then
+			v2 = buffer.readu8(src, at2) + o2
+		elseif s2 == 2 then
+			v2 = buffer.readu16(src, at2) + o2
+		elseif s2 == 3 then
+			v2 = buffer.readu32(src, at2) + o2
+		elseif s2 == 4 then
+			v2 = buffer.readf32(src, at2) + o2
+		else
+			v2 = buffer.readf64(src, at2) + o2
+		end
+
+		if not (v2 >= lo2 and v2 <= hi2) then
+			reject("number out of range")
+			v2 = lo2
+		end
+
+		result[n2] = v2
+
+		if count < 3 then
+			return result
+		end
+
+		local at3 = at + a3
+		local v3: number
+
+		if s3 == 1 then
+			v3 = buffer.readu8(src, at3) + o3
+		elseif s3 == 2 then
+			v3 = buffer.readu16(src, at3) + o3
+		elseif s3 == 3 then
+			v3 = buffer.readu32(src, at3) + o3
+		elseif s3 == 4 then
+			v3 = buffer.readf32(src, at3) + o3
+		else
+			v3 = buffer.readf64(src, at3) + o3
+		end
+
+		if not (v3 >= lo3 and v3 <= hi3) then
+			reject("number out of range")
+			v3 = lo3
+		end
+
+		result[n3] = v3
+
+		if count < 4 then
+			return result
+		end
+
+		local at4 = at + a4
+		local v4: number
+
+		if s4 == 1 then
+			v4 = buffer.readu8(src, at4) + o4
+		elseif s4 == 2 then
+			v4 = buffer.readu16(src, at4) + o4
+		elseif s4 == 3 then
+			v4 = buffer.readu32(src, at4) + o4
+		elseif s4 == 4 then
+			v4 = buffer.readf32(src, at4) + o4
+		else
+			v4 = buffer.readf64(src, at4) + o4
+		end
+
+		if not (v4 >= lo4 and v4 <= hi4) then
+			reject("number out of range")
+			v4 = lo4
+		end
+
+		result[n4] = v4
+
+		if count < 5 then
+			return result
+		end
+
+		local at5 = at + a5
+		local v5: number
+
+		if s5 == 1 then
+			v5 = buffer.readu8(src, at5) + o5
+		elseif s5 == 2 then
+			v5 = buffer.readu16(src, at5) + o5
+		elseif s5 == 3 then
+			v5 = buffer.readu32(src, at5) + o5
+		elseif s5 == 4 then
+			v5 = buffer.readf32(src, at5) + o5
+		else
+			v5 = buffer.readf64(src, at5) + o5
+		end
+
+		if not (v5 >= lo5 and v5 <= hi5) then
+			reject("number out of range")
+			v5 = lo5
+		end
+
+		result[n5] = v5
+
+		if count < 6 then
+			return result
+		end
+
+		local at6 = at + a6
+		local v6: number
+
+		if s6 == 1 then
+			v6 = buffer.readu8(src, at6) + o6
+		elseif s6 == 2 then
+			v6 = buffer.readu16(src, at6) + o6
+		elseif s6 == 3 then
+			v6 = buffer.readu32(src, at6) + o6
+		elseif s6 == 4 then
+			v6 = buffer.readf32(src, at6) + o6
+		else
+			v6 = buffer.readf64(src, at6) + o6
+		end
+
+		if not (v6 >= lo6 and v6 <= hi6) then
+			reject("number out of range")
+			v6 = lo6
+		end
+
+		result[n6] = v6
+
+		if count < 7 then
+			return result
+		end
+
+		local at7 = at + a7
+		local v7: number
+
+		if s7 == 1 then
+			v7 = buffer.readu8(src, at7) + o7
+		elseif s7 == 2 then
+			v7 = buffer.readu16(src, at7) + o7
+		elseif s7 == 3 then
+			v7 = buffer.readu32(src, at7) + o7
+		elseif s7 == 4 then
+			v7 = buffer.readf32(src, at7) + o7
+		else
+			v7 = buffer.readf64(src, at7) + o7
+		end
+
+		if not (v7 >= lo7 and v7 <= hi7) then
+			reject("number out of range")
+			v7 = lo7
+		end
+
+		result[n7] = v7
+
+		if count < 8 then
+			return result
+		end
+
+		local at8 = at + a8
+		local v8: number
+
+		if s8 == 1 then
+			v8 = buffer.readu8(src, at8) + o8
+		elseif s8 == 2 then
+			v8 = buffer.readu16(src, at8) + o8
+		elseif s8 == 3 then
+			v8 = buffer.readu32(src, at8) + o8
+		elseif s8 == 4 then
+			v8 = buffer.readf32(src, at8) + o8
+		else
+			v8 = buffer.readf64(src, at8) + o8
+		end
+
+		if not (v8 >= lo8 and v8 <= hi8) then
+			reject("number out of range")
+			v8 = lo8
+		end
+
+		result[n8] = v8
+
+		return result
+	end
+end
+
 local function structReader(node: Node): Reader
 	local fields = node.fields :: { Field }
 	local count = #fields
 	local template = node.template :: { [string]: boolean }
+
+	local fused = fusedStructReader(node)
+
+	if fused then
+		return fused
+	end
 
 	local names: { string } = sized(count)
 	local readers: { Reader } = sized(count)

@@ -899,22 +899,48 @@ end
 
 --[=[
 	@within CodecBuffer
-	@function ensure
+	@function span
 	@param length number
-	@return boolean
+	@return buffer? -- the incoming buffer, or nil when the run does not fit
+	@return number -- where the run starts
 
-	True if `length` more bytes are readable. Records a rejection and returns false otherwise.
+	[CodecBuffer.claim]'s mirror on the read side: the bytes and where they begin, one call for a run
+	whose size the layout already knows, in place of a bounds check per value.
 
-	Call this once for a statically sized run rather than once per field — knowing a subtree's
-	exact size up front is the whole point of the layout pass.
-]=]
-function Codec.ensure(length: number): boolean
-	if incomingCursor + length > incomingLimit then
-		Codec.reject("truncated")
-		return false
+	```lua
+	local src, at = Buffer.span(size)
+
+	if src == nil then
+		return fallback
 	end
 
-	return true
+	value.hp = buffer.readu8(src, at)
+	```
+
+	:::caution
+	Every read after this must stay inside `length`. The bound was checked once, here, which is the
+	whole point — so an offset computed from anything but the layout is a read this function has
+	already promised was safe.
+	:::
+
+	:::note
+	~~`ensure(length)` answered the same question as a boolean.~~ It did, and **nothing ever called
+	it**: it was written in M2 for exactly this optimisation, the optimisation landed on the encode
+	side only, and it sat unused until M4 phase 8 (`docs/SECURITY-REPORT-M4.md`). Returning the
+	buffer and the offset is what a caller actually needs, because reading with a named
+	`buffer.readu8` is the whole point and that needs both.
+	:::
+]=]
+function Codec.span(length: number): (buffer?, number)
+	local offset = incomingCursor
+
+	if offset + length > incomingLimit then
+		Codec.reject("truncated")
+		return nil, 0
+	end
+
+	incomingCursor = offset + length
+	return incoming, offset
 end
 
 --[=[

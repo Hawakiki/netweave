@@ -1107,6 +1107,181 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A struct of numbers, read in one span (M4 phase 8)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`Serdes.fusedStructReader` is the writer's mirror and carries the same hazard: two
+	implementations of one contract, one of which is only taken for some schemas. Every `trip` above
+	runs a fused struct through both halves, so the honest path is covered already.
+
+	What is *not* covered by a round trip is bytes a peer chose rather than bytes netweave wrote —
+	and that is the whole of the read side's job. The reader validates where the writer refuses, and
+	it may never raise doing it (G4), so these are the seams: a value the wire put outside the
+	declared range, a run that does not fit, and the bound an f32 can actually hold.
+
+	The optimisation behind them, from `bench/decode.luau`: a 600-byte packet went **32,731 → 21,475
+	ns**, against 8,193 for the same read written out by hand with the range guard kept.
+]]
+
+do
+	--[[ The two readers over the same bytes. The pair above proved the first seven bytes are
+	     identical whichever writer produced them; this proves the two readers make the same values
+	     out of them, which is the half a wire format cares about. ]]
+	local fused = Serdes.fromSchema(t.struct({ a = t.u8, b = t.u16, c = t.u8, d = t.u8, e = t.u8, f = t.u8 }))
+
+	local looped = Serdes.fromSchema(t.struct({
+		a = t.u8,
+		b = t.u16,
+		c = t.u8,
+		d = t.u8,
+		e = t.u8,
+		f = t.u8,
+		g = t.u8,
+		h = t.u8,
+		i = t.u8,
+	}))
+
+	Buffer.take()
+	Buffer.load(nil)
+	fused.write({ a = 9, b = 4000, c = 3, d = 4, e = 5, f = 6 })
+	local one = (Buffer.take())
+
+	Buffer.load(nil)
+	looped.write({ a = 9, b = 4000, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9 })
+	local two = (Buffer.take())
+
+	local short = decode(fused, one)
+	local long = decode(looped, two)
+
+	local agree = short ~= nil
+		and long ~= nil
+		and short.a == long.a
+		and short.b == long.b
+		and short.c == long.c
+		and short.d == long.d
+		and short.e == long.e
+		and short.f == long.f
+
+	check("the two readers made the same values out of the same bytes", agree)
+	equals("and the widest field survived the chain", short.b, 4000)
+end
+
+do
+	--[[ A declared minimum is subtracted on the way out and added back here, and the maximum is the
+	     one thing the storage cannot enforce: a span of ten is carried in a byte that holds 255. So
+	     this is a value only a peer can produce, which is what the reader exists for. ]]
+	local narrow = Serdes.fromSchema(t.struct({ a = t.u8(10, 20) }))
+	local narrowed = buffer.create(1)
+
+	buffer.writeu8(narrowed, 0, 5)
+	local honest = decode(narrow, narrowed)
+
+	equals("a byte inside the narrowed range reads back with the minimum added", honest.a, 15)
+
+	buffer.writeu8(narrowed, 0, 250)
+	local value, failure = decode(narrow, narrowed)
+
+	check("one past the declared maximum is refused", failure ~= nil)
+	equals("and nothing is handed up", value, nil)
+end
+
+do
+	--[[ From the **eighth** slot, because the range check is pasted eight times and a check pasted
+	     eight times is eight chances to compare the wrong variable. Fields are emitted in name
+	     order, so `h` is the last one the unroll covers. ]]
+	local eight = Serdes.fromSchema(t.struct({
+		a = t.u8,
+		b = t.u8,
+		c = t.u8,
+		d = t.u8,
+		e = t.u8,
+		f = t.u8,
+		g = t.u8,
+		h = t.u8(10, 20),
+	}))
+
+	local wide = buffer.create(8)
+
+	for at = 0, 6 do
+		buffer.writeu8(wide, at, 1)
+	end
+
+	buffer.writeu8(wide, 7, 250)
+	local _, eighth = decode(eight, wide)
+
+	check("the check in the eighth slot fires as well as the first", eighth ~= nil)
+
+	buffer.writeu8(wide, 7, 5)
+	local whole = decode(eight, wide)
+
+	check("and lets an honest value through", whole ~= nil and whole.h == 15)
+	check("with the seven before it intact", whole.a == 1 and whole.g == 1)
+end
+
+do
+	--[[ The span is the bounds check, so a run that does not fit is where the whole optimisation is
+	     either safe or a read past the end of the buffer. Three bytes of a six-byte struct. ]]
+	local six = Serdes.fromSchema(t.struct({
+		a = t.u8,
+		b = t.u8,
+		c = t.u8,
+		d = t.u8,
+		e = t.u8,
+		f = t.u8,
+	}))
+
+	local cut = buffer.create(3)
+	local value, failure = decode(six, cut)
+
+	check("a struct cut short is refused rather than read past", failure ~= nil)
+	check(
+		`and says the packet ran out: {tostring(failure)}`,
+		string.find(tostring(failure), "truncated") ~= nil
+	)
+	equals("with nothing handed up", value, nil)
+
+	--[[ And the packet after it still decodes, which is G5: one malformed packet must not stop the
+	     rest. The rejection is cleared per payload, not per batch. ]]
+	local whole = buffer.create(6)
+
+	for at = 0, 5 do
+		buffer.writeu8(whole, at, at + 1)
+	end
+
+	local after = decode(six, whole)
+	check("while the next one still arrives", after ~= nil and after.a == 1 and after.f == 6)
+end
+
+do
+	--[[
+		**The f32 finding, through the fused path.**
+
+		The reader compares against the bound the *encoding* can hold, not the one the game declared:
+		f32(pi) is 3.14159274 against pi's 3.14159265, so a reader holding the declared bound refuses
+		a value its own writer had just accepted. That was fixed in `numberReader` earlier in this
+		milestone; the fused reader carries its own copy of the comparison, and a copy is a place for
+		the fix to not be.
+	]]
+	local yaw = Serdes.fromSchema(t.struct({
+		a = t.f32(-math.pi, math.pi),
+		b = t.f32(-math.pi, math.pi),
+	}))
+
+	Buffer.take()
+	Buffer.load(nil)
+	yaw.write({ a = math.pi, b = -math.pi })
+	local packed = (Buffer.take())
+
+	local back, refused = decode(yaw, packed)
+
+	check(`a fused struct accepts the bounds it just wrote: {tostring(refused)}`, refused == nil)
+	check("both ends of them", back ~= nil and back.a > 3.1415 and back.b < -3.1415)
+
+	Buffer.load(nil)
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- A key that is not there, and a repeated thing that costs nothing (M4 report, 2 and 3)
 -- ---------------------------------------------------------------------------------------------
 
