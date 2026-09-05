@@ -405,7 +405,7 @@ export type function ReplicatePayload(spec)
 	if not propertyOf(spec, types.singleton("store")) then
 		error(
 			"nw.replicate needs `store`, from nw.store: nw.store.of(table), "
-				.. "nw.store.charm(atom, Charm.subscribe) or nw.store.replica(replicas). netweave does "
+				.. "nw.store.charm(atom) or nw.store.replica(replicas). netweave does "
 				.. "not own the state it replicates — the game already has somewhere to keep it, and a "
 				.. "library that demands that be torn out to get delta compression will not be used."
 		)
@@ -1017,7 +1017,7 @@ local function requireStore(spec: any): any
 	if type(store) ~= "table" or type(store.subjects) ~= "function" or type(store.read) ~= "function" then
 		error(
 			`nw.replicate needs \`store\`, and got {typeof(store)}. Build one with nw.store.of(table), `
-				.. `nw.store.charm(atom, Charm.subscribe) or nw.store.replica(replicas) — or pass anything `
+				.. `nw.store.charm(atom) or nw.store.replica(replicas) — or pass anything `
 				.. `with \`subjects()\` and \`read(subject)\`, because a store is a shape and not a `
 				.. `dependency.`,
 			3
