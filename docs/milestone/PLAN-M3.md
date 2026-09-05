@@ -785,6 +785,38 @@ trust, and one of them turns out to be wrong.
       one that **arrives**. The `declare` error and both cautions say it now, because a developer
       hitting this is staring at that message.
 
+#### What running the Studio half found
+
+The nine above were closed under lune. `tests/roblox_runtime.luau` is the one file lune cannot run,
+and running it is a separate manual act — so it had not been run since the encoder learned to refuse
+a non-Instance, earlier in this phase.
+
+- [x] **Four Studio suites were red, and every lune run was green.** The suite hands an Instance
+      field a stand-in: a table that answers `:IsA`, which is exactly what the *reader* asks. The
+      *writer* asks `typeof(value) == "Instance"`, so `serdes`, `transport`, `hostile` and `fuzz`
+      all failed to load in Studio with `an instance field was given table`. `Harness.instance`
+      builds a real `Instance` there now, and takes the class to build from the argument it already
+      had. A double that differs from the real thing in the exact dimension the code under test
+      checks is not a double.
+- [x] **`error` severity bypassed the repeat suppression, on stages a peer floods.** Found by
+      reading the console rather than the pass line: one test's 2,000 `direction` refusals filled
+      the output window, each with a `debug.traceback`. `announce` printed and returned before it
+      reached the counter, and the two stages that default to `error` — `protocol` and `direction`
+      — are both **wire** stages, which is to say stages whose rate the peer chooses. The comments
+      arguing for it said "the fiftieth is worth as much as the first", which is true of the
+      diagnostic and says nothing about the cost; both are struck through where they stand.
+
+      Every level counts and suppresses now. What `error` keeps is the traceback and the louder
+      sink. `nw.observe` receives every rejection and `nw.diagnostics()` counts every one, which is
+      where a flood is meant to be read, and which the suppression line already points at. The
+      documented severity table said "reported **every** time" and is corrected in three places.
+
+      This is the same defect as the allocation one above and a worse instance of it: a stack walk
+      per packet against an interpolated string per packet. It is also the one the counting probe
+      could not have caught, because nothing was wrong with the *result*.
+- [x] **`roblox_runtime` passes, `owner` included** — 15 suites, 0 failed, against a place rebuilt
+      from the tree rather than hand-patched.
+
 #### The benchmark, which answered acceptance 6 and asked a new question
 
 `bench/runs/2026-09-05-m3.json`, sixteen minutes, delivery exact in all three netweave cells

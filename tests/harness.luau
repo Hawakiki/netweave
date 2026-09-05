@@ -42,6 +42,10 @@
 
 local Harness = {}
 
+--[[ `game` is an Instance in Roblox and nothing at all under lune. The same test file runs in both
+     (`CLAUDE.md` §2), so the one thing that cannot be the same in both asks here. ]]
+local ROBLOX = typeof(game) == "Instance"
+
 export type Suite = {
 	--[[ Success-path assertions. ]]
 	check: (name: string, condition: boolean) -> (),
@@ -157,16 +161,29 @@ end
 	@param class string? -- what `:IsA` will answer to, and to nothing else
 	@return any
 
-	A stand-in for an Instance, for the suites that run under lune where there are none.
+	An Instance, or the nearest thing lune has to one.
 
-	The codec's instance reader asks exactly one thing of the value it is handed — `value:IsA(class)`
-	— and refuses anything that cannot answer (`src/codec/Serdes.luau`). A stand-in that answers is
-	therefore indistinguishable from the real thing to the code under test, and a plain `{}` is
-	refused here as it is in Studio. That check did not exist until M3 phase 9, and until then a
-	hostile sidecar entry raised out of the read phase; every stand-in in the suite was a bare table
-	and none of them noticed.
+	**In Studio this is a real Instance**, because there is no reason for it not to be and one very
+	good reason against a stand-in: the codec's *writer* asks `typeof(value) == "Instance"` there,
+	so a table answering `:IsA` passes under lune and is refused in Studio. That is exactly what
+	happened — M3 phase 9 added the writer check, every lune suite stayed green, and four Studio
+	suites went red on a file nobody had run since. `class` names what to build, defaulting to a
+	`Folder` for the fields declared as a bare `t.instance`.
+
+	Under lune there are no Instances, so this answers the one question the *reader* asks —
+	`value:IsA(class)` — and nothing else. A stand-in that answers is indistinguishable from the
+	real thing to the code under test, and a plain `{}` is refused in both places. Note the one
+	difference that remains: a real Instance answers `:IsA` for every class it inherits, and this
+	answers only for the exact one it was given. No test depends on that, and a test that wants a
+	class mismatch refused gets it either way.
 ]=]
 function Harness.instance(name: string, class: string?): any
+	if ROBLOX then
+		local made = Instance.new((class or "Folder") :: any)
+		made.Name = name
+		return made
+	end
+
 	return {
 		Name = name,
 

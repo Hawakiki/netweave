@@ -110,6 +110,51 @@ do
 	Config.reset()
 end
 
+do
+	Observer.reset()
+
+	local printed = 0
+	local traced = 0
+
+	Observer.setSink(function(line: string)
+		printed += 1
+
+		--[[ The traceback's text differs between lune and Roblox; what does not is that `error`
+		     appends one and `warn` does not. ]]
+		if string.find(line, "\n", 1, true) then
+			traced += 1
+		end
+	end)
+
+	Config.configure({ limits = { repeatsPerDiagnostic = 3 } })
+
+	--[[
+		And the same for a rule whose severity is `error`, which used to print and return before it
+		reached any of that.
+
+		Two stages default to `error` and both argued that the fiftieth report is worth as much as
+		the first — true of the diagnostic, and irrelevant to the cost, because both are **wire**
+		stages whose rate a peer chooses, and an `error` carries a `debug.traceback`. A client
+		sending anything at all on a `state` id bought a stack walk and a console line per packet.
+		Found by running the Studio suite, where one test's 2,000 refusals filled the output window;
+		against the pre-fix code `printed` here is 2,000.
+	]]
+	for _ = 1, 2000 do
+		Observer.emit("game.state", nil, "direction", "event is sent by the server", 10)
+	end
+
+	equals("an error-level rule goes quiet after three too", printed, 3)
+	equals(
+		"and the counters still have every one",
+		Observer.diagnostics().channels["game.state"].direction.count,
+		2000
+	)
+	equals("the traceback is what error keeps", traced, 3)
+
+	Observer.reset()
+	Config.reset()
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- A silenced rule still counts
 -- ---------------------------------------------------------------------------------------------

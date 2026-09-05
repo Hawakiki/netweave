@@ -432,6 +432,27 @@ across three stages: 1,994 distinct reasons before the fix, 3 after.
 Before reaching for `collectgarbage`, ask what the allocation would make *observably* different.
 Often there is a counter hiding inside the property.
 
+### The half of the suite that cannot run under lune is the half that goes red quietly
+
+`tests/roblox_runtime.luau` is the one file the lune list cannot run, and running it is a separate,
+manual act. So when M3 phase 9 taught the encoder to refuse a non-Instance, four Studio suites broke
+on the spot — the stand-in the suite hands to an Instance field is a table answering `:IsA`, which
+is what the *reader* asks and not what the *writer* asks — and fourteen green lune runs said nothing
+about it across several commits.
+
+Two things came out of that, and the second is the one worth keeping:
+
+- The stand-in is a real `Instance` in Studio now. A double that differs from the real thing in the
+  exact dimension the code under test checks is not a double.
+- **The Studio pass is where the console is.** Running it is also the only time anybody reads
+  netweave's own output at volume, and that is how the `error` severity was found bypassing the
+  repeat suppression: 2,000 refusals from one test, each with a `debug.traceback`, on a stage whose
+  rate a hostile peer chooses. No assertion would have caught that, because nothing was wrong with
+  the result — only with what it cost to say so.
+
+So: run the Studio half before calling a milestone green, and read the console rather than only the
+pass line.
+
 ### A probe that finds nothing is written down
 
 Recording an audit's null results is what separates "checked and fine" from "never looked". `PLAN-M3`

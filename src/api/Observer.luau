@@ -235,13 +235,24 @@ local function announce(channel: string, stage: Stage, reason: string, player: P
 		return
 	end
 
-	local who = if player then ` from {player.Name}` else ""
+	--[[
+		Counted **before** the severity is looked at, and that ordering is the whole point.
 
-	if level == "error" then
-		sink(`[netweave] {channel} refused at {stage}{who}: {reason}\n{debug.traceback("", 2)}`)
-		return
-	end
+		`error` used to print and return above this, because two stages declare that default and
+		both argued the same way: nobody sends on a channel they receive on by accident, and a
+		protocol mismatch means that client cannot play at all, so the fiftieth is worth as much as
+		the first. The argument holds for the diagnostic and not for the cost. Both are **wire**
+		stages, which is to say stages whose rate a peer chooses — and an `error` carries a
+		`debug.traceback`, so a client sending anything at all on a `state` id bought a stack walk
+		and a console line per packet. Found by running the Studio suite, where 2,000 refusals from
+		one test filled the output window (M3 phase 9).
 
+		Every level counts and every level suppresses now. What `error` keeps is the traceback and
+		the louder sink; what it loses is the ability to be asked for fifty thousand of them. The
+		"fourth player is as stuck as the first" case the `protocol` comment worried about is
+		answered by `nw.observe`, which receives every one, and by `nw.diagnostics()`, which counts
+		them — both of which the suppression line says out loud.
+	]]
 	local key = `{channel}\0{stage}`
 	local times = (seen[key] or 0) + 1
 	local ceiling = Config.limitOf("repeatsPerDiagnostic")
@@ -252,9 +263,15 @@ local function announce(channel: string, stage: Stage, reason: string, player: P
 
 	seen[key] = times
 
+	local who = if player then ` from {player.Name}` else ""
 	local suffix = if times == ceiling
 		then ` (further "{stage}" reports for {channel} are suppressed; nw.observe still receives them)`
 		else ""
+
+	if level == "error" then
+		sink(`[netweave] {channel} refused at {stage}{who}: {reason}{suffix}\n{debug.traceback("", 2)}`)
+		return
+	end
 
 	sink(`[netweave] {channel} refused at {stage}{who}: {reason}{suffix}`)
 end

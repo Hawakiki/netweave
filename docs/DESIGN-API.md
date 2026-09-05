@@ -692,7 +692,7 @@ nw.configure({
         parse = "warn",       -- default
         budget = "warn",      -- default
         authorize = "off",    -- default: expected to fire in normal play
-        handler = "error",    -- default: the game's own bug, so every occurrence
+        handler = "error",    -- default: the game's own bug, so with a traceback
         queue = "warn",
         send = "warn",
         protocol = "error",
