@@ -271,18 +271,56 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
 - [ ] ~~Answer **D-4** with a probe.~~ **Moved to phase 4**, where baselines exist to probe. Writing
       it here would mean writing it against nothing.
 
-### Phase 3 — the diff
+### Phase 3 — the diff — **done**
 
-- [ ] **`Ir` derives a patch layout from a state layout** — every field optional, plus a removal
-      bit. Phase 1 named this as the real work: the codec is schema-driven and the schema describes
-      `PlayerState`, not a *patch of* `PlayerState`, so without this step a patch is an opaque
-      payload and the byte case against `delta-compress` evaporates.
-- [ ] `Delta.luau`: a structural diff over the lowered IR, emitting through L1's existing writers. A field that did not change costs its flag bit and nothing else.
+- [x] **`Ir.patch(layout)` derives a patch layout from a state layout.** One rule, applied
+      recursively: **wrap it in an optional** — which is not a trick, it is what the two states of a
+      patched field already are. A non-optional field becomes `optional(T)`, where absent is
+      *unchanged*. A field that was already `optional(T)` becomes `optional(optional(T))`, and the
+      two bits are different questions: the outer is *did it change*, the inner is *is it there
+      now*. The removal bit the plan asked for was already in the type system.
+
+      Structs recurse and get a bit of their own when nested, so "this sub-struct is untouched"
+      costs one bit rather than a walk. Arrays and maps are replaced whole, recorded as a limit: a
+      per-element diff needs its own operation vocabulary — `delta-compress` has five such tags —
+      and that is a schema the state schema does not describe.
+- [x] `Delta.luau`: the two walks over that shape. **Not a diff-to-table followed by an encode**,
+      which is what the plan implied and what both neighbours do — that builds a table per patch on
+      each side, which is the "decode into a table and then walk it" `RESEARCH §3.8-S` criticises,
+      and on the receive side it is *wrong*: a patch table cannot express "this optional changed to
+      nil", because an absent key and a key set to nil are the same table. Charm Sync spends a
+      `__none` sentinel on exactly that. Reading the bit and folding it into the baseline in one
+      pass has no intermediate to lose the distinction in.
+
+      A merged value **shares every subtree the patch did not touch** and is a fresh table only
+      where it did, which is both cheaper and what an immutable store wants back.
+- [x] **`Serdes.nodeCodec`**, so `Delta` walks the tree and asks for a codec at each leaf rather
+      than reimplementing fourteen kinds. The block optimisation is off for those, and the docstring
+      says why: a patch is never statically sized, and mixing a growth-checked writer into a blocked
+      layout would write past the block.
+- [x] **The byte claim is asserted rather than asserted about.** A twelve-field struct with one
+      field moved: **three bytes** — twelve bits of "which one" in two, then the byte that moved —
+      against twelve for the whole thing.
 - [x] ~~Deletion needs a sentinel the schema cannot produce — Charm Sync uses a `__none` marker;
       netweave has a flag scope and should not need a magic value. Decide and write down which.~~
       **Closed in phase 1: none needed.** Charm needs `__none` because it rides Roblox's default
       serialisation, where `nil` and absent are the same thing. A flag scope makes "removed" one bit.
-- [ ] `ir_runtime`-style property test: for every schema in the ceiling suite, `apply(baseline, diff(baseline, next))` equals `next`.
+- [x] `tests/delta_runtime.luau`: `apply(base, diff(base, next))` equals `next` over the sixteen
+      schemas the ceiling suite uses — chosen because between them they open a bitfield everywhere
+      one can open, which is where a derived layout is most likely to number something wrong — plus
+      a nested struct, which the ceiling list had no reason to carry. Forward, backward and against
+      itself, so removal is exercised in one direction and arrival in the other. **121 assertions.**
+
+      Two findings from writing it. `cloneNode` dropped the **nested scope**, which is structure
+      rather than assignment — `lowerArray` and `lowerMap` create it because an element whose count
+      is unknown until runtime cannot fold its flags into the enclosing bitfield — and an array
+      element then had flags and nowhere to put them. And a sparse `t.array(t.optional(T))` is a
+      hazard for *test data* rather than a defect: `#` on `{1, nil, 3}` is three as a literal and
+      one when the same table is filled by assignment, so the generator keeps its arrays dense.
+- [x] The failure-path floor is **0.1**, and `CLAUDE.md` §9 is the reason rather than the excuse.
+      Computing a difference between two values the game already owns has one correct answer and no
+      adversary — the same shape as `ir_runtime` at 13%. Nothing in the file reads a byte a peer
+      chose; the adversarial half is a malformed or replayed patch, which is phase 6.
 
 ### Phase 4 — baselines, bounded
 

@@ -811,4 +811,185 @@ function Ir.lower(descriptor: Descriptor): Layout
 	}
 end
 
+--[[
+	A node tree is assigned into a scope by `assignBits`, which writes `chunkIndex` and `mask` onto
+	the nodes themselves. A derived layout therefore cannot share nodes with the one it derives
+	from — assigning the patch would renumber the state's flags underneath it. Everything below the
+	kind is copied; the assignment fields are deliberately not, because `Ir.patch` reassigns them.
+]]
+local function cloneNode(node: Node): Node
+	local copy: Node = {
+		kind = node.kind,
+		bits = node.bits,
+		fixedSize = node.fixedSize,
+		instances = node.instances,
+		storage = node.storage,
+		offset = node.offset,
+		min = node.min,
+		max = node.max,
+		unit = node.unit,
+		class = node.class,
+		lengthStorage = node.lengthStorage,
+		lengthOffset = node.lengthOffset,
+		count = node.count,
+		variants = node.variants,
+		lookup = node.lookup,
+		--[[ Frozen and read-only in both trees, so shared rather than copied. ]]
+		template = node.template,
+
+		--[[ A nested scope is **structure**, not assignment: `lowerArray` and `lowerMap` create it
+		     because an element whose count is unknown until runtime cannot fold its flags into the
+		     enclosing bitfield. `assignBits` writes onto the nodes inside it and never onto the
+		     scope itself, so the two trees can share one. Dropping it here as though it were an
+		     assignment left an array element with flags and nowhere to put them. ]]
+		scope = node.scope,
+	}
+
+	if node.inner then
+		copy.inner = cloneNode(node.inner :: Node)
+	end
+
+	if node.element then
+		copy.element = cloneNode(node.element :: Node)
+	end
+
+	if node.elements then
+		local elements: { Node } = {}
+
+		for index, one in node.elements :: { Node } do
+			elements[index] = cloneNode(one)
+		end
+
+		copy.elements = elements
+	end
+
+	if node.key then
+		copy.key = cloneNode(node.key :: Node)
+	end
+
+	if node.value then
+		copy.value = cloneNode(node.value :: Node)
+	end
+
+	if node.fields then
+		local fields: { Field } = {}
+
+		for index, field in node.fields :: { Field } do
+			fields[index] = { name = field.name, node = cloneNode(field.node) }
+		end
+
+		copy.fields = fields
+	end
+
+	return copy
+end
+
+--[[ One presence bit in front of a node, which is exactly what `lower` produces for `t.optional`.
+     Built here rather than through the type layer because `t.optional` refuses to wrap an optional
+     — correctly, since `T??` is `T?` to a reader — and a patch needs both bits to mean different
+     things. See `Ir.patch`. ]]
+local function optionalOf(inner: Node): Node
+	return {
+		kind = "optional" :: Types.Kind,
+		bits = 1 + inner.bits,
+		fixedSize = if inner.fixedSize == 0 then 0 else nil,
+		instances = if inner.instances == 0 then 0 else nil,
+		inner = inner,
+	}
+end
+
+local function patchNode(node: Node, root: boolean): Node
+	if node.kind ~= "struct" then
+		return optionalOf(cloneNode(node))
+	end
+
+	local source = node.fields :: { Field }
+	local fields: { Field } = sized(#source)
+
+	local bits = 0
+	local fixedSize: number? = 0
+	local instances: number? = 0
+
+	for index, field in source do
+		local child = patchNode(field.node, false)
+
+		fields[index] = { name = field.name, node = child }
+		bits += child.bits
+		fixedSize = addSize(fixedSize, child.fixedSize)
+		instances = addSize(instances, child.instances)
+	end
+
+	local patched: Node = {
+		kind = "struct" :: Types.Kind,
+		bits = bits,
+		fixedSize = fixedSize,
+		instances = instances,
+		fields = fields,
+		template = node.template,
+	}
+
+	--[[ The root needs no bit of its own: a patch that changes nothing is a patch nobody sends.
+	     A nested struct gets one, so "this sub-struct is untouched" costs a bit rather than a
+	     walk — and when it is touched, the bits inside say which of its fields moved. ]]
+	return if root then patched else optionalOf(patched)
+end
+
+--[=[
+	@within Ir
+	@function patch
+	@param layout Layout -- a state layout, from [Ir.lower]
+	@return Layout -- the layout of a *change* to a payload on it
+
+	The layout of a patch: which fields moved, and their new values.
+
+	**Every field gains one bit and nothing else.** A twelve-field struct where one field changed is
+	twelve bits and that field's value — field identity is a *position* in the bitfield rather than
+	a serialised key, which is the whole reason delta compression belongs inside a schema-driven
+	codec rather than beside one. `delta-compress` writes a type tag per value because it has no
+	schema and cannot do otherwise (`RESEARCH §1`, M4 phase 1).
+
+	The derivation is one rule applied recursively: **wrap it in an optional**. That is not a trick,
+	it is what the two states of a patched field already are —
+
+	  * a non-optional field becomes `optional(T)`: absent is *unchanged*, present is the new value;
+	  * a field that was already `optional(T)` becomes `optional(optional(T))`, and the two bits are
+	    different questions — the outer is *did it change*, the inner is *is it there now*. Removal
+	    needs no sentinel value, which is what Charm Sync spends a `__none` table on because it
+	    rides Roblox's default serialisation where `nil` and absent are the same thing.
+
+	Structs recurse; everything else is replaced whole. An array or map patch is the new array or
+	map, because a per-element diff needs its own operation vocabulary — `delta-compress` has five
+	such tags — and that is a schema the state schema does not describe. Recorded as a limit rather
+	than hidden: a state whose changes are mostly inside a large array gets no win from this, and
+	`PLAN-M4` acceptance 8 measures the crossover instead of assuming one.
+
+	:::caution
+	The result shares no node with `layout`. `assignBits` writes onto nodes, so a shared tree would
+	renumber the state's own flags when the patch was assigned.
+	:::
+]=]
+function Ir.patch(layout: Layout): Layout
+	local root = patchNode(layout.root, true)
+
+	local scope: Scope? = nil
+	if root.bits > 0 then
+		scope = makeScope(root.bits)
+		assignBits(root, scope :: Scope, 0)
+	end
+
+	assignNestedScopes(root)
+
+	local flagBytes = if scope then scope.bytes else 0
+	local fixedSize = addSize(flagBytes, root.fixedSize)
+
+	return {
+		root = root,
+		scope = scope,
+		fixedSize = fixedSize,
+		maxSize = flagBytes + ceiling(root),
+		instances = root.instances,
+		framing = if fixedSize then "static" else "counted",
+	}
+end
+
 return Ir
