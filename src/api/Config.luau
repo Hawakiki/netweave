@@ -80,9 +80,10 @@ export type Severity = "off" | "warn" | "error"
 	.send Severity? -- an outgoing payload was refused before it left
 	.protocol Severity? -- a peer joined on a different set of channel definitions
 	.query Severity? -- a call came back without an answer
+	.direction Severity? -- a peer sent on a channel it is the receiver of
 	.rateUnbounded Severity? -- a `rate` so large it cannot bind, declared as if it were a limit
 
-	Eight of the nine are the stages of [Observer.Stage], because a rejection already carries the
+	Nine of the ten are the stages of [Observer.Stage], because a rejection already carries the
 	stage it happened at and inventing a second vocabulary for the same things would only make them
 	drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the game's own
 	code, and is the only rule here that raises at `"error"`.
@@ -96,6 +97,7 @@ export type Rules = {
 	send: Severity?,
 	protocol: Severity?,
 	query: Severity?,
+	direction: Severity?,
 	rateUnbounded: Severity?,
 }
 
@@ -219,6 +221,7 @@ export type function CheckedSettings(spec, snapshot)
 		send = true,
 		protocol = true,
 		query = true,
+		direction = true,
 		rateUnbounded = true,
 	}
 	--[[ Every key of `Limits`, and it has to be spelled out because a type function body cannot read
@@ -442,6 +445,15 @@ local RULES: { [string]: Rule } = {
 		floor = "off",
 		wire = true,
 		summary = "a call came back without an answer",
+	},
+	direction = {
+		--[[ Every one, like `protocol`, and for the same reason: nobody sends on a channel they
+		     receive on by accident, so the first is worth as much as the fiftieth and there is no
+		     legitimate traffic for the suppression to protect. ]]
+		default = "error",
+		floor = "off",
+		wire = true,
+		summary = "a peer sent on a channel it is the receiver of",
 	},
 	rateUnbounded = {
 		default = "warn",

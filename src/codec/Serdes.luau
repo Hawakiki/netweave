@@ -322,17 +322,38 @@ end
 -- Writers
 -- -------------------------------------------------------------------------------------------------
 
+--[[
+	Which encodings cannot hold a fraction.
+
+	`buffer.writeu8(3.7)` truncates, and with an offset it is not even truncation: `-0.4` on
+	`t.i16(-100, 100)` becomes `99.6`, stores as `99` and reads back as `-1`. The range check passed
+	both, so a game that sent a float where it meant an integer got a different number on the far
+	side and no report — under a module header that promises the alternative to raising is "silent
+	wraparound", which is exactly what it was doing (`PLAN-M3` phase 9).
+
+	The test is captured per node rather than branched per value: a `f32` field pays one upvalue
+	read, an integer field pays a modulo, and neither pays a `type()` call.
+]]
+local FRACTIONAL: { [string]: boolean } = { f32 = true, f64 = true }
+table.freeze(FRACTIONAL)
+
 local function numberWriter(node: Node): Writer
 	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
-	local write = family[node.storage :: Encoding]
+	local storage = node.storage :: Encoding
+	local write = family[storage]
 	local offset = node.offset :: number
 	local min = node.min :: number
 	local max = node.max :: number
+	local integral = not FRACTIONAL[storage]
 
 	if offset == 0 then
 		return function(value: any, _flags: Flags)
 			if not (value >= min and value <= max) then
 				error(`[netweave] {value} is outside the declared range {min}..{max}`)
+			end
+
+			if integral and value % 1 ~= 0 then
+				error(`[netweave] {value} is not a whole number, and this field is stored as {storage}`)
 			end
 
 			write(value)
@@ -342,6 +363,10 @@ local function numberWriter(node: Node): Writer
 	return function(value: any, _flags: Flags)
 		if not (value >= min and value <= max) then
 			error(`[netweave] {value} is outside the declared range {min}..{max}`)
+		end
+
+		if integral and value % 1 ~= 0 then
+			error(`[netweave] {value} is not a whole number, and this field is stored as {storage}`)
 		end
 
 		write(value - offset)
@@ -487,9 +512,23 @@ function buildWriter(node: Node): Writer
 		local chunk = node.chunkIndex :: number
 		local mask = node.mask :: number
 
+		--[[
+			A boolean field takes a boolean, and this used to take anything.
+
+			`if value then` is truthiness, so `t.boolean` accepted `0`, `""` and `"false"` and put
+			`true` on the wire for two of them. That is a silent type coercion across a wire whose
+			whole purpose is that the type on the far side is the type that was declared — and
+			`nw.validate` decides "conforms" by running this writer, so a DataStore row reading
+			`{ admin = "false" }` came back branded `Trusted<T>` and truthy (`PLAN-M3` phase 9).
+
+			Written as two comparisons rather than a `type()` call: the common path is one, `false`
+			is two, and nothing else reaches the wire.
+		]]
 		return function(value: any, flags: Flags)
-			if value then
+			if value == true then
 				flags[chunk] = bor(flags[chunk], mask)
+			elseif value ~= false then
+				error(`[netweave] a boolean field was given {typeof(value)}`)
 			end
 		end
 	elseif kind == "number" then
@@ -555,6 +594,13 @@ function buildWriter(node: Node): Writer
 		return function(value: any, _flags: Flags)
 			if value == nil then
 				error("[netweave] a non-optional instance field is nil")
+			end
+
+			--[[ Anything non-nil used to go into the sidecar, so `nw.validate` said a number
+			     conformed to `t.instance("Player")` and branded it. The reader refuses the same
+			     shape on the way in; this is the send side of that check. ]]
+			if not isInstance(value) then
+				error(`[netweave] an instance field was given {typeof(value)}`)
 			end
 
 			writeInstance(value)
