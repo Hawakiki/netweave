@@ -356,7 +356,10 @@ local function numberWriter(node: Node): Writer
 	local offset = node.offset :: number
 	local min = node.min :: number
 	local max = node.max :: number
-	local integral = not FRACTIONAL[storage]
+	--[[ Asked of the node rather than derived from the storage a second time. A `u53` lands on `f64`
+	     storage and is still a whole number; a `t.f64` lands on the same storage and is not, and the
+	     difference is a property of the declaration that only `Ir.lowerNumber` can see. ]]
+	local integral = node.whole == true
 	local step = node.step
 
 	--[[
@@ -588,6 +591,15 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 			return nil, 0
 		end
 
+		--[[ A `u53` or `i53` whose range did not narrow is carried in an `f64` and still has to be a
+		     whole number, which is a check the unroll below does not make. Folding it in would be a
+		     test per field on every struct in the library for a shape few have — the same trade the
+		     quantised arms are the answer to, and here the honest answer is the loop writer, which
+		     asks it already. ]]
+		if node.whole and FRACTIONAL[storage :: string] then
+			return nil, 0
+		end
+
 		local min = node.min :: number
 		local max = node.max :: number
 		local step = node.step
@@ -602,7 +614,7 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 			offset = node.offset :: number,
 			scale = if step then 1 / step else 1,
 			unit = step or 1,
-			integral = step == nil and not FRACTIONAL[storage :: string],
+			integral = node.whole == true,
 			storage = storage :: string,
 			--[[ Quantised codes are the plain ones plus five, so the chain keeps `u8` first and a field
 			     that is not quantised never reaches the three arms that are. ]]
@@ -1200,6 +1212,29 @@ local function numberReader(node: Node): Reader
 		if storage == "f32" then
 			min = asF32(min)
 			max = asF32(max)
+		end
+
+		--[[
+			**A `u53` is checked for wholeness on the way in as well as on the way out**, which is the
+			gap it was added to close: the widest integer was `u32`, so a `UserId` had to be declared
+			`t.f64` — a float, whose fractional-ness only the *writer* refused. A peer sending 1.5 on
+			a field a game reads as an id got 1.5 delivered, and `Instance` lookups, table keys and
+			datastore writes all behave differently for it.
+
+			Only on this branch, because a narrowed `u53` lands on an unsigned storage where the value
+			is an integer by construction.
+		]]
+		if node.whole then
+			return function(_flags: Flags): any
+				local value = read()
+
+				if not (value >= min and value <= max) or value % 1 ~= 0 then
+					reject("number out of range")
+					return min
+				end
+
+				return value
+			end
 		end
 
 		return function(_flags: Flags): any

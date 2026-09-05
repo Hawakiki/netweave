@@ -798,6 +798,31 @@ Studio pass.
       the 2^24 cap restored (2, one of them the report's own message), the fused path treating a
       quantised field as plain (1), `step` out of the hash (2), and the reader bounded by the
       declaration (2).
+- [x] **`t.u53` and `t.i53`** — whole numbers wider than four bytes, checked on **both** sides. The
+      widest integer was `u32`, so a `UserId` had to be declared `t.f64`: a float, whose wholeness
+      only the writer refused, so a peer sending `1.5` on a field a game reads as an id got 1.5
+      delivered. They are the only declared encodings with no storage of their own — a span that
+      fits four bytes narrows exactly like `u32`, and one that does not is carried in an `f64`,
+      where every integer to 2^53 is exact.
+- [x] **`offset` is zero on the wide path and has to be.** `value - min` for a bare `t.i53` spans
+      2^54, and an odd integer above 2^53 is not representable as a double, so subtracting the bound
+      would round the values the encoding exists to carry. Subtracted only where the span narrowed,
+      and exact by construction there.
+- [x] Integrality moved from "derive it from the storage" to a `whole` flag on the node, because a
+      `u53` and a `t.f64` land on the same storage and only one of them is a whole number. That is a
+      distinction only `Ir.lowerNumber` can see, and it was being re-derived in two places from
+      something that does not carry it.
+- [x] A struct holding a **wide** `u53` takes the loop writer: the unrolled reader has no wholeness
+      check, and folding one in would be a test per field on every struct in the library for a shape
+      few have — the same trade the quantised arms answered the other way, and the reason the two
+      answers differ is that the quantised case had no existing path that asked the question. A
+      *narrowed* `u53` lands on an unsigned storage where the value is whole by construction, and
+      keeps the unroll.
+- [x] Confirmed by mutation: the reader not asking for wholeness (2 failures), the wide path
+      subtracting the lower bound (3, one of them an odd integer coming back rounded), and a wide
+      `u53` left on the fused path, which is refused by the unrolled *writer* and taken by the
+      unrolled reader — so the case that bites is a fraction forged into a struct's bytes (2).
+      `bench/profile` 12,496 and `bench/decode` 21,034 across the whole of this, unmoved.
 
 ## 7. Acceptance criteria
 

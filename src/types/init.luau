@@ -35,7 +35,7 @@
 ]]
 
 --[=[
-	@type Encoding "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "f64"
+	@type Encoding "u8" | "u16" | "u32" | "u53" | "i8" | "i16" | "i32" | "i53" | "f32" | "f64"
 	@within Types
 
 	Storage width for a number, and the component width of a vector.
@@ -43,7 +43,7 @@
 	This is an upper bound, not a promise: a range narrower than the encoding lets the codec store
 	fewer bytes and subtract the minimum, so `t.u16(1000, 1255)` occupies one byte on the wire.
 ]=]
-export type Encoding = "u8" | "u16" | "u32" | "i8" | "i16" | "i32" | "f32" | "f64"
+export type Encoding = "u8" | "u16" | "u32" | "u53" | "i8" | "i16" | "i32" | "i53" | "f32" | "f64"
 
 --[=[
 	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "optional" | "array" | "map" | "struct"
@@ -306,9 +306,11 @@ local ENCODING_RANGE: { [string]: { min: number, max: number } } = {
 	u8 = { min = 0, max = 255 },
 	u16 = { min = 0, max = 65535 },
 	u32 = { min = 0, max = 4294967295 },
+	u53 = { min = 0, max = 2 ^ 53 },
 	i8 = { min = -128, max = 127 },
 	i16 = { min = -32768, max = 32767 },
 	i32 = { min = -2147483648, max = 2147483647 },
+	i53 = { min = -(2 ^ 53), max = 2 ^ 53 },
 	f32 = { min = -MAX_F32, max = MAX_F32 },
 	f64 = { min = -MAX_F64, max = MAX_F64 },
 }
@@ -430,6 +432,29 @@ t.u16 = number("u16") :: Ranged<number>
 t.u32 = number("u32") :: Ranged<number>
 
 --[=[
+	@prop u53 Ranged<number>
+	@within Types
+
+	A whole number in `0..9007199254740992`, which is every integer a Luau double holds exactly.
+
+	```lua
+	owner = t.u53,                  -- a UserId
+	stamp = t.u53(0, 2 ^ 42),       -- milliseconds, narrowed
+	```
+
+	Eight bytes bare, and **narrowed like any other integer**: a range whose span fits four bytes or
+	fewer takes that instead, so `t.u53(1, 1000)` is two.
+
+	:::note
+	Before this existed the widest integer was `t.u32` and a `UserId` had to be declared `t.f64` —
+	a float, whose wholeness only the *writer* refused. A peer sending `1.5` on a field a game reads
+	as an id got 1.5 delivered, and `Players:GetPlayerByUserId`, a table key and a datastore write
+	all behave differently for it. This is checked on both sides.
+	:::
+]=]
+t.u53 = number("u53") :: Ranged<number>
+
+--[=[
 	@prop i8 Ranged<number>
 	@within Types
 	A signed integer in `-128..127`.
@@ -449,6 +474,17 @@ t.i16 = number("i16") :: Ranged<number>
 	A signed integer in `-2147483648..2147483647`.
 ]=]
 t.i32 = number("i32") :: Ranged<number>
+
+--[=[
+	@prop i53 Ranged<number>
+	@within Types
+
+	[Types.u53] with a sign: a whole number in `-9007199254740992..9007199254740992`.
+
+	A balance that can go negative, a signed offset from an epoch, a difference between two ids.
+	Eight bytes bare, and narrowed the same way — `t.i53(-1000, 1000)` is two.
+]=]
+t.i53 = number("i53") :: Ranged<number>
 
 --[=[
 	@prop f32 Ranged<number>

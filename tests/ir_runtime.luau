@@ -109,6 +109,38 @@ do
 	check("the node's ceiling is the top level, not the declared maximum", (eleven.root.max :: number) >= 100)
 end
 
+do
+	--[[
+		`u53` and `i53` are the only declared encodings with no storage of their own: a span that
+		fits four bytes narrows exactly like `u32`, and one that does not is carried in an `f64`,
+		where every integer to 2^53 is exact.
+
+		**`offset` is zero on the wide path and has to be.** `value - min` for a bare `t.i53` spans
+		2^54, and an odd integer above 2^53 is not representable as a double — so subtracting the
+		bound would round the very values the encoding exists to carry.
+	]]
+	local wide = Ir.lower(t.u53)
+	equals("a bare u53 is carried in a double", wide.root.storage, "f64")
+	equals("eight bytes", wide.fixedSize, 8)
+	equals("with no offset subtracted", wide.root.offset, 0)
+	check("and it is a whole number", wide.root.whole == true)
+
+	local signed = Ir.lower(t.i53)
+	equals("so is a bare i53", signed.root.storage, "f64")
+	equals("and it subtracts nothing either", signed.root.offset, 0)
+
+	local narrow = Ir.lower(t.u53(1, 1000))
+	equals("a narrowed u53 takes the storage its span needs", narrow.root.storage, "u16")
+	equals("the lower bound is subtracted there", narrow.root.offset, 1)
+	equals("two bytes", narrow.fixedSize, 2)
+
+	--[[ The distinction the node has to carry and the storage cannot: both of these are `f64` on the
+	     wire, and only one of them is a whole number. ]]
+	check("a float is not whole", Ir.lower(t.f64).root.whole == false)
+	check("and a quantised number is not either", Ir.lower(t.quantized(-1, 1, 0.5)).root.whole == false)
+	check("while an ordinary integer is", Ir.lower(t.u16).root.whole == true)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- The M0 benchmark schemas, in the byte counts the competitors produced
 -- ---------------------------------------------------------------------------------------------
