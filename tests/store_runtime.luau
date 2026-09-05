@@ -15,9 +15,14 @@
 	What is here instead is the same discipline `tests/harness.luau` uses for Instances under lune:
 	**a stand-in that answers exactly what the code under test asks**, with the real library's file
 	and line beside each one so the shape can be checked against the source rather than against
-	memory. `Store.charm` calls a getter and a `subscribe` with Charm's own signature
-	(`charm/packages/charm/src/init.luau:519, 821`); `Store.replica` reads `.Data`
+	memory. `Store.charm` calls a getter with Charm's own signature
+	(`charm/packages/charm/src/init.luau:519`); `Store.replica` reads `.Data`
 	(`ReplicaService/src/ServerScriptService/ReplicaService.lua:403`). Those are the whole surfaces.
+
+	~~`Store.charm` also takes Charm's `subscribe` (`:821`).~~ **It does not, as of M4 phase 8**, and
+	the assertions that used to check the signal it produced are now the ones below asserting the
+	seam has exactly two functions. A field nothing reads is a field that goes, and the measurement
+	that settled it is at the top of `src/replication/Store.luau`.
 
 	The part that is a real test rather than a shape check is the last section: the seam driving an
 	actual diff against actual baselines, which is what the adapters exist for.
@@ -61,6 +66,17 @@ do
 	world.gamma = { hp = 1 }
 	equals("a subject that appeared is listed", #store.subjects(), 3)
 	equals("and readable", store.read("gamma").hp, 1)
+
+	--[[ The seam is two functions and nothing else, asserted rather than described. A `changed` was
+	     declared here for four phases, checked at declaration by `nw.replicate` and never once read,
+	     and nothing said so — this is what notices a third field arriving without a caller. ]]
+	local offered = 0
+
+	for _ in store :: any do
+		offered += 1
+	end
+
+	equals("and the seam offers two functions, not three", offered, 2)
 end
 
 suite.failing()
@@ -70,7 +86,6 @@ do
 	local store = Store.of(world)
 
 	equals("a subject that is not there reads nil", store.read("gamma"), nil)
-	check("and a plain table offers no change signal", store.changed == nil)
 
 	world.alpha = nil
 	equals("one that went away is not listed", #store.subjects(), 1)
@@ -84,19 +99,18 @@ end
 suite.passing()
 
 -- ---------------------------------------------------------------------------------------------
--- Charm's shape: a getter and a subscribe
+-- Charm's shape: a getter, and nothing else
 -- ---------------------------------------------------------------------------------------------
 
 do
 	--[[
-		An atom, in the two lines of it netweave touches. Charm's own is a callable that returns the
-		value with no arguments and sets it with one (`charm/packages/charm/src/init.luau:519`); its
-		`subscribe(getter, callback)` returns a cleanup and calls back on change (`:821`). Nothing
-		below depends on anything else Charm does, which is the claim this section exists to make
-		checkable.
+		An atom, in the one line of it netweave touches. Charm's own is a callable that returns the
+		value with no arguments and sets it with one (`charm/packages/charm/src/init.luau:519`).
+		Nothing below depends on anything else Charm does, which is the claim this section exists to
+		make checkable — and it got shorter in M4 phase 8, when `subscribe` (`:821`) stopped being
+		part of the adapter.
 	]]
 	local value: { [any]: any } = { [1] = { hp = 10 } }
-	local listeners: { () -> () } = {}
 
 	local function atom(): { [any]: any }
 		return value
@@ -104,61 +118,34 @@ do
 
 	local function set(next_: { [any]: any })
 		value = next_
-
-		for _, listener in listeners do
-			listener()
-		end
 	end
 
-	local function subscribe(_getter: any, callback: (state: any, last: any) -> ()): () -> ()
-		table.insert(listeners, function()
-			callback(value, value)
-		end)
-
-		local index = #listeners
-
-		return function()
-			listeners[index] = function() end
-		end
-	end
-
-	local store = Store.charm(atom, subscribe)
+	local store = Store.charm(atom)
 
 	equals("the atom's subjects are the store's", #store.subjects(), 1)
 	equals("and its values", store.read(1).hp, 10)
-	check("and Charm's signal is offered", store.changed ~= nil)
 
-	local moved = 0
-	local stop = (store.changed :: any)(function()
-		moved += 1
-	end)
-
+	--[[ Read through the getter on every call rather than captured once. An atom replaces its table
+	     rather than writing to it, so a store that had held the first one would never see a second
+	     — and that, not a signal, is what makes Charm cheap to diff: a subject that moved differs
+	     on its first key. ]]
 	set({ [1] = { hp = 3 }, [2] = { hp = 9 } })
 
-	equals("a change is announced once", moved, 1)
 	equals("the new value is visible", store.read(1).hp, 3)
 	equals("and so is the new subject", #store.subjects(), 2)
 
-	--[[ netweave drops the two arguments Charm passes, and that is the whole difference between
-	     this adapter and `charm-sync`: netweave diffs per client against what *that client* has,
-	     not against what the server last held, so "the previous state" is the wrong question for it
-	     to be answering. ]]
-	stop()
 	set({ [1] = { hp = 1 } })
-	equals("and stops when told to", moved, 1)
+
 	equals("while the value keeps moving", store.read(1).hp, 1)
-end
+	equals("and a subject that went with it stops being listed", #store.subjects(), 1)
 
-do
-	--[[ Charm without a `subscribe`, which is legal and costs a walk a tick. A game that has the
-	     signal should pass it; one that does not is not locked out. ]]
-	local value: { [any]: any } = { [1] = { hp = 2 } }
-	local store = Store.charm(function()
-		return value
-	end)
+	local offered = 0
 
-	check("no signal is offered", store.changed == nil)
-	equals("and the value still reads", store.read(1).hp, 2)
+	for _ in store :: any do
+		offered += 1
+	end
+
+	equals("the Charm adapter is the same two functions", offered, 2)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -182,7 +169,6 @@ do
 
 	equals("both replicas are subjects", #store.subjects(), 2)
 	equals("and Data is the value", store.read(1).hp, 10)
-	check("with no change signal, because ReplicaService has none", store.changed == nil)
 
 	--[[ The mutation ReplicaService would have sent as its own RemoteEvent, six times over. Under
 	     netweave the tick sees the state *after* all of them, which is one batched patch instead of

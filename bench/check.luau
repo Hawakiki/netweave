@@ -17,7 +17,11 @@ local luau = require("@lune/luau")
 local process = require("@lune/process")
 local stdio = require("@lune/stdio")
 
-local ROOTS = { "bench/src", "bench/vendor", "bench/schemas" }
+--[[ ~~`bench/src`, `bench/vendor`, `bench/schemas`.~~ **The whole directory**, as the line above
+     always claimed. The three named subdirectories left every file that sits directly in `bench/`
+     unchecked — `envelope`, `profile`, `report`, this file, and `tick.luau`, which was written for
+     M4 phase 8 and reported as compiling by a check that had never opened it. ]]
+local ROOTS = { "bench" }
 
 local function color(name: stdio.Color, text: string): string
 	return `{stdio.color(name)}{text}{stdio.color("reset")}`

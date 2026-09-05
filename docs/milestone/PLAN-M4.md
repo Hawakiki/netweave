@@ -389,9 +389,12 @@ else is in that frame.
 
 ### Phase 5 — the seam and the adapters — **done**
 
-- [x] `Store.luau` — `subjects`, `read`, and an **optional** `changed`. Three constructors:
+- [x] ~~`Store.luau` — `subjects`, `read`, and an **optional** `changed`. Three constructors:
       `Store.of` for a plain table, `Store.charm` for an atom and Charm's own `subscribe`, and
-      `Store.replica` for `Replica.Data`.
+      `Store.replica` for `Replica.Data`.~~ **`changed` is gone as of phase 8** and `Store.charm`
+      takes only the getter. It was declared, documented and checked at declaration for four phases
+      without one line ever reading it; the measurement that settled deleting it rather than
+      consuming it is below and at the top of `src/replication/Store.luau`.
 - [x] **D-3's answer is refined by having built phases 3 and 4, and the refinement is worth naming.**
       Phase 1 concluded "netweave is the transport a replication library plugs into", because
       `charm-sync` already diffs and wants `connect(onSync)`. One step too far: **netweave adapts
@@ -399,20 +402,25 @@ else is in that frame.
 
       Carrying `charm-sync`'s `SyncPayload` would mean moving an arbitrarily shaped patch table
       through a schema-driven codec — as an opaque blob, which is exactly what phase 1 warned
-      throws the byte case away. `charm` underneath it is an atom and a `subscribe`, which is a
-      value and a signal, and that is all `Baseline` and `Delta` need. netweave **replaces**
+      throws the byte case away. `charm` underneath it is an atom and a `subscribe`, ~~which is a
+      value and a signal, and that is all `Baseline` and `Delta` need~~ — **and it turned out only
+      the value was needed** (phase 8). netweave **replaces**
       `charm-sync` rather than riding it, and replaces ReplicaService's six RemoteEvents the same
       way.
-- [x] **`changed` is optional, and that is the finding rather than a convenience.** Charm can say
-      when something moved (`charm/packages/charm/src/init.luau:821`); ReplicaService cannot — the
-      game calls `SetValue` and nothing observes it server-side (`ReplicaService.lua:403`). A seam
-      that required a change signal would have supported one of the two libraries it was designed
-      for. A store that cannot say is polled once a tick, which the transport does anyway — and the
+- [x] ~~**`changed` is optional, and that is the finding rather than a convenience.**~~ **The
+      finding survives; the field does not.** Charm can say when something moved
+      (`charm/packages/charm/src/init.luau:821`); ReplicaService cannot — the game calls `SetValue`
+      and nothing observes it server-side (`ReplicaService.lua:403`). That asymmetry is what made a
+      *required* change signal the wrong seam, and it still is. What phase 8 measured is that the
+      optional one was worth 0.23 ms of an idle tick against a silent freeze whenever it missed a
+      mutation, so the answer to "one of the two libraries can say" is that neither has to.
+
+      A store that cannot say is polled once a tick, which the transport does anyway — and the
       polling is also the win, because six mutations in one frame are six RemoteEvent calls per
       player under ReplicaService and one batched patch under netweave.
-- [x] netweave **never requires either library**. The game passes Charm's own `subscribe`, so the
-      adapter is a shape rather than a dependency — which is also the only thing `CLAUDE.md` §8
-      leaves available, there being no package path.
+- [x] netweave **never requires either library**, and now asks nothing of them either: the adapter is
+      a shape rather than a dependency — which is also the only thing `CLAUDE.md` §8 leaves
+      available, there being no package path.
 - [x] ~~a runtime test that replicates a real change through the real library~~ — **not a test this
       repository can have, and saying so is better than a test that looks like coverage.** Charm and
       ReplicaService are in `_refsrc/`: read-only, gitignored, and forbidden to import from (§2).
@@ -650,6 +658,48 @@ API to write an example against.
       decode, which never took M2's block optimisation or M4's fused writer:
       `docs/SECURITY-REPORT-M4.md` measures it at 2.5x netweave's own encode and 4x a hand-rolled
       reader, with `Buffer.ensure` written for it and no caller in `src/`.
+
+### Phase 8 — the M4 report
+
+`docs/SECURITY-REPORT-M4.md` audits the tree at `0cb731d` and files 78 findings. Each fix is its own
+commit and the report is the tracker; what belongs *here* is the subset that changed a **decision**
+this document had already written down, because those are the ones this document has wrong until
+they are struck through.
+
+- [x] **The tick asked before it looked, and asked once per pair.** `Tick` ran a `switchTo`, a
+      `pcall`, a `Buffer.mark`, the whole differ walk and a `rollback` for every
+      (subject, recipient) pair, every tick, whether or not anything had moved. `bench/tick.luau` is
+      the probe the report's numbers needed and did not have: fifty players and five hundred
+      subjects, **nothing moving**, cost **36.26 ms a tick** — twice a frame at 60 FPS — and a tenth
+      of the world moving cost the same 36.51. The price was the asking, not the answering.
+- [x] **One comparison for the whole audience.** Every settled recipient holds *the same table* —
+      the snapshot `send` returned — so one structural comparison per subject answers for all of
+      them and a pointer comparison per recipient says who is settled. The per-subject copy is
+      seeded with that snapshot rather than nil, so a client joining a world at rest is handed the
+      table everyone else already holds instead of a second one equal to it; two would split the
+      audience into identity classes and cost every one of them an attempt for ever. **36.26 → 1.63
+      ms, 22x**, with `all 50x500` — every subject moving — 40.24 → 33.99, so the gate pays for
+      itself in the case it cannot help.
+- [x] The removal pass is skipped outright for a broadcast, where the recipients *are* the roster
+      and it is O(players²) per subject to conclude nothing, and asked baseline-first otherwise.
+      `narrow 50x500` 1.67 → 0.97 ms.
+- [x] **~~`changed` is optional.~~ `changed` is deleted**, and the choice was measured rather than
+      argued. Both ways out of "declared, documented, never read" were open, so the tick was built
+      both ways: comparing costs 1.63 ms an idle tick and trusting a perfect signal costs 1.40. That
+      is 0.23 ms, and only while *nothing at all* is moving — a whole-store signal reads dirty every
+      tick in any world where anything happens, which is the only kind of world whose tick cost
+      matters. Against it: a signal that misses one mutation is a subject that stops replicating
+      silently and permanently, and there is no probe for "the store told the truth", because when
+      it does not the freeze *is* the behaviour (`CLAUDE.md` §9).
+- [x] `tests/replication_runtime.luau` counts the attempts instead of timing them — §9's "count it
+      instead of weighing it" — and gains the audience kind it never had, `everyone`, because the
+      broadcast skip is a branch. Confirmed by four mutations: trusting the snapshot without
+      comparing (12 failures, the existing suite included), seeding the copy with nil (3, all of them
+      the ones written for it), removing the per-recipient skip (6, at exactly the pre-fix counts),
+      and skipping the removal pass for every audience (6).
+- [x] `bench/check.luau` said it compiled "every Luau file under `bench/`" and walked three
+      subdirectories, so the five files sitting directly in `bench/` — including `tick.luau` — were
+      reported as compiling by a check that had never opened them. 54 files became 59.
 
 ## 7. Acceptance criteria
 
