@@ -113,8 +113,13 @@ local function guard(record: Record): Ctx
 				return (live :: any)[key]
 			end,
 
-			__newindex = function()
-				error("a ctx is read-only", 2)
+			__newindex = function(_, key: any)
+				error(
+					`a ctx is read-only, so ctx.{tostring(key)} = ... is not a place to keep anything: `
+						.. `the record is reused for this player's next packet and the write would leak `
+						.. `into it. Keep per-request state in your own table, keyed by ctx.player.`,
+					2
+				)
 			end,
 
 			__metatable = "netweave.Ctx",

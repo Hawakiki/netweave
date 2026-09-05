@@ -67,6 +67,109 @@ G3 and G6 are what the declaration syntax has to carry.
 Both codegen libraries fail G4 and G5 today: a failed `assert` inside their receive loop aborts
 the whole batch, and neither has a length field to resynchronise on (`RESEARCH §3.8-R`).
 
+## 2.1 The whole surface, on one page
+
+Six classes, and the class name is the security documentation. What each one requires is what it
+cannot work without; what each one forbids is what would make its name a lie.
+
+| Class | Direction | Requires | Forbids | The handler receives |
+|---|---|---|---|---|
+| `nw.command` | C→S | `data`, `rate`, `authorize` | — | `Trusted<T>` |
+| `nw.intent` | C→S | `data`, `rate` | `authorize` — per-packet approval is the wrong model for 60 Hz input | constrained `T`, at most one per player per frame |
+| `nw.signal` | C→S | `data`, `rate` | `authorize` — if it needs approving it was a command | `Untrusted<T>` |
+| `nw.query` | C→S→C | `args`, `returns`, `rate`, `authorize`, `timeout` | a top-level optional `returns` | `Trusted<T>`, and the handler may yield |
+| `nw.state` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` — the server is the sender | `T` |
+| `nw.event` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` — same reason | `T` |
+
+Everything else on the surface:
+
+| | What it is | The one thing to know |
+|---|---|---|
+| `nw.namespace(name, channels)` | a group of channels, declared once and required by both sides | declare every one at startup; ids depend on all of them (`WIRE-FORMAT.md` §3) |
+| `nw.types` | the schema library: `t.u8`, `t.string(0, 32)`, `t.array`, `t.struct`, `t.enum`, `t.optional` | every type is bounded, which is where each channel's byte ceiling comes from |
+| `nw.policy(factory)` | two stages: the factory runs once, the check runs per request | a verdict is `nw.allow(value)` or `nw.deny(reason)`, and `ok == true` or it is a refusal |
+| `nw.all(...)` | composes policies, threading the allowed value onward | it stops at the first denial |
+| `nw.audience` | `everyone`, `owner`, `nearby(studs)`, `select(fn)` | only `everyone` gives a channel `broadcast` |
+| `nw.observe(fn)` | every rejection, with its stage | attaching one replaces the default console output; it does not make refusals stop |
+| `nw.configure(settings)` | severities per rule, and numeric limits | a severity governs output and never enforcement |
+| `nw.protocol()` / `nw.signature()` | what both peers must agree on, and the text it is hashed from | a mismatched peer is refused at stage `protocol` |
+| `nw.validate(schema, value)` | check a value you already hold | the escape hatch that produces `Trusted<T>` without a wire |
+| `nw.diagnostics()` | every refusal since the counters were reset, by channel and stage | frozen on read; a rule set to `"off"` still counts |
+
+### One worked example
+
+Declaring, sending, authorizing, refusing and observing, in sixty lines. This is not a sketch:
+`tests/example_runtime.luau` runs it in the suite, and `tools/messages.luau` asserts that the code
+below is the same text. A document quoting code it does not execute rots on the first rename.
+
+<!-- example: tests/example_runtime.luau -->
+```lua
+--[[ One file, required by both sides. Everything a reviewer needs to know about this channel's
+     security is on the line that declares it. ]]
+local t = nw.types
+
+local Equip = t.struct({ slot = t.u8(0, 9) })
+type Equip = { slot: number }
+
+local policy = {}
+
+policy.alive = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: Equip)
+		return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
+	end
+end)
+
+policy.ownsSlot = nw.policy(function(config)
+	local slots: number = config.slots or 3
+
+	return function(_ctx: nw.Ctx, request: Equip)
+		if request.slot > slots then
+			return nw.deny(`slot {request.slot} is past the {slots} this player owns`)
+		end
+		return nw.allow(request)
+	end
+end)
+
+local combat = nw.namespace("combat", {
+	equip = nw.command({
+		data = Equip,
+		rate = 5,
+		authorize = nw.all(policy.alive, policy.ownsSlot({ slots = 3 })),
+	}),
+
+	loadout = nw.event({
+		data = t.struct({ primary = t.u16 }),
+		audience = nw.audience.owner,
+	}),
+})
+
+--[[ The server. `chosen` is `Trusted<{ slot: number }>` — it decoded, it was inside the declared
+     rate, and the policy allowed it. Nothing else in the process can produce that type by
+     accident, which is what makes the annotation on an authoritative function worth writing. ]]
+--[[ Nothing is annotated: `chosen` is `Trusted<Equip>` and `ctx.player` is the sender, both from
+     the declaration (`DESIGN-API.md` §8 on why the player is `unknown`). ]]
+combat.server.equip:listen(function(ctx, chosen)
+	combat.server.loadout:publish(ctx.player, { primary = 100 + chosen.slot })
+end)
+
+combat.client.loadout:listen(function(loadout)
+	equipped[#equipped + 1] = loadout.primary
+end)
+
+--[[ Every refusal, whether or not anything is listening. Attaching this replaces the default
+     console output; detaching it does not make the refusals stop. ]]
+nw.observe(function(rejection)
+	refusals[#refusals + 1] = `{rejection.channel} at {rejection.stage}: {rejection.reason}`
+end)
+
+combat.client.equip:send({ slot = 1 })
+combat.client.equip:send({ slot = 7 })
+```
+
+What is *not* in it is as much the point. There is no middleware chain, no per-call options table,
+no place to pass a validator at the send site, and nothing that would let a second file change what
+`equip` accepts. The declaration is the whole security model, and it is nineteen lines.
+
 ## 3. Channel classes
 
 The taxonomy is by **security obligation**, not by transport. The class name is the security
@@ -483,6 +586,28 @@ them to ignore those is worse than telling them to turn the solver on.
 
 `ctx` reaches every policy and every handler, so it must not be allocated per packet — that
 would break the zero-hot-path-allocation criterion on day one (`RESEARCH §3.6-A4`, `§3.6-B4`).
+
+### What a handler sees, and the one field that is `unknown`
+
+A `:listen` handler's `ctx` is a table the view builds, so `ctx.now` is a `number`, `ctx.channel` a
+`string`, and `ctx.playr` is a typo the analyser catches. `player`, `character` and `humanoid` are
+`unknown`, because a `type function` body has only the `types` library and no way to reach `Player`,
+`Model` or `Humanoid`. They pass anywhere `unknown` is accepted — `publish(ctx.player, ...)` is the
+common case and works — and take a cast anywhere it is not:
+
+```lua
+local player = ctx.player :: Player
+```
+
+~~The whole context was `unknown`.~~ **Until M3 phase 7**, which is worse than it sounds: a handler
+could neither read through it nor annotate it, because `Ctx` is not a supertype of `unknown` and
+`function(ctx: nw.Ctx, shot)` was rejected outright. Nothing caught it, because every handler in the
+suite was written `function(_ctx, ...)` and none of them wanted the context. Writing the worked
+example is what found it — `ctx.player` is the first thing a real handler reaches for.
+
+A **policy** is a plain function typed `(ctx: Ctx, value: T) -> Verdict`, so `nw.Ctx` annotates
+normally there, and the example above does. The asymmetry is not a design; it is what a type
+function can and cannot name.
 
 **One `ctx` per player, fields refreshed in place, valid only for the synchronous duration of
 the handler.** Retaining it is a defect:

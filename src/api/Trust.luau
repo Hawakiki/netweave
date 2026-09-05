@@ -159,14 +159,20 @@ type _instantiateUntrusted = Untrusted<{ probe: boolean }>
 export type function TrustedPayload(schema)
 	local descriptor = types.copy(schema)
 
+	--[[ One sentence, two failures: something that is not a table, and a table that is not a
+	     netweave type. Both are the same mistake at the call site. ]]
+	local advice = "nw.validate takes a netweave type as its first argument and the value as its "
+		.. "second: nw.validate(t.struct({ screen = t.u8 }), value). A plain Luau table is not a "
+		.. "schema, so there is nothing to check the value against."
+
 	if not descriptor:is("table") then
-		error("nw.validate needs a netweave type as its schema")
+		error(advice)
 	end
 
 	local payload = descriptor:readproperty(types.singleton("__payload"))
 
 	if not payload then
-		error("nw.validate needs a netweave type as its schema")
+		error(advice)
 	end
 
 	if not payload:is("table") then
@@ -231,7 +237,12 @@ end
 ]=]
 function Trust.validate<S>(schema: S, value: any): (TrustedPayload<S>?, string?)
 	if type(schema) ~= "table" or type((schema :: any).kind) ~= "string" then
-		error("nw.validate needs a netweave type as its schema", 2)
+		error(
+			`nw.validate takes a netweave type as its first argument and the value as its second, `
+				.. `got {typeof(schema)}. Write it as nw.validate(t.struct(...), value); a policy is `
+				.. `not a schema and neither is a plain table.`,
+			2
+		)
 	end
 
 	local failure = codecFor(schema :: any).check(value)

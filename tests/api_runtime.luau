@@ -230,7 +230,7 @@ do
 
 	refuses("all with no policies", function()
 		(nw.all :: any)()
-	end, "at least one")
+	end, "was given none")
 
 	refuses("all with something that is not a policy", function()
 		(nw.all :: any)(double, function() end)
@@ -520,17 +520,21 @@ do
 
 	refuses("a handler that is not a function", function()
 		client.blast:listen(42)
-	end, "needs a function")
+	end, "takes the function that runs per packet")
 
-	--[[ M1 declares; M2 moves bytes. A `send` that silently did nothing would make this milestone's
-	     tests pass and every integration fail in a way that looks like packet loss. ]]
+	--[[ A `send` that silently did nothing would make this file pass and every integration fail in a
+	     way that looks like packet loss.
+
+	     ~~The message named the milestone that would land the transport.~~ It named M1 and M2 until
+	     M3 phase 7, which was true when it was written and a lie once the transport shipped; what is
+	     left is the case that can still reach it — netweave required where `game` does not exist. ]]
 	refuses("sending with no transport installed", function()
 		client.ping:send(1)
-	end, "M2")
+	end, "needs a transport")
 
 	refuses("broadcasting with no transport installed", function()
 		server.blast:broadcast(1)
-	end, "M2")
+	end, "Transport.install")
 
 	local sent: { any } = {}
 
