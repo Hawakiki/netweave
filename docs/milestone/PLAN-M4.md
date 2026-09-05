@@ -711,6 +711,34 @@ they are struck through.
       walk stops there and visits only what this patch built, and `table.clone` hands back an
       unfrozen copy so the merger keeps working. Confirmed by removing the freeze (7 failures, one of
       them the report's measurement to the digit) and by making it shallow (4).
+- [x] **The decode side never took a block path, and `bench/decode.luau` is the mirror phase 7 never
+      wrote.** M2's block optimisation and phase 7's fused writer are both encode-side; decode is
+      what a server pays per client per packet for a session, and nobody had taken it apart. Five
+      rungs over the same 600 bytes: the real reader **32,731 ns a packet** against 8,100 for the
+      same read written out with the range guard kept — **4.0x**, which is the report's number
+      reproduced by a committed script rather than quoted from one.
+- [x] `Serdes.fusedStructReader`, `fusedStructWriter`'s mirror: `Buffer.span` bounds the whole struct
+      once against a size the layout already knew, and the fields are read with `buffer.readu8`
+      **named**. That removes all three per-value costs at once — the closure call, the
+      `READ_NUMBER` lookup behind it, and the per-primitive bounds check asking what the span already
+      answered. **32,731 → 21,475 ns, 1.5x**, and 4.0x the checked ceiling became 2.6x.
+- [x] **`RESEARCH §3.11-GG` reproduces on the read side, harder.** `dispatched` — the same unroll
+      with the primitive fetched from a table instead of named — costs **2.7x** against the write
+      side's 1.6x. The branch chain is not a matter of taste in either direction.
+- [x] `Buffer.ensure` was the shape written for exactly this in M2 and **had no caller** for two
+      milestones. It is `Buffer.span` now, returning the buffer and the offset, because reading with
+      a named primitive needs both and a boolean is not enough to be used.
+- [x] **Fusing the array as well was measured and refused.** Replacing the per-struct `span` with an
+      unchecked cursor step — the ceiling a fused array could reach — moved 21,960 to 20,856, about
+      5%. That is not worth a second 270-line unroll, and the remaining gap to the ceiling is the
+      per-element closure call and the branch chain, neither of which an array-level span removes.
+- [x] `tests/serdes_runtime.luau` gains the seams a round trip cannot reach, because every `trip`
+      already runs both halves: the two readers over the same bytes, a value the *wire* put past a
+      narrowed maximum, the same from the eighth slot, a run cut short with the packet behind it
+      still arriving (G5), and `t.f32(-pi, pi)` accepting the bound it just wrote. Confirmed by three
+      mutations — the declared bound in place of the one f32 holds (2 failures), the eighth slot
+      comparing the first field's bounds (1), and `span` not bounding the run (the truncation case
+      *and* 72 of 4,200 fuzzed payloads raising, which is G4).
 
 ## 7. Acceptance criteria
 
