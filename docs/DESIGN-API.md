@@ -61,6 +61,14 @@ actual exploits live.
 | G5 | Length-prefixed framing: one malformed packet cannot stop the rest of its batch | not expressible |
 | G6 | Direction is a class, not a string field | type error (see §7) |
 
+**G4 is enforced rather than inspected, since M3 phase 9.** It was stated unconditionally and held
+for the byte stream and not for the two paths an external review found: a non-Instance in the
+instance sidecar, which is wire data that does not travel in the buffer, and a pooled pending list
+that two dispatch loops both believed they owned. Both are closed — but fixing the paths somebody
+found does nothing for the next one, so the read phase and the dispatch phase now each run under a
+guard that restores the shared state, returns the pending list and reports the raise. The claim
+costs two `pcall`s per batch and stops resting on an argument.
+
 G4 and G5 are transport properties, settled by the wire format in `PLAN-M1` phase 2. G1 through
 G3 and G6 are what the declaration syntax has to carry.
 
@@ -93,7 +101,7 @@ Everything else on the surface:
 | `nw.observe(fn)` | every rejection, with its stage | attaching one replaces the default console output; it does not make refusals stop |
 | `nw.configure(settings)` | severities per rule, and numeric limits | a severity governs output and never enforcement |
 | `nw.protocol()` / `nw.signature()` | what both peers must agree on, and the text it is hashed from | a mismatched peer is refused at stage `protocol` |
-| `nw.validate(schema, value)` | check a value you already hold | the escape hatch that produces `Trusted<T>` without a wire |
+| `nw.validate(schema, value)` | check a value you already hold | the escape hatch that produces `Trusted<T>` without a wire; it decides by running the encoder, so it is exactly as strict as the encoder is |
 | `nw.diagnostics()` | every refusal since the counters were reset, by channel and stage | frozen on read; a rule set to `"off"` still counts |
 
 ### One worked example
@@ -184,6 +192,14 @@ documentation — a reader sees `nw.intent` and knows the server does not approv
 | `state` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` | `T` |
 | `event` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` | `T` |
 
+**Direction is checked on arrival, not only in the views.** ~~The reason `state` and `event` forbid
+`rate` is that the server is the sender, so there is nobody to budget.~~ That was true of the views
+and not of the wire: a client could put any id in a packet it writes, and until M3 phase 9 the
+server resolved it, found no rate to charge, decoded it and queued it. Six hundred such packets
+measured `budget=0`. A packet arriving on a channel this peer is the sender of is refused before
+decode, at stage `direction`, which G6 needed to be a guarantee about peers rather than about the
+game's own code.
+
 **Every channel carries a byte ceiling, and it derived it from the schema.** Every netweave type is
 bounded — a number by its encoding, a string or array by its range, an unbounded array by the 65535
 its prefix can express — so the layout can add them up. `t.struct({ origin = t.vector3, seq = t.u16 })`
@@ -191,6 +207,14 @@ can never be more than fourteen bytes, and a packet claiming more is refused bef
 decoded, at stage `budget`, with the game having declared nothing. `RESEARCH §3.7-F` records that no
 surveyed library checks a payload size at all; the reason is that they would have to ask the author
 for the number.
+
+~~and a packet claiming more is provably a lie~~ — **it was provably a lie only where the schema had
+no flags below its top level.** `Ir.ceiling` counted the root's bitfield and not the one a dynamic
+array or map element opens per element, so `t.array(t.boolean, 0, 10)` derived one byte where ten
+elements cost eleven, and an honest three-element packet was refused at stage `budget` against its
+own sender. Corrected in M3 phase 9, and `tests/ir_runtime.luau` now asserts the property the number
+claims — encode at the maximum, assert it fits — rather than a table of examples that all happened
+to work.
 
 An inbound class may declare **`maxBytes`** to *tighten* that ceiling, and only to tighten it. Two
 declarations are refused rather than accepted, because both would let an author believe they had set

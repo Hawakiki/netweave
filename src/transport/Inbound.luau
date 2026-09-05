@@ -80,6 +80,11 @@ export type Inbound = {
 	forget: (sender: any) -> (),
 }
 
+--[[ `pcall` of a function whose return pack is empty is typed as returning `boolean` alone, so the
+     error cannot be destructured out of it. The alias widens the pack without changing what runs,
+     and is hoisted so neither guard builds one per batch. ]]
+local read: (...any) -> ...any = Batch.read
+
 --[[ `xpcall` with a shared handler allocates no closure per call. A traceback is worth the string
      because a handler error is a game bug and the line is the whole of the diagnosis. ]]
 local function traceback(message: any): string
@@ -390,7 +395,7 @@ function Inbound.new(config: Config): Inbound
 		return list
 	end
 
-	local function dispatch(list: Pending)
+	local function walk(list: Pending)
 		local channels = list.channels
 		local senders = list.senders
 		local values = list.values
@@ -435,9 +440,34 @@ function Inbound.new(config: Config): Inbound
 			only corrupts the outer one when it is at least as long.
 
 			A raise inside the loop leaks one list rather than corrupting one, which is the trade the
-			free list buys over the counter it replaced.
+			free list buys over the counter it replaced — and `dispatch` below takes even that back.
 		]]
+	end
+
+	--[[
+		Guarantee G4, structurally.
+
+		`walk` calls game code through `call`, which `xpcall`s the policy and the handler, so the
+		raises anyone thought of are already values. The two that broke G4 were the ones nobody
+		thought of — a table in the sidecar, and a pooled list two loops both believed they owned —
+		and both are fixed above. What is not fixed by fixing them is that the *next* one inherits
+		the same shape: a raise here would leave the list unreturned and the rest of the batch
+		undelivered with nothing said.
+
+		So the claim stops resting on inspection. One `pcall` per dispatch, the list returned either
+		way, and a raise that reaches here is reported like any other failure rather than escaping
+		into the remote callback that called it. `PLAN-M3` phase 9.
+	]]
+	local attempt: (...any) -> ...any = walk
+
+	local function dispatch(list: Pending)
+		local ok, failure = pcall(attempt, list)
+
 		table.insert(free, list)
+
+		if not ok then
+			report(nil, nil, "handler", `dispatch raised: {tostring(failure)}`, 0)
+		end
 	end
 
 	--[[
@@ -761,11 +791,18 @@ function Inbound.new(config: Config): Inbound
 			full = false
 			pendingCeiling = Settings.limitOf("pendingPerBatch")
 
-			Batch.read(packed, instances, sink)
+			--[[ The same reason as `dispatch`: the read phase calls no game code and should not be
+			     able to raise, and "should not" is what the sidecar was. Restoring the three
+			     upvalues on both paths is what keeps a raise from costing every batch after it. ]]
+			local ok, failure = pcall(read, packed, instances, sink)
 
 			sender = outerSender
 			filling = outerFilling
 			full = outerFull
+
+			if not ok then
+				report(nil, from, "parse", `the read phase raised: {tostring(failure)}`, buffer.len(packed))
+			end
 
 			dispatch(list)
 		end,
