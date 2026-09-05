@@ -401,8 +401,18 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 				return
 			end
 
-			--[[ Only the kinds this build knows are read. Anything else is stepped over, which is
-			     what the length is for. ]]
+			--[[
+				Only the kinds this build knows are read. Anything else is stepped over — that is what
+				the length is for — and **said out loud**, which is a separate decision.
+
+				The forward-compatibility argument says stay quiet: a v1 reader meeting a v2 control
+				message should carry on, not complain. The argument that wins is this milestone's:
+				nothing on the receive path is silent, because a peer sending bytes this build cannot
+				act on is exactly the skew a future deploy will need to diagnose, and the repeat
+				suppression already caps what it costs at three lines per stage. Found by
+				`tests/fuzz_runtime.luau`, whose "nothing vanishes" invariant this was the only
+				exception to.
+			]]
 			if kind == HELLO and length >= 4 then
 				Buffer.setLimit(bodyEnd)
 
@@ -411,6 +421,8 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 				if not Buffer.rejected() then
 					sink.hello(hash)
 				end
+			else
+				sink.refuse(nil, "parse", `control kind {kind} is not one this build reads`, length)
 			end
 
 			--[[ The same tail every other packet takes, written out rather than jumped over. A

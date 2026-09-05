@@ -543,8 +543,10 @@ do
 
 	Batch.read(packed, nil, sinkOf(record))
 
-	equals("the unknown kind produced nothing", #record, 1)
-	equals("and the packet behind it still arrived", record[1].value, 6)
+	equals("the unknown kind was reported and stepped over", #record, 2)
+	equals("reported", record[1].kind, "refuse")
+	check("naming the kind", string.find(tostring(record[1].value), "control kind 99", 1, true) ~= nil)
+	equals("and the packet behind it still arrived", record[2].value, 6)
 end
 
 do

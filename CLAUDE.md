@@ -219,6 +219,8 @@ lune run tests/config_runtime
 lune run tests/observer_runtime
 lune run tests/query_runtime
 lune run tests/protocol_runtime
+lune run tests/hostile_runtime
+lune run tests/fuzz_runtime
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike
@@ -267,6 +269,13 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
   `_ok` half.
 - `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
+
+**A security-relevant suite counts its own shape.** `tests/harness.luau` tags each section
+failure-path or success-path and refuses to pass when a file declares a floor and falls under it.
+The rule is that a layer with one way to succeed and many ways to fail needs a suite whose ratio
+says so (`PLAN-M3` D-10); the floors live in the files, in the same spirit as `-- netweave:expect N`,
+so a number someone lowered is a number in the diff. Current: `hostile_runtime` 99%,
+`budget_runtime` 100%, `fuzz_runtime` 92%, `transport_runtime` 59%.
 
 A rejection file that stops erroring means a guarantee has silently stopped being enforced. That
 is worse than a build break, because nothing announces it — hence the exact count.
