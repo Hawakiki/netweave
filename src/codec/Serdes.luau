@@ -438,11 +438,15 @@ end
 	1.31x**, both measured on the VM they are quoted for.
 
 	~~It predicts the `ArrayHeavy` framerate gap closing from 1.55x to 1.28x.~~ **It did not.** The
-	Studio matrix that followed measured 85 FPS against Blink's 133, exactly where it was before
-	(`bench/RESULTS.md`, "the codec got faster and the framerate did not move"). The optimisation is
-	real and worth keeping — 1.8-2.3 ms of a frame at the benchmark's load — and the frame it lives
-	in is bound by something else that has not been measured yet. Do not read this comment as a
-	framerate claim; it is a claim about this function.
+	Studio matrix that followed measured 85 FPS against Blink's 133, exactly where it was before.
+
+	The frame probe added afterwards says the frame *is* dominated by this path — 6.27 ms of an
+	11.58 ms frame is the send loop, and the whole gap against Blink lives there — and that the
+	saving here is 1.96 ms of it. Those two do not add up to 0.3 ms of frame, and the probe that
+	settles it has not been run on the pre-phase-7 tree yet (`bench/RESULTS.md`, M4 phase 7).
+
+	So: this comment is a claim about **this function**, measured twice, on two VMs. It is not a
+	framerate claim, and the file that is allowed to make one is `bench/RESULTS.md`.
 
 	The unroll is eight blocks in one closure with an early return at each boundary, rather than
 	eight builders selected by arity. It is the same code either way; this way it is one thing to

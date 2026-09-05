@@ -627,16 +627,29 @@ API to write an example against.
       11,042 named against 18,186 fetched, 1.65x against lune's 1.60x — so the *design* decision
       stands and only the frame arithmetic falls.
 - [x] **So the profile's frame model is withdrawn.** It predicted a 4.38 ms gap and Studio had
-      measured 4.21 ms; that agreement was read as corroboration and **was a coincidence**. The
-      probe's own caution said what to do with a disagreement, and the disagreement is what arrived.
-      `bench/profile.luau` now reports both numbers and predicts nothing.
-- [ ] **Where the frame actually goes is open, with no measurement behind it.** Leading candidate,
-      *inferred*: Studio Play runs client and server in one process; the server decodes 200
-      `ArrayHeavy` packets a frame in the same budget, and the decode path never took M2's block
-      optimisation. `docs/SECURITY-REPORT-M4.md` measures decode at 2.5x the encode and 4x a
-      hand-rolled reader, and `Buffer.ensure` — written for exactly that — has no caller in `src/`.
-      `raw` finishing last at 30 FPS while serialising nothing points the same way. **Measure before
-      touching anything**: that is the whole lesson of this phase, twice over.
+      measured 4.21 ms; that agreement was read as corroboration and could not be checked by either
+      instrument in the repository. `bench/profile.luau` now reports both VMs and predicts nothing.
+- [x] **The instrument that was missing now exists, and it says the frame *is* the send loop.**
+      `Config.FRAME_PROBE` puts a clock around the 200 sends in the same place, the same load and
+      the same server: netweave 11.58 ms a frame of which **6.27 ms (54%) is the send loop**, against
+      Blink's 7.32 and 1.03. The frame gap is 4.26 ms and the send-loop gap is 5.24 ms — the whole
+      of it, and more. ~~"The frame is not encode-bound"~~ was written an hour earlier from two
+      instruments that could not see a frame, and is struck through in `bench/RESULTS.md`.
+- [x] **And the codec really is 1.34x faster on that VM**, measured with the real code by walking the
+      arity where the fused writer hands back to the loop: 48.6 ns a value fused against 64.9 on the
+      loop, so a six-field struct went 38.9 → 29.1 us a packet. The hand-built reconstruction that
+      first said 38,434 was faithful to 1.3%.
+- [ ] **One inconsistency is left, and reasoning will not close it.** The codec is 1.96 ms a frame
+      cheaper and the frame is 0.3 ms shorter, with the control group at 2-5%. The probe that settles
+      it is the one that now exists, run on `ab5541e` — the tree phase 7 was applied to. If the send
+      loop there is ~8.2 ms, something outside the codec grew by what phase 7 removed; if it is
+      ~6.5 ms, the arity ladder is measuring something the bench's channel does not do.
+- [x] **An independent target came out of the same run.** ByteNet spends 5.43 ms in its send loop
+      against netweave's 6.27 and **3.12 ms outside it against netweave's 5.30**, and runs 30 FPS
+      faster. What is outside the loop is the flush and — one process, both peers — the server's
+      decode, which never took M2's block optimisation or M4's fused writer:
+      `docs/SECURITY-REPORT-M4.md` measures it at 2.5x netweave's own encode and 4x a hand-rolled
+      reader, with `Buffer.ensure` written for it and no caller in `src/`.
 
 ## 7. Acceptance criteria
 
