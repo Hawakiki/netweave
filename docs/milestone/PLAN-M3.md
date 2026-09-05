@@ -550,9 +550,20 @@ evidence the claim is not merely unexamined:
 
 ### Phase 8 — repository policy
 
-- [ ] `CLAUDE.md` §9: the verification rules. Failure paths outnumber success paths; a regression
-      test is confirmed to fail against the pre-fix code; no security claim without a probe that
-      demonstrates the defect it prevents
+- [x] `CLAUDE.md` §9: the verification rules. The three the plan named, and six more that M3 paid
+      for rather than reasoned its way to — each written next to the incident that produced it,
+      because a rule with no incident behind it reads as taste and gets dropped by the next person.
+- [x] The three from the plan, with what they cost: **failure paths outnumber success paths** and
+      the count is in the harness (D-10); **a regression test is confirmed to fail against the
+      pre-fix code**, which caught two tests in this milestone that were testing nothing; **no
+      security claim without a probe**, whose corollary is that an unprobeable claim gets softened —
+      D-5 changed from a decode-work counter to a byte ceiling because the measurement contradicted
+      it.
+- [x] The six the milestone found: a probe that finds nothing is written down; a rejection count
+      guarding a feature with no positive test guards nothing (D-14); a parameter every test ignores
+      is a coverage gap rather than a convention; a hand-kept list is tested against what it lists;
+      nothing on the receive path is silent; errors name the fix, and that is checked rather than
+      reviewed.
 
 ## 7. Acceptance criteria
 
@@ -562,10 +573,17 @@ evidence the claim is not merely unexamined:
 2. A policy returning `nil`, `false`, `{}` or `{ ok = "yes" }` refuses. None of the four throws.
 3. A channel declared `rate = 20` admits at most 20 in **any** sliding 1.0 s window, not merely in
    an aligned one. Against today's code the measured figure is 40.
-4. A 2-byte packet claiming 65535 elements costs within 2x of an honest 3-byte packet. Today it
-   costs 690x.
-5. Any nesting of bounded arrays reaching the per-tick decode ceiling refuses at stage `"budget"`
-   rather than completing.
+4. A packet claiming 65535 elements costs within 2x of an honest one. ~~Today it costs 690x.~~
+   **Met: 1.27x** — 0.000492 ms against 0.000386, over 20,000 rounds each, and the hostile one is
+   still refused with `array claims 65535 elements, needing 65535 bytes, and 1 remain`. (Three bytes
+   and four rather than two and three: the varint for 65535 takes three on its own.)
+5. ~~Any nesting of bounded arrays reaching the per-tick decode ceiling refuses at stage
+   `"budget"`.~~ **The ceiling changed, in phase 2, because the measurement contradicted the premise
+   — see D-5.** What holds instead: any nesting of bounded arrays past the channel's *byte* ceiling
+   refuses at stage `"budget"` before a byte of the payload is decoded, and the ceiling is derived
+   from the schema whether or not the game declared one. Pinned in `tests/transport_runtime.luau`
+   with `t.array(t.array(t.u8, 0, 1000), 0, 1000)`, which derives 1,002,002 and is bounded by a
+   declared 64.
 6. `ArrayHeavy` decode allocation per packet is reported against the M2 baseline of 9309.2 B in
    `bench/RESULTS.md`, whether it moved or not.
 7. A game that attaches no observer sees a warning on the first refusal of each channel and stage,
@@ -573,8 +591,14 @@ evidence the claim is not merely unexamined:
 8. `nw.diagnostics()` returns a snapshot that cannot be mutated into the live counters.
 9. A `query` whose peer never answers resolves as a failure within its declared timeout. No thread
    is left suspended, and the pending entry is gone. Call ids pass 256 without collision.
-10. Changing one field from `t.u8` to `t.u16` changes the protocol hash. A client on the old hash
-    is refused once at stage `"protocol"`, not once per packet.
+10. Changing one field from `t.u8` to `t.u16` changes the protocol hash. ~~A client on the old hash
+    is refused once at stage `"protocol"`, not once per packet.~~ **Half of that is wrong and the
+    correction matters.** The *check* happens once, at the hello; the *refusal* is per packet, and
+    has to be. The hello is the first packet of the first batch, so the packets behind it in that
+    same batch are the first ones that must not land — and they would not fail to decode, they would
+    decode into whatever channel this peer has at that id and reach a handler as a well-formed
+    payload. Pinned in `tests/protocol_runtime.luau`: three packets behind a mismatched hello, three
+    refusals at `"protocol"`, nothing delivered.
 11. The fuzz suite runs at least 10,000 mutated batches with **zero** raises off the receive path
     and zero unreported losses.
 12. Failure-path assertions outnumber success-path assertions in `transport_runtime`,
