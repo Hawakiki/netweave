@@ -83,7 +83,11 @@ local nw = {}
 	@prop milestone string
 	@within netweave
 
-	Which milestone this build is. `"M3"`.
+	Which milestone this build is. `"M4"`.
+
+	It moves when the **plan** for the next milestone appears, not when that milestone's code lands,
+	because the question this answers is "what was the tree doing when it produced that number" and
+	a tree with `PLAN-M4.md` in it is doing M4. `master` still says M3, because that is where M3 is.
 
 	netweave has no release versions yet, so this is the coarsest true thing it can say about
 	itself, and it exists because something else needed it to be true: the benchmark writes the
@@ -97,7 +101,7 @@ local nw = {}
 	`docs/WIRE-FORMAT.md` and `nw.protocol()`.
 	:::
 ]=]
-nw.milestone = "M3"
+nw.milestone = "M4"
 
 --[=[
 	@prop types Types
