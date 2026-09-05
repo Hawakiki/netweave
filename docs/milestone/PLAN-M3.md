@@ -989,3 +989,71 @@ byte exists precisely for it — but it is a milestone boundary decision, record
 raises the ratio and tests nothing. Mitigation: the ratio is a floor, not the goal, and the
 adversarial suite is reviewed for whether each case corresponds to a byte sequence a client can
 actually produce.
+
+## 9. Result
+
+M3 is done. What is true now that was not true when it started:
+
+### The receive path
+
+A client cannot make netweave throw. That was the goal sentence, and for most of this milestone it
+was a claim about two paths that had been fixed rather than a property of the code. It is a
+property now: the read phase and the dispatch phase each run under a guard that restores the shared
+state, returns the pending list and reports the raise, so anything raising where nothing should
+costs one packet and one report instead of the batch. `tests/fuzz_runtime.luau` runs 10,000 mutated
+batches through it and `tests/hostile_runtime.luau` raises inside each phase on purpose and then
+sends an honest batch behind it.
+
+Everything a peer can spend on the way in is bounded, and each bound is refused **before decode**:
+
+| What a peer controls | What bounds it |
+|---|---|
+| packets per second, per player per channel | `rate` and `burst`, a token bucket with a floor of one |
+| bytes in one payload | `maxBytes`, or a ceiling derived from the schema when the game declares none |
+| decoded values held live in one batch | `pendingPerBatch` |
+| packets held for a channel nobody listens to | `queueCapacity`, dropping the oldest |
+| calls in flight | `callsInFlight`, and every call has a declared `timeout` |
+| packets on a channel it does not send on | the `direction` stage — G6, on the wire and not only in the views |
+| control packets on id 0 | one verdict per peer; a peer already known to be wrong is not re-judged |
+
+And nothing on that path is silent. Every refusal reports whether or not the game attached an
+observer, the console is capped at `repeatsPerDiagnostic` per channel and stage at every severity,
+and `nw.diagnostics()` keeps counting after the console has stopped talking.
+
+### The declaration surface
+
+`query` exists, with the timeout `RESEARCH §3.7-G` says Blink and Zap do not have: five reply
+statuses, one wire id disambiguated by endpoint, and eight ways for a call to fail — every one of
+which ends with the caller's thread resumed rather than parked. `nw.configure` sets severities and
+limits globally. `nw.protocol()` hashes the lowered IR, so a field changing from `t.u8` to `t.u16`
+moves the hash where the old name-only hash did not, and a peer on the wrong build is told once at
+join rather than being refused silently for the session. Every `error(` reachable from `src/api/`
+names the fix rather than the rule, and `tools/messages.luau` checks that rather than trusting it.
+
+### The suite, which is the part that mattered most
+
+`tests/harness.luau` counts failure-path against success-path sections and refuses to pass a file
+under the floor it declares: `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime` 92%,
+`transport_runtime` 66%. Fifteen runtime suites, three rejection files at their declared counts, 44
+files analyzing clean.
+
+That was the bar in the Goal, and an external review is what showed the bar was not enough. It
+returned 26 findings against a green suite — three of them breaking a guarantee this milestone had
+just written — and **none of them was caught by anything M3 built**. All 26 are closed: 16 by a
+change to `src/`, 10 by a correction to a document that overstated what the code did.
+`docs/SECURITY-REPORT.md` records them and where each was answered; phase 9 above records the
+working, finding by finding, with the numbers on both sides of each fix.
+
+The three most expensive lessons are in `CLAUDE.md` §9 rather than only here:
+
+- **A measurement is not a number until it survives re-running.** The benchmark reported a 67%
+  encode regression that did not exist. What proved it was the control group — how far the code
+  that had not changed moved in the same run — and reverting the named suspect would have "fixed"
+  a defect that was never there.
+- **Count it instead of weighing it.** "Under a flood the rejection path allocates nothing" is a
+  promise `Observer` and `Budget` make and `Inbound` was breaking in four places. Counting distinct
+  reason strings answers it in one run with no dependence on the collector: 1,994 before, 3 after.
+- **The half of the suite that cannot run under lune is the half that goes red quietly.** Four
+  Studio suites were broken for several commits while fourteen lune runs stayed green, and reading
+  the Studio *console* — not its pass line — is what found `error` severity bypassing the repeat
+  suppression on a stage whose rate a hostile peer chooses.

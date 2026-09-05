@@ -102,7 +102,31 @@ for _, schema in SCHEMAS do
 end
 push("")
 
+--[[
+	A median with its spread, or the median alone when the run predates the spread being recorded.
+
+	Printed together rather than in separate columns because they are one fact: M3 phase 9 found a
+	cell surviving four windows out of twenty-five whose low and high were a factor apart, quoted as
+	a single number in a milestone plan and read as a regression. A table that shows only the median
+	invites exactly that, so the table shows the range.
+]]
+local function spread(median: number?, low: number?, high: number?): string
+	if median == nil then
+		return "—"
+	end
+
+	if low == nil or high == nil then
+		return round(median, 1)
+	end
+
+	return `{round(median, 1)} <sub>[{round(low, 1)} .. {round(high, 1)}]</sub>`
+end
+
 push("## Allocation per packet")
+push("")
+push("`n` is how many sample windows survived the collector, and the bracketed range is the lowest")
+push("and highest of those windows. **A median whose range is a factor wide is not a number** — see")
+push('`bench/README.md`, "Reading the allocation numbers".')
 push("")
 push("| Cell | Encode B/call | n | Decode B/packet | n |")
 push("|---|---|---|---|---|")
@@ -111,8 +135,15 @@ for _, schema in SCHEMAS do
 		local data = cell(mode, schema)
 		if data then
 			push(
-				`| {mode} {schema} | {round(data.encodeBytesPerPacket, 1)} | {data.encodeAllocSamples} `
-					.. `| {round(data.up.decodeBytesPerPacket, 1)} | {data.up.decodeAllocSamples} |`
+				`| {mode} {schema} `
+					.. `| {spread(data.encodeBytesPerPacket, data.encodeBytesLow, data.encodeBytesHigh)} `
+					.. `| {data.encodeAllocSamples} `
+					.. `| {spread(
+						data.up.decodeBytesPerPacket,
+						data.up.decodeBytesLow,
+						data.up.decodeBytesHigh
+					)} `
+					.. `| {data.up.decodeAllocSamples} |`
 			)
 		end
 	end

@@ -312,10 +312,52 @@ elseif lines > 60 then
 	fail(`the worked example is {lines} lines, over the 60 the plan asks for`)
 end
 
+--[[
+	`nw.milestone` against the plan directory.
+
+	It is a typed string wherever it lives, and a typed string drifts — the benchmark's copy said
+	`M2` for the whole of M3 and wrote it into every run document (M3 phase 9). Moving it to one
+	place stops the two from disagreeing; this stops the one from going stale, at the moment it
+	matters, which is when the next milestone's plan appears and this one still claims the last.
+
+	`CLAUDE.md` §9: a hand-kept value is tested against what it names.
+]]
+local milestone = string.match(fs.readFile("src/netweave.luau"), 'nw%.milestone = "([^"]+)"')
+
+if not milestone then
+	fail("src/netweave.luau does not declare nw.milestone")
+elseif not fs.isFile(`docs/milestone/PLAN-{milestone}.md`) then
+	fail(`nw.milestone is "{milestone}" and docs/milestone/PLAN-{milestone}.md does not exist`)
+else
+	local plans = {}
+
+	for _, entry in fs.readDir("docs/milestone") do
+		local named = string.match(entry, "^PLAN%-M(%d+)%.md$")
+
+		if named then
+			table.insert(plans, tonumber(named))
+		end
+	end
+
+	table.sort(plans)
+
+	--[[ The newest plan, because a milestone that has started is a milestone this build is in.
+	     Sub-milestone files (`PLAN-M1a.md`) are deliberately not counted: they gate another rather
+	     than being one. ]]
+	local newest = `M{plans[#plans]}`
+
+	if milestone ~= newest then
+		fail(`nw.milestone is "{milestone}" and the newest plan is {newest}`)
+	end
+end
+
 if failures > 0 then
 	error(`{failures} message checks failed`)
 end
 
-print(`OK      messages — {checked} error calls in src/api, worked example {lines} lines`)
+print(
+	`OK      messages — {checked} error calls in src/api, worked example {lines} lines, `
+		.. `milestone {milestone}`
+)
 
 return true

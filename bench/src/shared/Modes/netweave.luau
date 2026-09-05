@@ -70,7 +70,23 @@ return function(canonical): Adapter
 		rule off beside the declaration it is about is the intended shape, and is why the rule is a
 		lint rather than a refusal.
 	]]
-	nw.configure({ rules = { rateUnbounded = "off" } })
+	--[[
+		And the batch ceiling, for the same kind of reason and with the same shape.
+
+		`pendingPerBatch` bounds how many decoded payloads one batch may hold live at once (D-6).
+		The harness pushes two hundred packets per step into one batch on purpose — that is the
+		load it exists to apply — so the default ceiling refuses the tail of every warm-up batch and
+		the console fills with `budget` reports before the measured window opens. Raising it here
+		measures the codec rather than the limit, which is what this file is for.
+
+		Written beside `rateUnbounded` rather than in a config file, because both are the same
+		admission: the harness is not a game, and each exception has to say why in the place a
+		reader will be standing when they ask.
+	]]
+	nw.configure({
+		rules = { rateUnbounded = "off" },
+		limits = { pendingPerBatch = 4096 },
+	})
 
 	-- -----------------------------------------------------------------------------------------
 	-- Schemas
@@ -211,7 +227,9 @@ return function(canonical): Adapter
 
 	return {
 		name = "netweave",
-		version = `M2 (protocol {protocol.hash})`,
+		--[[ Read from the library rather than typed, so a run document cannot misattribute its own
+		     subject. It said `M2` through the whole of M3 (M3 phase 9). ]]
+		version = `{nw.milestone} (protocol {protocol.hash})`,
 		payloads = payloads,
 
 		bindFire = function(schema, direction, player)
