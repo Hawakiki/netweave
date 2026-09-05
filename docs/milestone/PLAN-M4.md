@@ -427,6 +427,23 @@ API to write an example against.
       optional: **six bytes either way** — the patch's flag bits fit in the byte the schema's own
       flags were already using. So there is no snapshot/patch discriminator on the wire, no second
       codec, and a join, a resync and an audience entry are the same code path rather than three.
+- [x] **And a removal is the same packet again**, which the one-shape finding did not survive
+      contact with on its own. D-4 says a client leaving an audience is *told to forget*, and there
+      was nothing on the wire that could say it — a subject would have gone stale on that client
+      forever. Rather than a second shape with a discriminator in front of both, `Ir.patch` gives
+      the patch root **one bit**: set, and the bits below say what moved; clear, and there is no
+      body because the subject is gone.
+
+      Usually free — a patch's flags round up to whole bytes, so twelve fields go from twelve bits
+      to thirteen and stay at two. A removal is the flag bytes and the subject that framed them.
+- [x] **A defect the removal bit exposed, which is the reason to write the test before believing
+      the design.** A subject arriving whose fields are *all* absent optionals decoded to `nil` —
+      the struct merger returned its `nil` baseline unchanged because nothing moved — making it
+      indistinguishable from a removal, which is the one thing that bit exists to separate. The
+      merger now returns an empty table against no baseline. `t.struct({ a = t.optional(t.u8),
+      b = t.optional(t.u8) })` with neither set is the case, and it is in `delta_runtime`.
+- [x] Both test rigs moved to the single shape, because a rig that sends two shapes while the
+      transport sends one is a difference that hides bugs rather than finding them.
 - [x] `tests/api_reject.luau` 20-23 and the positive half in `tests/api_ok.luau`, because §9 says a
       feature whose only test is a rejection file has no test. The fourth rejection is the one worth
       naming: **`world.server.inventory:publish(...)` does not compile**, which is the class's

@@ -928,9 +928,9 @@ local function patchNode(node: Node, root: boolean): Node
 		template = node.template,
 	}
 
-	--[[ The root needs no bit of its own: a patch that changes nothing is a patch nobody sends.
-	     A nested struct gets one, so "this sub-struct is untouched" costs a bit rather than a
-	     walk — and when it is touched, the bits inside say which of its fields moved. ]]
+	--[[ A nested struct gets a bit, so "this sub-struct is untouched" costs a bit rather than a
+	     walk — and when it is touched, the bits inside say which of its fields moved. The root's
+	     own bit is added by `Ir.patch`, because it means something different from all of these. ]]
 	return if root then patched else optionalOf(patched)
 end
 
@@ -969,7 +969,21 @@ end
 	:::
 ]=]
 function Ir.patch(layout: Layout): Layout
-	local root = patchNode(layout.root, true)
+	--[[
+		The root's bit is **is this subject still there**, and it is the reason a patch needs no
+		second packet shape beside it.
+
+		A replicated subject has three states for a given client: unchanged, changed, and gone.
+		Unchanged is no packet at all. The other two are one packet whose root bit separates them —
+		set, and the bits below say what moved; clear, and there is nothing below because the
+		subject has left that client's audience or stopped existing (`PLAN-M4` D-4, "one leaving
+		needs to be told to forget").
+
+		It is usually free. A patch's flags are a bitfield rounded up to whole bytes, so a
+		twelve-field struct goes from twelve bits to thirteen and stays at two; it costs a byte only
+		on a schema whose bit count was already an exact multiple of eight.
+	]]
+	local root = optionalOf(patchNode(layout.root, true))
 
 	local scope: Scope? = nil
 	if root.bits > 0 then

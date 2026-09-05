@@ -201,9 +201,10 @@ do
 		you know which packet shape it chose is not correct.
 	]]
 	local schema = t.struct({ hp = t.u8, pos = t.struct({ x = t.u8, y = t.u8 }), tag = t.optional(t.u8) })
-	local layout = Ir.lower(schema)
-	local delta = Delta.build(layout)
-	local whole = require("../src/codec/Serdes").build(layout)
+	--[[ One codec and one packet shape. A client with no baseline is sent a change against
+	     `nil`, which writes every field and costs what a whole encode would have — so the rig has
+	     no snapshot branch because the transport has none either (M4 phase 5b). ]]
+	local delta = Delta.build(Ir.lower(schema))
 
 	local store = Baseline.new()
 	local channel = channelOf("game.moving")
@@ -240,15 +241,7 @@ do
 			Buffer.take()
 			Buffer.load(nil)
 
-			local sent = false
-
-			if base == nil then
-				whole.write(truth)
-				sent = true
-			else
-				sent = delta.write(base, truth)
-			end
-
+			local sent = delta.write(base, truth)
 			local packed = Buffer.take()
 			bytes[who] = buffer.len(packed)
 
@@ -257,7 +250,7 @@ do
 			end
 
 			Buffer.beginRead(packed, nil)
-			views[who] = if base == nil then whole.read() else delta.apply(views[who])
+			views[who] = delta.apply(views[who])
 
 			--[[ The server records what it just made true for this client, which is the same value
 			     the client now holds. ]]
