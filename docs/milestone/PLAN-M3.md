@@ -397,8 +397,10 @@ stays in force — is still caught at analysis.
       **before decode** rather than decoded and dropped, because refusing has to stay cheaper than
       accepting. Reported at stage ~~`"queue"`~~ **`"budget"`**: `"queue"` means the game attached
       no listener, and this is the sender being over a limit (D-6)
-- [ ] Re-measure `ArrayHeavy` decode allocation against the M2 figure of 9309.2 B and record both
-      — folded into the single Studio run at the end of the milestone
+- [x] Re-measure `ArrayHeavy` decode allocation against the M2 figure of 9309.2 B and record both
+      — ~~folded into the single Studio run at the end of the milestone~~ **two runs, because one
+      cannot tell a change from the collector.** 10430.5 and 10240.0 B, agreeing within 1.8%, so
+      **+11% against M2** and the only netweave figure in the matrix that moved.
 
 ### Phase 3 — the trust boundary, decided — **done**
 
@@ -869,18 +871,38 @@ the measured window opens.
       milestone's plan. `CLAUDE.md` §5 already said never to report a number that was not produced
       by a committed, re-runnable script; a number that does not survive re-running fails the same
       test and nothing was checking it.
-- [ ] **Decide what to do about `ArrayHeavy`.** Against the field netweave is now last on framerate
-      (83 against blink 131, bytenet 115, zap 111) and worst on decode allocation by 13 to 21 times
-      (10176.5 against zap 480.3, blink 770.0, bytenet 2338.8). The decode number is read-then-
-      dispatch working as designed — D-6 chose it over cross-player attribution and that trade
-      stands — but "as designed" is not the same as "as measured", and the flag cells show netweave
-      winning decode allocation outright (462.8, best of five). The array case is one schema family
-      and the second is `§3.9-Z`'s reason for measuring two.
-- [ ] `bench/src/shared/Modes/netweave.luau` raises `pendingPerBatch` beside its `rateUnbounded`
+- [x] **Decided what to do about `ArrayHeavy`: keep it, report it, and fix the instrument in M4.**
+
+      Against the field netweave is last on framerate (84-85 against blink 130, bytenet 113, zap
+      112) and worst on decode allocation by 4 to 27 times. The framerate gap is M1's and on the
+      array decode path — `bench/RESULTS.md` isolated it at M2 by measuring 85 with a stand-in
+      transport and 86 with the real one. The allocation is read-then-dispatch, which D-6 chose over
+      cross-player byte attribution, and that trade stands.
+
+      What the two runs added is the reason not to chase the *comparison*: **netweave's figure is
+      the only one in that column the harness can reproduce.** Between the two runs blink's moved
+      76% and zap's 146% with no code change, while netweave's moved 1.8% — because netweave's
+      ~10 KB per packet is an order of magnitude above the collector's churn inside a window and
+      theirs is not. Optimising against a rival number that swings by a factor between runs is
+      optimising against noise, and §9 now says so in as many words.
+
+      So: the number is reported against M2 whichever way it went (+11%), the cause is a decision
+      already argued in D-6, and **M4 gets the per-frame window** — measured under lune in phase 9
+      at 400 usable windows out of 400 with a spread of zero — before anything is tuned against
+      this cell.
+- [x] `bench/src/shared/Modes/netweave.luau` raises `pendingPerBatch` beside its `rateUnbounded`
       exception, in the same "considered exception, written down" shape, so the harness stops
       dropping during warm-up.
-- [ ] The run document reports `"netweave":"M2 (protocol 502048910)"`. The mode hardcodes the
-      milestone; a results file that misattributes its own subject is a provenance bug.
+- [x] ~~The run document reports `"netweave":"M2 (protocol 502048910)"`.~~ Fixed at the source:
+      `nw.milestone` is the one place the milestone is written, the adapter reads it, and
+      `tools/messages.luau` checks it against the plan directory so it goes stale loudly rather
+      than silently. Both M3 runs report `"M3 (protocol 502048910)"`.
+- [x] **The client dropped the decode spread on the way into the run document.** The server has
+      computed `decodeBytesLow`/`High` since earlier in this phase; the client's snapshot copy
+      lists its fields by hand and nobody added the two new names, so run A carried a range on
+      every encode cell and none on any decode cell — and acceptance 6 is a decode figure. Same
+      shape as the `Config` limit list and the `Protocol` attribute list. Fixed, and run B is the
+      first run in this project's history where every allocation figure carries its spread.
 
 #### What this phase is really about
 
@@ -914,11 +936,23 @@ worked example rather than as another rule.
    declared 64.
 6. `ArrayHeavy` decode allocation per packet is reported against the M2 baseline of 9309.2 B in
    `bench/RESULTS.md`, whether it moved or not. ~~**Measured: 10176.5 B, +9.3%** — it moved the wrong
-   way, and the same run shows encode allocation on that cell at +66.6%.~~ **Both figures are
+   way, and the same run shows encode allocation on that cell at +66.6%.~~ ~~**Both figures are
    artefacts of a probe that survives four sample windows; the criterion is not met, because the
-   harness cannot yet produce a reproducible number for this cell.** Phase 9 makes the spread
-   visible so the next run can say whether it has one. The run document is
-   `bench/runs/2026-09-05-m3.json`; `bench/RESULTS.md` is pending.
+   harness cannot yet produce a reproducible number for this cell.**~~ **Met, on the decode figure,
+   and the encode half of that correction stands.**
+
+   Two further runs of the same tree, back to back, with the spread recorded on both sides:
+   **10430.5 and 10240.0 B, agreeing within 1.8%, so +11% against M2.** Reported in
+   `bench/RESULTS.md` under "M3: the security milestone, measured twice". The decode cell *is*
+   reproducible — netweave's ~10 KB per packet sits an order of magnitude above the collector's
+   churn inside a window, which is exactly why the same column is not reproducible for the
+   libraries allocating 0.4-2.6 KB: blink's moved 76% and zap's 146% between those two runs with no
+   code change.
+
+   The encode cell remains unmeasurable and is now shown to be so for **every** library in the
+   matrix: four to eight surviving windows out of twenty-five, ranges spanning 4x to 16x. netweave's
+   median came out at 3932.2 B in three of four runs — the M2 figure to the decimal — which closes
+   the "+66.6% regression" for the third time.
 7. A game that attaches no observer sees a warning on the first refusal of each channel and stage,
    and does not see a second for the same pair.
 8. `nw.diagnostics()` returns a snapshot that cannot be mutated into the live counters.
@@ -960,8 +994,10 @@ Criterion 5 was corrected in phase 8 to describe the byte ceiling that shipped; 
 ceiling refusing honest traffic, fixed it, and pinned the property — `codec.maxSize` against what
 the encoder actually writes, over sixteen schemas — so it is met.
 
-Criterion 6 is the one still open, and it is open on the *harness* rather than on netweave: see
-phase 9.
+~~Criterion 6 is the one still open, and it is open on the *harness* rather than on netweave.~~
+**Answered by two further runs — see the criterion above.** All fourteen are met. The one thing
+that is still open is the harness's *encode* column, which no longer measures anything for any
+library in the matrix and is M4's to fix with the per-frame window phase 9 proved out under lune.
 
 ## 8. Risks
 
@@ -1043,6 +1079,26 @@ just written — and **none of them was caught by anything M3 built**. All 26 ar
 change to `src/`, 10 by a correction to a document that overstated what the code did.
 `docs/SECURITY-REPORT.md` records them and where each was answered; phase 9 above records the
 working, finding by finding, with the numbers on both sides of each fix.
+
+### The numbers
+
+Two runs of the same tree, back to back, because one run of this matrix cannot tell a change from
+the collector. `bench/RESULTS.md` has the tables and the argument; the summary is that **five of
+seven netweave figures did not move at all** across a milestone of new per-packet work — two
+`pcall`s per batch, a direction check, a protocol verdict, a byte ceiling, a token bucket and a
+pending count, all on the receive path:
+
+| netweave, `up` | M2 | M3 run A | M3 run B |
+|---|---|---|---|
+| `ArrayHeavy` bytes / framerate | 601 / 86 | 601 / 85 | 601 / 84 |
+| `ArrayHeavy` encode B/call | 3932.2 | 3932.2 | 3932.2 |
+| `ArrayHeavy` decode B/packet | 9309.2 | **10430.5** | **10240.0** |
+| `Flag*` bytes | 8 | 8 | 8 |
+| `Flag*` encode / decode B | 81.9 / 462.8 | 81.9 / 462.8 | 81.9 / 462.8 |
+
+Delivery is exact in all three cells of both runs, `sent == received`, which no other library in
+the matrix manages. The security work cost **11% of one cell** — `ArrayHeavy` decode allocation —
+and nothing else that this harness can see.
 
 The three most expensive lessons are in `CLAUDE.md` §9 rather than only here:
 
