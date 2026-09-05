@@ -33,7 +33,7 @@
 	| G1 | An inbound channel that changes authoritative state has no listener until a policy is attached | type error |
 	| G2 | Every inbound channel declares a rate budget. There is no unlimited | type error |
 	| G3 | Every server-to-client channel declares its audience. `broadcast` exists only where the audience is everyone | type error |
-	| G4 | Wire data never reaches `error()`. Rejections are values, routed to an observer | not expressible |
+	| G4 | Wire data never reaches `error()`. Rejections are values, routed to an observer. The sidecar is wire data, and the read and dispatch phases are guarded rather than trusted | not expressible |
 	| G5 | Length-prefixed framing: one malformed packet cannot stop the rest of its batch | not expressible |
 	| G6 | Direction is a class, not a string field | type error |
 

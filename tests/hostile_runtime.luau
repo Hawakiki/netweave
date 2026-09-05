@@ -920,6 +920,105 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- G4 as a property, not as a list of paths that were fixed
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		Two receive-path raises reached production before an external review found them: a table in
+		the sidecar, and a pooled pending list two loops both believed they owned. Both are fixed,
+		and fixing them does nothing for the third.
+
+		So the guarantee is tested as a property. Something raises where nothing should — here the
+		resolver, which is netweave's own code and has no business failing — and the batch is
+		expected to come back, say so, and leave a decoder the next honest batch still works
+		through. That last part is what a leak looks like from outside, and it is the only way to
+		see one.
+	]]
+	local exploding = Inbound.new({
+		resolve = function(): any
+			error("something inside netweave went wrong")
+		end,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = true,
+	})
+
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+
+	local packed, carried = Buffer.take()
+	local survived = pcall(exploding.receive, packed, carried, mallory)
+
+	check("a raise inside the read phase does not escape the receive path", survived)
+	equals("it is reported", #reports, 1)
+	equals("at parse", reports[1].stage, "parse")
+	check("naming the raise", string.find(reports[1].reason, "read phase raised", 1, true) ~= nil)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[ And a raise in the dispatch phase, from something `call` does not already guard. A handler
+	     is `xpcall`ed; what is not is the loop around it.
+
+	     Read as a *client*, because a reply is what a client receives — on the server the same bytes
+	     are a request and fail at parse instead, which is a different case. ]]
+	local exploding = Inbound.new({
+		resolve = Namespace.channelById,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = false,
+
+		queries = {
+			spawn = queries.spawn,
+			enter = queries.enter,
+			answer = queries.answer,
+			refuse = queries.refuse,
+			abandon = queries.abandon,
+
+			--[[ The one member `dispatch` calls outside `call`'s guard. ]]
+			answered = function()
+				error("something inside netweave went wrong")
+			end,
+		},
+	})
+
+	Buffer.load(nil)
+	Batch.writeReply(Asked, 1, Batch.OK, { v = 1 })
+
+	local packed = Buffer.take()
+	local survived = pcall(exploding.receive, packed, nil, nil)
+
+	check("a raise inside the dispatch phase does not escape either", survived)
+	equals("it is reported", #reports, 1)
+	equals("at handler", reports[1].stage, "handler")
+
+	--[[ The canary: whatever the raise left behind, an honest batch still arrives. A leaked pending
+	     list, a stranded cursor or an unrestored sender would all show up here and nowhere else. ]]
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	Batch.writePacket(Fixed, { a = 7, b = 9 })
+	feed()
+
+	equals("and an honest batch still arrives afterwards", delivered, 1)
+	equals("with nothing reported", #reports, 0)
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- Control traffic
 -- ---------------------------------------------------------------------------------------------
 

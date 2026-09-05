@@ -437,7 +437,12 @@ stays in force — is still caught at analysis.
       parked inside a yield is *not* cancelled, because a yielded Luau coroutine cannot be. What is
       released is the accounting; the thread returns when it returns, finds its slot gone, and
       writes no reply.
-- [x] The reply path is a channel like any other: budgeted, observed, and unable to throw
+- [x] The reply path is a channel like any other: ~~budgeted~~, observed, and unable to throw. **Not
+      budgeted, and the checkbox was wrong** — `Outbound.reply`'s own comment says so and gives the
+      argument: a reply is one-for-one with a request that already spent the sender's rate on the
+      way in. What that argument does not cover is a reply to a *refused* request, which is a second
+      write on a packet the budget declined; it is bounded by the client's own bandwidth and is
+      recorded rather than fixed (M3 phase 9).
 - [x] Reconcile the failure shape — `invoke` currently returns `(R?, string?)` and the shared plan
       forbids `nil` as failure. **Decided: `(R?, string?)` stays**, and the ambiguity is closed at
       the declaration instead — a query's `returns` may not be a top-level `t.optional`. Written
@@ -676,16 +681,29 @@ refuted one at a time.
 
 #### The documentation that is now wrong
 
-- [ ] G4 is stated unconditionally in three places and holds for the byte stream but not for the
-      sidecar or the dispatch loop. Either the two paths are fixed and the claim stands, or the
-      claim is qualified — not both.
-- [ ] "A packet claiming more is provably a lie" (`DESIGN-API.md` §3, D-5) is false for scoped
-      elements.
-- [ ] `t.string`, `t.buffer` and `t.array` document 65,535 while `patchVarint` caps a frame at
-      16,383 and raises past it.
-- [ ] `PLAN-M3` phase 4 says the reply path is budgeted; `Outbound.reply` says it is not.
-- [ ] Acceptance 5 and 10 were corrected in phase 8 and are correct. **Acceptance 1, 2 and 11 are
-      not**: each says "does not throw", and two receive-path throws are now measured.
+- [x] **G4 is enforced rather than inspected.** Both paths are fixed *and* the claim is made
+      structural, because fixing the two somebody found does nothing for the third: the read phase
+      and the dispatch phase each run under a guard that restores the shared state, returns the
+      pending list and reports the raise. Two `pcall`s per batch. `hostile_runtime` tests it as a
+      property — something raises where nothing should, and the batch comes back, says so, and
+      leaves a decoder the next honest batch still works through.
+- [x] "A packet claiming more is provably a lie" was true only where the schema had no flags below
+      its top level. Corrected in `DESIGN-API.md` §3 with what it was wrong about.
+- [x] `t.string`, `t.buffer` and `t.array` document 65,535 while the writer frames at most 16,383.
+      Stated in `WIRE-FORMAT.md` §2 rather than left in a comment calling it "a design problem, not
+      a runtime one". **The cap itself is not raised**: widening a frame to three bytes costs a byte
+      on every counted packet forever to buy a payload size no channel in this project reaches, and
+      that trade belongs to whoever needs it.
+- [x] The reply-path checkbox is struck in phase 4 rather than fixed, with the argument
+      `Outbound.reply` already carries and the gap that argument does not cover.
+- [x] "The server is the sender on this class" now describes the wire as well as the views — see the
+      `direction` stage above — so `DESIGN-API.md` §3 no longer rests the argument on a check that
+      does not exist.
+- [x] `nw.validate` is documented as being exactly as strict as the encoder, which is now a claim
+      worth making.
+- [ ] Acceptance 5 and 10 were corrected in phase 8 and are correct. **Acceptance 1, 2 and 11 say
+      "does not throw", and the two throws they were failing are fixed** — re-state them against the
+      guard rather than against the two paths, once the remaining findings are triaged.
 
 #### The benchmark, which answered acceptance 6 and asked a new question
 

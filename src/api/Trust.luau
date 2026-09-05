@@ -234,6 +234,15 @@ end
 	This runs the encoder against `value` to decide, so it costs a real serialisation. It is an
 	escape hatch, not a hot path.
 	:::
+
+	:::caution
+	**It is exactly as strict as the encoder**, and until M3 phase 9 the encoder was not strict
+	enough for this to mean what it says. The boolean writer tested truthiness, so
+	`{ admin = "false" }` validated against `t.boolean` and came back branded and truthy; the
+	instance writer tested only non-nil; the integer writers checked the range and let the fraction
+	truncate. All three are refused now, and the reason to say so here is that the two ways this
+	function is reached — a DataStore row and an HTTP body — are exactly the values nobody wrote.
+	:::
 ]=]
 function Trust.validate<S>(schema: S, value: any): (TrustedPayload<S>?, string?)
 	if type(schema) ~= "table" or type((schema :: any).kind) ~= "string" then

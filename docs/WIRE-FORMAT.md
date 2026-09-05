@@ -46,6 +46,12 @@ runtime.
 | `static` | encoded size is known at definition time | *(empty)* |
 | `counted` | size depends on data — arrays, strings, buffers, maps | `length:varint` |
 
+**The writer frames at most 16,383 bytes**, while `t.string`, `t.buffer` and `t.array` document
+65,535 and the reader accepts a five-byte varint. A `counted` frame reserves one byte for its length
+and widens it to two; past that `Batch.patchVarint` raises at send time. So the type vocabulary
+describes payloads the library cannot put on the wire, and it says so here rather than in a comment
+calling it "a design problem, not a runtime one".
+
 A third mode, `derived` — size computable from a fixed-position bitfield, as when the only
 variability is optional presence — is described in §7. It is not part of v1.
 
@@ -264,7 +270,14 @@ a skipped packet needs its instance count.
 
 ## 6. Decode failure
 
-Nothing on the receive path calls `error`. Guarantee G4.
+Nothing on the receive path calls `error`. Guarantee G4, and since M3 phase 9 that is a guard rather
+than a reading of the code: the read phase and the dispatch phase each run under a `pcall` that
+restores the shared state and reports the raise, because the two paths that broke it were both ones
+nobody had thought of.
+
+**The instance sidecar is wire data too.** It arrives as the remote's second argument and a client
+chooses its contents, so an entry that is not an Instance is refused where it is read, per packet,
+like any other field that does not match its schema.
 
 When a packet fails to decode — an out-of-range number, an unknown enum tag, a truncated string,
 an unknown id — the reader:
