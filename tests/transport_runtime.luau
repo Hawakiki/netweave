@@ -89,8 +89,12 @@ local sink: Batch.Sink = {
 	     direction has its own file: `tests/query_runtime.luau`. ]]
 	answers = true,
 
-	admit = function(channel: any, _bytes: number): string?
-		return denyOn[channel.qualified]
+	admit = function(channel: any, _bytes: number): (string?, string?)
+		return denyOn[channel.qualified], "budget"
+	end,
+
+	hello = function(hash: number)
+		table.insert(seen, { channel = "control", stage = "hello", value = hash, bytes = 0 })
 	end,
 
 	deliver = function(channel: any, value: any, bytes: number, call: number?)

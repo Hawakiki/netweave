@@ -218,6 +218,7 @@ lune run tests/budget_runtime
 lune run tests/config_runtime
 lune run tests/observer_runtime
 lune run tests/query_runtime
+lune run tests/protocol_runtime
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike

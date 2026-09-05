@@ -966,6 +966,10 @@ export type Codec = {
 	fixedSize: number?,
 	maxSize: number,
 	instances: number?,
+	--[[ Kept rather than discarded, because the protocol hash is taken over the lowered tree
+	     (`src/api/Protocol.luau`) and lowering a second time at seal would be the same work done
+	     twice to save one field. ]]
+	layout: Ir.Layout,
 	write: (value: any) -> (),
 	read: () -> (any, string?),
 	check: (value: any) -> string?,
@@ -1058,6 +1062,7 @@ function Serdes.build(layout: Ir.Layout): Codec
 		fixedSize = layout.fixedSize,
 		maxSize = layout.maxSize,
 		instances = layout.instances,
+		layout = layout,
 
 		write = function(value: any)
 			write(value, NO_FLAGS)

@@ -45,6 +45,7 @@ local attempt: (...any) -> ...any = Batch.writeBody
 local attemptPacket: (...any) -> ...any = Batch.writePacket
 local attemptRequest: (...any) -> ...any = Batch.writeRequest
 local attemptReply: (...any) -> ...any = Batch.writeReply
+local attemptHello: (...any) -> ...any = Batch.writeHello
 
 local Outbound = {}
 
@@ -96,6 +97,7 @@ export type Outbound = {
 	broadcast: (channel: any, value: any) -> (),
 	request: (channel: any, call: number, value: any) -> (),
 	reply: (channel: any, destination: any, call: number, status: number, value: any?) -> (),
+	hello: (destination: any, hash: number) -> (),
 	flush: () -> (),
 	forget: (destination: any) -> (),
 }
@@ -349,6 +351,17 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 		reply = function(channel: any, destination: any, call: number, status: number, value: any?)
 			switchTo(destination)
 			guarded(attemptReply, channel, call, status, value)
+		end,
+
+		--[[
+			The handshake, on reserved id 0. Parked like any other packet rather than sent alone, so
+			it rides out in front of whatever provoked it — which is what makes the peer's *first*
+			batch carry the hash, and what lets the packets behind it in that same batch be refused
+			if the hash does not match.
+		]]
+		hello = function(destination: any, hash: number)
+			switchTo(destination)
+			guarded(attemptHello, hash)
 		end,
 
 		--[[ Once a frame. Everything accumulated goes out as one call per destination, which is the
