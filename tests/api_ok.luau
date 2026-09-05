@@ -266,10 +266,15 @@ local vault = nw.namespace("vault", {
 	}),
 })
 
-vault.client.inventory:listen(function(value)
-	--[[ The whole value, not a patch. A client that had to know which of the two it was sent is a
-	     client the library has failed (`DESIGN-API.md` §3). ]]
-	local _total: number = value.hp + value.gold
+vault.client.inventory:listen(function(subject, value)
+	--[[ The subject, then the whole value — not a patch. A client that had to know which of the two
+	     it was sent is a client the library has failed (`DESIGN-API.md` §3), and one that could not
+	     tell its subjects apart could not keep a mirror at all.
+
+	     Both are typed from the declaration: `subject` is `t.u16`'s payload and `value` is `data`'s.
+	     Before `ReplicateSubject` existed this signature took one argument at analysis and was
+	     handed two at runtime, so `value` here was the id. ]]
+	local _total: number = subject + value.hp + value.gold
 end)
 
 return nil

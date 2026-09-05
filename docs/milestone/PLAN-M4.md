@@ -402,7 +402,7 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
       seam driving an actual diff against actual baselines, including a subject appearing, one
       going away, and a tick where nothing moved sending nothing.
 
-### Phase 5b — the public class and the transport
+### Phase 5b — the public class and the transport — **done**
 
 **The plan omitted this and the omission is the point.** `nw.replicate` is in §3's scope table
 against `src/api/Channel.luau` and `src/netweave.luau`, and **no phase schedules it** — phase 3 is
@@ -485,9 +485,20 @@ API to write an example against.
 - [x] `docs/WIRE-FORMAT.md` §2 gains the change and the resync. Id 0's reservation earned itself: a
       control kind was added without touching the batch version, because the length in front of a
       control body is what makes an unknown kind steppable.
-- [ ] The worked example in `DESIGN-API.md` gains a replication half, and `tools/messages.luau`
-      checks it the way it checks the existing one. *(Moved here from phase 5; it cannot be written
-      against an API that does not exist.)*
+- [x] The worked example gains a replication half — a **second region** rather than a longer one,
+      because the sixty-line cap is a statement about how much a reader has to hold in their head
+      to understand the declaration surface, and replication is a separate thing to understand. 57
+      lines and 29, both checked against `DESIGN-API.md` by `tools/messages.luau`.
+- [x] **Writing it found the one defect left in the class.** The client's listener took *one*
+      argument at analysis and was handed *two* at runtime, so `value` in a handler was the subject
+      id — and `tests/api_ok.luau` type-checked, because a one-argument signature is a valid
+      subtype. `ReplicateSubject` projects the declared `subject` type, `Channel` carries it as a
+      fifth type parameter, and the view emits `(subject, payload) -> ()`. A one-argument handler no
+      longer compiles.
+- [x] And a rule the example demonstrates by having tripped over it: **everything is declared before
+      anything is sent.** Moving the two `:send` calls into the first region sealed the protocol, so
+      the replicated namespace declared after them raised — exactly as `Namespace.declare` says it
+      will. The sends moved after both declarations and the comment says why.
 
 ### Phase 6 — the hostile half
 

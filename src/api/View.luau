@@ -77,6 +77,7 @@ type function channelView(channel, side)
 	local audience = channel:readproperty(types.singleton("__audience")):value()
 	local payload = channel:readproperty(types.singleton("__payload"))
 	local response = channel:readproperty(types.singleton("__response"))
+	local subject = channel:readproperty(types.singleton("__subject"))
 
 	local view = types.newtable()
 	local server = side:value() == "server"
@@ -178,7 +179,17 @@ type function channelView(channel, side)
 			whether it was sent a change or a whole value is a client the library has failed.
 		]]
 		if not server then
-			listener(payload, false)
+			--[[ Two arguments, and the subject first. A replicated client keeps one value per
+			     subject, so a listener that could not tell them apart would be useless — and typing
+			     it here is what stops the signature from taking one argument at analysis and two at
+			     runtime, which is worse than either. ]]
+			view:setproperty(
+				types.singleton("listen"),
+				returns({
+					types.unknown,
+					types.newfunction({ head = { subject, payload } }, { head = {} }),
+				})
+			)
 		end
 	else
 		if server then

@@ -87,11 +87,14 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	last three are filled in by the namespace and the registry, because an id depends on every
 	other channel in the program (`WIRE-FORMAT.md` §3).
 ]=]
-export type Channel<C, A, T, R> = {
+export type Channel<C, A, T, R, U> = {
 	__class: C,
 	__audience: A,
 	__payload: T,
 	__response: R,
+	--[[ What a `replicate` channel names its subjects with, and `nil` for every other class — the
+	     only one that puts a subject on the wire is the only one whose listener is handed one. ]]
+	__subject: U,
 
 	class: Class,
 	primitive: Primitive,
@@ -409,6 +412,30 @@ export type function ReplicatePayload(spec)
 	end
 
 	return requireData(spec, class, types.singleton("data"), types.singleton("what is replicated"))
+end
+
+--[=[
+	@type ReplicateSubject<S> S
+	@within Channel
+
+	Projects the payload out of a `replicate` declaration's `subject`.
+
+	It reaches the client's listener as the first argument, so a handler that keeps a value per
+	subject is typed on both — `function(id: number, value)` rather than `function(id, value)` with
+	the id an `any` nobody can check. That is the only reason the type exists: without it the
+	listener would take one argument at analysis and two at runtime, which is worse than either.
+]=]
+export type function ReplicateSubject(spec)
+	local declared = propertyOf(spec, types.singleton("subject"))
+
+	--[[ Silent when it is missing, because [ReplicatePayload] refuses that with the message worth
+	     reading and both type functions run on the same declaration. Two diagnostics for one
+	     mistake is one diagnostic too many, and `tests/api_reject.luau` counts them. ]]
+	if not declared then
+		return types.unknown
+	end
+
+	return payloadOf(declared, types.singleton("subject"))
 end
 
 --[=[
@@ -759,7 +786,7 @@ end
 	@within Channel
 	@function command
 	@param spec S -- the declaration: `data`, `rate`, `authorize`
-	@return Channel<"command", "none", T, nil>
+	@return Channel<"command", "none", T, nil, nil>
 
 	A client-to-server channel that **changes authoritative state**. `authorize` is required.
 
@@ -773,7 +800,7 @@ end
 
 	The handler receives `Trusted<T>` — the payload decoded, in budget, and approved.
 ]=]
-function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<S>, nil>
+function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<S>, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "command", { "audience", "args", "returns", "timeout", "unreliable" })
 
@@ -793,7 +820,7 @@ end
 	@within Channel
 	@function intent
 	@param spec S -- data, rate
-	@return Channel<"intent", "none", T, nil>
+	@return Channel<"intent", "none", T, nil, nil>
 
 	A continuous observed input: movement, aim, a held button.
 
@@ -812,7 +839,7 @@ end
 	exception that proves it. Coalescing itself lands with the transport in M2.
 	:::
 ]=]
-function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>, nil>
+function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "intent", { "authorize", "audience", "args", "returns", "timeout" })
 
@@ -832,7 +859,7 @@ end
 	@within Channel
 	@function signal
 	@param spec S -- data, rate
-	@return Channel<"signal", "none", T, nil>
+	@return Channel<"signal", "none", T, nil, nil>
 
 	A client-to-server channel that carries **no authority**: a menu opened, an emote played, a
 	tutorial step acknowledged.
@@ -852,7 +879,7 @@ end
 	for that code — the limit is stated in `DESIGN-API.md` §0 and §10.5 rather than papered over.
 	:::
 ]=]
-function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>, nil>
+function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "signal", { "authorize", "audience", "args", "returns", "timeout" })
 
@@ -872,7 +899,7 @@ end
 	@within Channel
 	@function query
 	@param spec S -- args, returns, rate, timeout, authorize
-	@return Channel<"query", "none", T, R>
+	@return Channel<"query", "none", T, R, nil>
 
 	A request that expects an answer. Authorized like a command, because it reads authoritative
 	state and a read is how an exploit finds what to write.
@@ -887,7 +914,7 @@ end
 	}),
 	```
 ]=]
-function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, QueryReturns<S>>
+function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, QueryReturns<S>, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "query", { "data", "audience", "unreliable" })
 
@@ -955,7 +982,7 @@ end
 	@within Channel
 	@function state
 	@param spec S -- data, audience
-	@return Channel<"state", Scope, T, nil>
+	@return Channel<"state", Scope, T, nil, nil>
 
 	Server-to-client replicated state.
 
@@ -970,7 +997,7 @@ end
 	guarantee G3, and it is a type error rather than a runtime check — broadcasting positional
 	data to everyone is how wallhacks are fed, and a call site that does it is invisible in review.
 ]=]
-function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil>
+function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "state", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
@@ -1013,7 +1040,7 @@ end
 	@within Channel
 	@function replicate
 	@param spec S -- data, subject, audience, store
-	@return Channel<"replicate", Scope, T, nil>
+	@return Channel<"replicate", Scope, T, nil, Subject>
 
 	Server-to-client replicated state, sent as **changes** against what each client already has.
 
@@ -1044,7 +1071,13 @@ end
 	wire, and a join, a resync and an audience entry are the same code.
 	:::
 ]=]
-function Channel.replicate<S>(spec: S): Channel<"replicate", OutboundScope<S>, ReplicatePayload<S>, nil>
+function Channel.replicate<S>(spec: S): Channel<
+	"replicate",
+	OutboundScope<S>,
+	ReplicatePayload<S>,
+	nil,
+	ReplicateSubject<S>
+>
 	local raw: any = spec
 	rejectForbidden(
 		raw,
@@ -1105,7 +1138,7 @@ end
 	@within Channel
 	@function event
 	@param spec S -- data, audience
-	@return Channel<"event", Scope, T, nil>
+	@return Channel<"event", Scope, T, nil, nil>
 
 	A server-to-client occurrence — something happened, once.
 
@@ -1119,7 +1152,7 @@ end
 	The difference from [Channel.state] is what M4 does with it: state is a value that can be
 	delta-replicated and re-sent to a late joiner, an event is a moment that cannot.
 ]=]
-function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil>
+function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "event", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
