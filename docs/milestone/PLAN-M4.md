@@ -322,16 +322,47 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
       adversary — the same shape as `ir_runtime` at 13%. Nothing in the file reads a byte a peer
       chose; the adversarial half is a malformed or replayed patch, which is phase 6.
 
-### Phase 4 — baselines, bounded
+### Phase 4 — baselines, bounded — **done**
 
-- [ ] `Baseline.luau`: what each client has, per subject, **with a sequence number** — phase 2's
-      break detector (D-2). A client whose sequence has a gap is sent a snapshot rather than another
-      delta.
-- [ ] A declared limit on it, in `Config`, in the same shape as `queueCapacity` — and a refusal that reports rather than grows.
-- [ ] `forget` on disconnect, tested the way the M3 queue drop was: interleaved subjects, one player leaves, assert nothing of theirs survives.
-- [ ] **D-4's probe, moved here from phase 2**: a subject moving in and out of a `nearby` audience
-      while its state changes, asserting the client's view is correct at every step — and that a
-      join, a `pendingPerBatch` drop and an audience entry all take the same resnapshot path.
+- [x] `Baseline.luau`: what each client has, per subject. Three levels of table — client, channel,
+      subject — because every operation that matters is "everything for this client" or "everything
+      for this client on this channel", and both are one `nil` assignment on a nested table.
+
+      This is the piece **neither neighbour holds**: Charm Sync keeps one `lastSyncedValue` per key
+      and diffs everyone against it, and ReplicaService keeps nothing because the game names the
+      mutation. Per client per subject is what a dynamic audience needs.
+- [x] ~~**with a sequence number** — phase 2's break detector.~~ **Not needed, and finding out why
+      is the better half of this phase.** A sequence exists so a receiver can notice a gap. But the
+      packets that go missing here are the ones **netweave itself drops** — `pendingPerBatch` takes
+      the tail of an oversized batch and *reports it* — so the receiving side already knows, by
+      channel, at the moment it happens. A number on the wire would be paying every patch to
+      rediscover something the receiver was already told. `Baseline.desync(who, channel)` is the
+      whole mechanism, and it costs nothing until it fires.
+
+      Phase 5 wires the client's own rejection at `budget` into it. The design is unchanged; what
+      is gone is a varint per patch per subject, which on a three-byte patch would have been a
+      third of it.
+- [x] `baselinesPerClient` in `Config` — default 256, the same shape as `queueCapacity` — and a
+      `replicate` stage in `Observer` to report against. Past the limit netweave stops holding a
+      baseline, which means that subject is sent **whole** to that client every tick: correct and
+      expensive, degrading to exactly what `nw.state` does for a living. That is how a bound should
+      fail. An already-held baseline stays replaceable at the limit, or a full store would freeze
+      every subject it already knew about.
+- [x] `forget` on disconnect, tested the way `PLAN-M3` tested the queued packets it forgot:
+      interleaved subjects, one departure, nothing of theirs survives and nothing of anyone else's
+      goes with it.
+- [x] **D-4's probe.** A subject walks in and out of an audience while its state changes, over a
+      real codec, with the client's view checked against the server's truth at every step — a
+      client with nothing, a client with a baseline, an unchanged tick that sends no packet at all,
+      an arrival snapshotted in the same tick another client is patched, a departure, a re-entry,
+      and a `desync`. Three ways in, one path.
+
+      **The first draft of it asserted nothing**, and that is the part worth keeping. Removing
+      `store.drop` on audience exit still passed, because the re-entry value happened to differ
+      from the stale baseline in *every* field — so the patch carried the whole subject and
+      rebuilding from nothing was correct by accident. The value now shares a field with the stale
+      baseline, and without the drop the re-entering client is silently missing it. `CLAUDE.md` §9:
+      a regression test is confirmed against the code it is written for.
 
 ### Phase 5 — the seam and the adapters
 

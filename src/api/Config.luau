@@ -89,9 +89,10 @@ export type Severity = "off" | "warn" | "error"
 	.protocol Severity? -- a peer joined on a different set of channel definitions
 	.query Severity? -- a call came back without an answer
 	.direction Severity? -- a peer sent on a channel it is the receiver of
+	.replicate Severity? -- a replicated channel is holding more baselines than its limit allows
 	.rateUnbounded Severity? -- a `rate` so large it cannot bind, declared as if it were a limit
 
-	Nine of the ten are the stages of [Observer.Stage], because a rejection already carries the
+	Ten of the eleven are the stages of [Observer.Stage], because a rejection already carries the
 	stage it happened at and inventing a second vocabulary for the same things would only make them
 	drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the game's own
 	code, and is the only rule here that raises at `"error"`.
@@ -106,6 +107,7 @@ export type Rules = {
 	protocol: Severity?,
 	query: Severity?,
 	direction: Severity?,
+	replicate: Severity?,
 	rateUnbounded: Severity?,
 }
 
@@ -117,6 +119,7 @@ export type Rules = {
 	.unreliableBytes number? -- the largest unreliable payload that will be sent
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
 	.callsInFlight number? -- unanswered `nw.query` calls one player may hold at once
+	.baselinesPerClient number? -- `(channel, subject)` pairs one client's replication may hold
 
 	Numbers, not severities, and kept in their own field so that a limit can never be mistaken for a
 	switch.
@@ -130,6 +133,7 @@ export type Rules = {
 	| `unreliableBytes` | on every unreliable send, so it takes effect immediately and can only *lower* the ceiling — 908 is Roblox's limit, not netweave's |
 	| `repeatsPerDiagnostic` | on every report |
 	| `callsInFlight` | on every `invoke` and on every request the server accepts, so it takes effect immediately |
+| `baselinesPerClient` | on every baseline a replicated channel is about to keep, so lowering it stops new ones rather than releasing held ones |
 
 	Configuring before the first channel is declared makes all three behave the same way, which is
 	why that is the advice rather than the rule.
@@ -140,6 +144,7 @@ export type Limits = {
 	unreliableBytes: number?,
 	repeatsPerDiagnostic: number?,
 	callsInFlight: number?,
+	baselinesPerClient: number?,
 }
 
 --[=[
@@ -230,6 +235,7 @@ export type function CheckedSettings(spec, snapshot)
 		protocol = true,
 		query = true,
 		direction = true,
+		replicate = true,
 		rateUnbounded = true,
 	}
 	--[[ Every key of `Limits`, and it has to be spelled out because a type function body cannot read
@@ -243,6 +249,7 @@ export type function CheckedSettings(spec, snapshot)
 		unreliableBytes = true,
 		repeatsPerDiagnostic = true,
 		callsInFlight = true,
+		baselinesPerClient = true,
 	}
 
 	--[[ Annotated `any` throughout: inside a type function the values are the analyzer's own type
@@ -473,6 +480,18 @@ local RULES: { [string]: Rule } = {
 		wire = true,
 		summary = "a peer sent on a channel it is the receiver of",
 	},
+	replicate = {
+		--[[ A game's own volume rather than a peer's: how many subjects it replicates and to how
+		     many people. Past the limit netweave stops holding a baseline for that subject, which
+		     means it sends that client a whole snapshot every tick instead of a patch — **correct
+		     and expensive**, which is the right way for a bound to fail and is exactly what
+		     `nw.state` does for a living. Warn rather than error for the same reason `queue` does:
+		     it is a number the game can raise once it has seen it. ]]
+		default = "warn",
+		floor = "off",
+		wire = true,
+		summary = "a replicated channel is holding more baselines than its limit allows",
+	},
 	rateUnbounded = {
 		default = "warn",
 		floor = "off",
@@ -492,6 +511,12 @@ local LIMITS: { [string]: { default: number, min: number, max: number } } = {
 	     outstanding. They are the same number because they are the same player counted from either
 	     end (`PLAN-M3` D-13). ]]
 	callsInFlight = { default = 16, min = 1, max = 4096 },
+
+	--[[ How many `(channel, subject)` baselines one client's replication may hold. Not a defence
+	     against a peer — the audience decides who sees what, so a client cannot ask for more — but
+	     against a game that replicates thousands of subjects without noticing that the cost is
+	     multiplied by everyone who can see them (`PLAN-M3` D-6, applied to L3). ]]
+	baselinesPerClient = { default = 256, min = 1, max = 65536 },
 }
 table.freeze(LIMITS)
 
