@@ -44,7 +44,7 @@ Three things also make now the right time rather than merely the next slot:
 | The diff: a structural delta over the lowered IR, reusing L1's writers | `src/replication/Delta.luau` |
 | Per-client baselines, bounded, with what they cost visible | `src/replication/Baseline.luau` |
 | The store seam — what an adapter has to provide, and adapters for Charm and Replica | `src/replication/Store.luau`, `src/replication/adapters/` |
-| `nw.replicate`, or `nw.state` grown into it — decided in D-1 before anything is written | `src/api/Channel.luau`, `src/netweave.luau` |
+| **`nw.replicate`** — a seventh class, decided in D-1 and written up in `DESIGN-API.md` §3 | `src/api/Channel.luau`, `src/netweave.luau` |
 | The `ArrayHeavy` framerate gap, measured before it is chased | `src/codec/Serdes.luau`, `bench/RESULTS.md` |
 | The adversarial suite extended to the receive half of replication | `tests/hostile_runtime.luau`, `tests/replication_runtime.luau` |
 
@@ -53,6 +53,7 @@ Three things also make now the right time rather than merely the next slot:
 | Deferred | To |
 |---|---|
 | Client-side prediction, rollback, or interpolation | never; this is a networking library, not a movement system |
+| Acknowledged baselines, and periodic snapshots between deltas | never; D-2 found both answer a loss the reliable path does not have |
 | Interest management beyond the existing `audience` scopes | M5, if a game asks for it |
 | Replicating Instances or their properties | never; the sidecar carries references, not state |
 | Wally or npm packaging | no path exists — `CLAUDE.md` §8 |
@@ -63,32 +64,43 @@ Three things also make now the right time rather than merely the next slot:
 Each of these is open. They are written here so the phase that answers one writes the answer beside
 the question rather than in a commit message.
 
-### D-1 — is this a new channel class, or `nw.state` growing up?
+### D-1 — is this a new channel class, or `nw.state` growing up? — **answered in phase 2**
 
-`nw.state` today is `nw.event` with coalescing and an audience (`src/api/Channel.luau`). Growing it
-means every existing declaration silently changes behaviour; a new class means two things named
-almost the same. **G6 says direction is a class rather than a field** (`DESIGN-API.md` §3), and the
-same argument applies here: if replicated and pushed state behave differently under packet loss,
-they must not be the same declaration.
+**A seventh class, `nw.replicate`.** Written up in `DESIGN-API.md` §3, "Replication is a seventh
+class, not `state` growing up". Three independent reasons, the plainest first:
 
-Answer this first. Nothing else in the milestone is independent of it.
+- **They have no method in common.** `nw.state` is `publish(subject, value)`; `nw.replicate` takes
+  a store at declaration and the game never calls netweave again.
+- **They sit on opposite sides of the reliability trade.** A dropped `state` packet costs one tick
+  and the next corrects it, which is why `unreliable` belongs there. A dropped delta leaves that
+  client wrong forever, so `unreliable` is **forbidden** on `replicate` — and one class with a flag
+  meaning "fine" or "silently wrong forever" depending on its value is the exact shape this design
+  exists to make unwritable.
+- **They cost different server memory.** One coalesced value released at the tick, against a
+  baseline per client per subject held for the session — `PLAN-M3` D-6 territory, needing a declared
+  ceiling `state` has no use for.
 
-### D-2 — a delta assumes a baseline, and `unreliable` does not deliver one
+~~`nw.state` is named for a thing it does not do.~~ **This plan was unfair to it.** "State" means
+the current state of a subject sent to whoever should see it, which is what it does; it never
+promised delta compression. What was missing was a docstring saying which of the two it is, not a
+rename.
 
-This is the decision the milestone turns on. A delta is only meaningful against the state the
-receiver actually has, so a dropped delta leaves that client permanently and silently wrong — which
-is the failure mode `RESEARCH §3.7-F` records for the 908-byte limit and §3.8-R for batch death, in
-a form no length prefix can rescue.
+### D-2 — a delta assumes a baseline, and `unreliable` does not deliver one — **answered in phase 2**
 
-Three shapes, and the cost of each has to be measured rather than argued:
+~~Three shapes, and the cost of each has to be measured rather than argued: deltas are reliable /
+acknowledged baselines / periodic snapshots between deltas.~~ **The question was posed wrong.** All
+three are answers to loss on the reliable path, and netweave's reliable path is a `RemoteEvent`,
+which Roblox delivers reliably and in order. A delta netweave hands to the engine arrives.
+Acknowledgements and periodic re-snapshots buy nothing and cost exactly what `PLAN-M3` spent a
+milestone bounding — an upstream packet per client per tick, a baseline history sized by a client.
 
-1. **Deltas are reliable, snapshots are whatever the channel declares.** Simplest, and gives up the
-   one thing `unreliable` buys on positional state.
-2. **Acknowledged baselines.** The client says what it has; the server diffs against that. Correct
-   under loss, and costs an upstream packet per client per tick plus a baseline history — which is
-   memory chosen by a client, and therefore `PLAN-M3` D-6 territory.
-3. **Periodic snapshots between deltas.** Bounded staleness instead of correctness. Cheap, and the
-   staleness window is a number the game has to be told rather than one netweave picks.
+**What can drop a delta is netweave.** `pendingPerBatch` drops the tail of an oversized batch and
+reports it; on a `signal` that is one lost packet, and on a `replicate` it is a client that will
+never be right again. So: **reliable deltas, plus a break detector** — a sequence per client per
+subject, and a client that sees a gap gets a snapshot instead of another delta.
+
+`unreliable` is forbidden on the class rather than merely discouraged (D-1). A game that wants
+lossy positional updates already has `nw.state`, un-delta'd, and that is why the two classes exist.
 
 ### D-3 — what a store adapter has to provide — **answered in phase 1**
 
@@ -140,12 +152,20 @@ Two consequences, both of which close open questions elsewhere in this plan:
   machinery it already has in the optional/flag path. Without that step a patch is an opaque
   payload and the byte case above evaporates.
 
-### D-4 — the audience is dynamic, and that is not a diff
+### D-4 — the audience is dynamic, and that is not a diff — **design answered in phase 2, probe in phase 4**
 
 `nw.audience.nearby(120)` means membership changes as players move. A client entering the radius
 needs a snapshot, not a delta; one leaving needs to be told to forget. So the baseline is per client
 *per subject*, and the transitions are their own packets. This is the part Replica and Charm solve
 differently and the part a naive diff gets silently wrong.
+
+**D-2's break detector already covers it.** A client entering an audience has no baseline, which is
+the same condition as a sequence gap, so one mechanism — "you are out of sync, here is everything" —
+serves a join, a netweave-side drop and an audience transition alike. A client leaving needs its
+baseline dropped, which is the same code as a disconnect.
+
+The probe the plan asked for here needs baselines to exist, so it moves to phase 4 rather than being
+written against nothing.
 
 ### D-5 — the framerate gap is measured before it is chased
 
@@ -228,23 +248,52 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
       author's newer `Replica` is a rewrite with a different surface. The adapter phase has to
       decide which it targets, and that decision needs the seam to exist first.
 
-### Phase 2 — the decisions that gate the code
+### Phase 2 — the decisions that gate the code — **done**
 
-- [ ] Answer **D-1** in `DESIGN-API.md`. Nothing is written until this is decided.
-- [ ] Answer **D-2** with a measurement, not a preference: implement the reliable-delta shape, measure it, then measure at least one alternative against it.
-- [ ] Answer **D-4** with a probe — a subject moving in and out of a `nearby` audience while its state changes, asserting the client's view is correct at every step.
+- [x] **D-1 answered in `DESIGN-API.md` §3**: a seventh class, `nw.replicate`, on three independent
+      arguments — no method in common with `nw.state`, opposite sides of the reliability trade, and
+      different server memory. `nw.state` keeps its name; this plan was unfair to it.
+- [x] ~~Answer **D-2** with a measurement, not a preference: implement the reliable-delta shape,
+      measure it, then measure at least one alternative against it.~~ **The question was posed
+      wrong, and finding that out cost nothing to build.**
+
+      All three shapes answer loss on the reliable path, and netweave's reliable path is a
+      `RemoteEvent` — Roblox delivers it reliably and in order. There is nothing to measure between
+      an answer to a real problem and two answers to a problem the transport does not have.
+
+      What the framing missed is that **netweave is the thing that drops deltas**: `pendingPerBatch`
+      takes the tail of an oversized batch, which is one lost packet on a `signal` and a permanently
+      wrong client on a `replicate`. Reliable deltas plus a **break detector** — a sequence per
+      client per subject, a gap answered with a snapshot.
+- [x] **D-4's design answered by the same mechanism**, which is the part worth having: a client
+      entering an audience has no baseline, a client that missed a packet has a stale one, and a
+      client that just joined has neither — three conditions, one path.
+- [ ] ~~Answer **D-4** with a probe.~~ **Moved to phase 4**, where baselines exist to probe. Writing
+      it here would mean writing it against nothing.
 
 ### Phase 3 — the diff
 
+- [ ] **`Ir` derives a patch layout from a state layout** — every field optional, plus a removal
+      bit. Phase 1 named this as the real work: the codec is schema-driven and the schema describes
+      `PlayerState`, not a *patch of* `PlayerState`, so without this step a patch is an opaque
+      payload and the byte case against `delta-compress` evaporates.
 - [ ] `Delta.luau`: a structural diff over the lowered IR, emitting through L1's existing writers. A field that did not change costs its flag bit and nothing else.
-- [ ] Deletion needs a sentinel the schema cannot produce — Charm Sync uses a `__none` marker; netweave has a flag scope and should not need a magic value. Decide and write down which.
+- [x] ~~Deletion needs a sentinel the schema cannot produce — Charm Sync uses a `__none` marker;
+      netweave has a flag scope and should not need a magic value. Decide and write down which.~~
+      **Closed in phase 1: none needed.** Charm needs `__none` because it rides Roblox's default
+      serialisation, where `nil` and absent are the same thing. A flag scope makes "removed" one bit.
 - [ ] `ir_runtime`-style property test: for every schema in the ceiling suite, `apply(baseline, diff(baseline, next))` equals `next`.
 
 ### Phase 4 — baselines, bounded
 
-- [ ] `Baseline.luau`: what each client has, per subject.
+- [ ] `Baseline.luau`: what each client has, per subject, **with a sequence number** — phase 2's
+      break detector (D-2). A client whose sequence has a gap is sent a snapshot rather than another
+      delta.
 - [ ] A declared limit on it, in `Config`, in the same shape as `queueCapacity` — and a refusal that reports rather than grows.
 - [ ] `forget` on disconnect, tested the way the M3 queue drop was: interleaved subjects, one player leaves, assert nothing of theirs survives.
+- [ ] **D-4's probe, moved here from phase 2**: a subject moving in and out of a `nearby` audience
+      while its state changes, asserting the client's view is correct at every step — and that a
+      join, a `pendingPerBatch` drop and an audience entry all take the same resnapshot path.
 
 ### Phase 5 — the seam and the adapters
 
