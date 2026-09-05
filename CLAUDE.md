@@ -41,7 +41,7 @@ src/                          netweave itself
   netweave.luau               the public surface: `nw`
   types/                      the type vocabulary
   codec/                      Buffer (bytes), Ir (lowering + layout), Serdes (closures)
-  replication/                Delta (what changed), Baseline (what each client already has)
+  replication/                Delta (what changed), Baseline (what each client has), Store (the seam)
   api/                        channel classes, policies, trust, context, views, namespaces
   transport/                  the wire: batching, budgets, audience evaluation, dispatch
 tests/                        *_ok / *_reject / *_runtime, plus run.server.luau
@@ -225,6 +225,7 @@ lune run tests/fuzz_runtime
 lune run tests/example_runtime
 lune run tests/delta_runtime
 lune run tests/baseline_runtime
+lune run tests/store_runtime
 lune run tools/messages       # every error( in src/api names the fix, not the rule
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
