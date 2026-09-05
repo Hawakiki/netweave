@@ -322,6 +322,31 @@ local byTypeof: typeof(shots) = shots
 byCast.client.fired:send({ x = 1 })
 byTypeof.client.fired:send({ x = 2 })
 
+--[[
+	**An optional payload keeps its brand**, which is the pair of type functions that lost it.
+
+	`T?` is a union, and both `Trust.branded` and `View.brandedAs` tested `value:is("table")` alone —
+	false for a union — so a `signal` whose data is `t.optional(struct)` handed its handler a plain
+	table and `nw.Trusted<Req?>` reduced to `Req?`. The two coincided: untrusted client data reached
+	a parameter annotated for trusted data with no cast anywhere to grep for (M4 report).
+
+	The two branding sites are copies — a type function's body cannot reach another module's value —
+	so this is what holds them together. If either drifts, this assignment stops compiling.
+]]
+local optionals = nw.namespace("optionals", {
+	menu = nw.signal({ data = t.optional(t.struct({ screen = t.u8 })), rate = 10 }),
+})
+
+optionals.server.menu:listen(function(_ctx, payload)
+	local _asDeclared: nw.Untrusted<{ screen: number }?> = payload
+
+	--[[ And the brand survives the narrowing an optional forces a game to write. ]]
+	if payload then
+		local _narrowed: nw.Untrusted<{ screen: number }> = payload
+		local _screen: number = payload.screen
+	end
+end)
+
 local _verdict: nw.Verdict = nw.allow()
 local _denied: nw.Verdict = nw.deny("out of range")
 

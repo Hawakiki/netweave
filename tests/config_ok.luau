@@ -68,6 +68,31 @@ local snapshot = nw.configure({ rules = { queue = "off" } })
 local _severity: string = snapshot.rules.queue
 local _capacity: number = snapshot.limits.queueCapacity
 
+--[[
+	**The exported type, used to build the argument it names.**
+
+	`nw.Settings` could not do that until M4: every field it declares is optional, `CheckedSettings`
+	tested each one for a bare tag, and `:is("table")` is false for a union — so
+	`local s: nw.Settings = { ... }; nw.configure(s)` was a type error reading "`rules` takes a table
+	of rules, got that". The only file that called `nw.configure` at all was the rejection file,
+	where a diagnostic is what success looks like: the same shape as the M3 phase 0 incident that put
+	"write the `_ok` half" in `CLAUDE.md` §9, found a second time by M4's security report.
+
+	A game writes this when its settings come from somewhere other than the call site — a module, a
+	place-dependent table, a function that builds them.
+]]
+local declared: nw.Settings = {
+	rules = { budget = "warn" },
+	limits = { queueCapacity = 64 },
+	contextGuard = false,
+}
+
+nw.configure(declared)
+
+--[[ And the sections on their own, which is what a game assembling settings from parts holds. ]]
+local limits: nw.Settings = { limits = { pendingPerBatch = 128, baselinesPerClient = 512 } }
+nw.configure(limits)
+
 nw.config.reset()
 
 return true

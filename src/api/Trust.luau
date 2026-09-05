@@ -92,17 +92,65 @@ local Trust = {}
 	parameter rather than none. Wrap a scalar in a one-field struct if you want the brand on it.
 	:::
 ]=]
-export type function Trusted(payload)
+--[[
+	**A union is branded component by component, and until M4 it was not branded at all.**
+
+	`T?` is a union, and the test that guarded these functions was `value:is("table")` — false for a
+	union, so an optional payload came back untouched. A `signal` whose `data` is
+	`t.optional(t.struct({ ... }))` handed its handler a plain `{ screen: number }?`, and
+	`nw.Trusted<Req?>` reduced to `Req?` as well, so the two coincided: untrusted client data reached
+	a parameter annotated for trusted data **with no cast to grep for** (M4 report).
+
+	The documented limit was "scalar payloads are unbranded", which is still true and is a different
+	sentence: `Trusted<number>` is `number` because Luau normalises the intersection of a primitive
+	and a table to `never`, which would satisfy every parameter rather than none. An optional table
+	is not a scalar, and there was never a reason for it to be exempt.
+
+	Branding each table component and rebuilding the union keeps the narrowed case working too:
+	`if r then authoritative(r) end` narrows to the branded table, so the brand survives the `if`
+	the payload's optionality forces a game to write.
+]]
+type function branded(payload, name)
 	local value = types.copy(payload)
 
-	if not value:is("table") then
-		return value
+	local function tagged(inner)
+		local tag = types.newtable()
+		tag:setproperty(types.singleton(name), types.singleton(true))
+		return types.intersectionof(inner, tag)
 	end
 
-	local tag = types.newtable()
-	tag:setproperty(types.singleton("__nwTrusted"), types.singleton(true))
+	if value:is("table") then
+		return tagged(value)
+	end
 
-	return types.intersectionof(value, tag)
+	if value:is("union") then
+		local rebuilt = nil
+		local marked = false
+
+		for _, component in value:components() do
+			local part = component
+
+			if component:is("table") then
+				part = tagged(component)
+				marked = true
+			end
+
+			rebuilt = if rebuilt then types.unionof(rebuilt, part) else part
+		end
+
+		--[[ A union with no table in it is a scalar union — `number | string` — and the caution
+		     above applies to it whole. Returning the copy rather than the rebuilt one keeps that
+		     case byte-identical to what it was. ]]
+		if marked and rebuilt then
+			return rebuilt
+		end
+	end
+
+	return value
+end
+
+export type function Trusted(payload)
+	return branded(payload, "__nwTrusted")
 end
 
 --[=[
@@ -120,16 +168,7 @@ end
 	:::
 ]=]
 export type function Untrusted(payload)
-	local value = types.copy(payload)
-
-	if not value:is("table") then
-		return value
-	end
-
-	local tag = types.newtable()
-	tag:setproperty(types.singleton("__nwUntrusted"), types.singleton(true))
-
-	return types.intersectionof(value, tag)
+	return branded(payload, "__nwUntrusted")
 end
 
 --[[
@@ -175,14 +214,9 @@ export type function TrustedPayload(schema)
 		error(advice)
 	end
 
-	if not payload:is("table") then
-		return payload
-	end
-
-	local tag = types.newtable()
-	tag:setproperty(types.singleton("__nwTrusted"), types.singleton(true))
-
-	return types.intersectionof(payload, tag)
+	--[[ `nw.validate(t.optional(S), v)` returned an unbranded value for the same reason `Trusted`
+	     did, so it goes through the same helper. ]]
+	return branded(payload, "__nwTrusted")
 end
 
 --[[

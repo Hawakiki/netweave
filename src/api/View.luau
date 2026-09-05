@@ -51,17 +51,51 @@ local View = {}
 	call across modules — it has only the `types` library. The two must agree, and
 	`tests/api_ok.luau` asserts they do by assigning one to the other.
 ]]
+--[[
+	The same rule as `Trust.luau`'s `branded`, and a copy rather than a call: a type function's body
+	cannot reach a value from another module, so `Trust.Trusted` is not callable from in here. The
+	two are held together by `tests/api_ok.luau`, which asserts a handler's parameter is assignable
+	to `nw.Untrusted<Req?>` — if either copy drifts, that stops compiling.
+
+	Why it handles a union: `T?` is one, and testing `value:is("table")` alone left an optional
+	payload unbranded, so a `signal` handed its handler a value that satisfied a `Trusted<Req?>`
+	parameter (M4 report). Each table component is branded and the union rebuilt, which keeps the
+	brand across the `if r then` a game has to write anyway.
+]]
 type function brandedAs(payload, name)
 	local value = types.copy(payload)
 
-	if not value:is("table") then
-		return value
+	local function tagged(inner)
+		local tag = types.newtable()
+		tag:setproperty(types.singleton(name), types.singleton(true))
+		return types.intersectionof(inner, tag)
 	end
 
-	local tag = types.newtable()
-	tag:setproperty(types.singleton(name), types.singleton(true))
+	if value:is("table") then
+		return tagged(value)
+	end
 
-	return types.intersectionof(value, tag)
+	if value:is("union") then
+		local rebuilt = nil
+		local marked = false
+
+		for _, component in value:components() do
+			local part = component
+
+			if component:is("table") then
+				part = tagged(component)
+				marked = true
+			end
+
+			rebuilt = if rebuilt then types.unionof(rebuilt, part) else part
+		end
+
+		if marked and rebuilt then
+			return rebuilt
+		end
+	end
+
+	return value
 end
 
 type function channelView(channel, side)

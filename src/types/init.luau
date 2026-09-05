@@ -151,14 +151,40 @@ export type Type<T> = {
 	```
 ]=]
 export type function PayloadOf(ty)
+	--[[ Asked before `readproperty`, which raises its own message on a non-table — `type.readproperty:
+	     expected self to be either a table, but got number instead` — printed verbatim at the call
+	     site in a game's declaration file, where nothing about it names netweave or the fix. ]]
+	local advice = "PayloadOf takes a netweave type and extracts what it carries: "
+		.. "t.PayloadOf<typeof(ShotType)>, where ShotType came from t.struct, t.u8 or t.array. "
+		.. "A payload type is what comes out of it, not what goes in."
+
+	if not ty:is("table") then
+		error(advice)
+	end
+
 	local payload = ty:readproperty(types.singleton("__payload"))
 
 	if not payload then
-		error("expected a netweave type")
+		error(advice)
 	end
 
 	return payload
 end
+
+--[[
+	**The Q5 instantiation, which this type function needed and did not have.**
+
+	`spike/declare/README.md` Q5, measured again by M4's security report: an `export type function`
+	that its own module never references does not reduce for a module that requires it. It becomes an
+	error type — silently — so `type Shot = t.PayloadOf<typeof(ShotType)>` named nothing, and
+	`local wrong: Shot = { origin = "no" }` compiled. Every game function annotated with the alias
+	the docstring above prescribes was unchecked.
+
+	`StructPayload` and `EnumPayload` never had the problem because `t.struct` and `t.enum` name them
+	in their own signatures. `PayloadOf` is the one nothing else in this file mentions, and one
+	reference is enough. `Trust.luau` carries the same two lines for the same reason.
+]]
+type _instantiatePayloadOf = PayloadOf<Type<{ probe: boolean }>>
 
 --[=[
 	@type StructPayload<F> F

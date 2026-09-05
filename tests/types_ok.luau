@@ -124,4 +124,28 @@ local _shot: Type<{ origin: Vector3, direction: Vector3, seq: number }> = shot
 local _descriptorFromType: t.Descriptor = (nil :: any) :: t.Type<unknown>
 local _concreteIsDescriptor: t.Descriptor = t.u8
 
+--[[
+	**`PayloadOf`, written the way its own docstring prescribes.**
+
+	It is the one `export type function` in `src/types/init.luau` that the module never referenced,
+	and per `spike/declare/README.md` Q5 that means it did not reduce for anyone requiring the
+	module: the alias became an error type, silently, so every game function annotated with it was
+	unchecked and `t.PayloadOf<number>` printed nothing where it should have said "expected a
+	netweave type". A local instantiation in the module fixes it, and this is the half that proves
+	the fix — a `_reject` file cannot, because the failure *removed* diagnostics.
+]]
+local Shot = t.struct({ origin = t.vector3, seq = t.u16 })
+
+type ShotPayload = t.PayloadOf<typeof(Shot)>
+
+local _shot: ShotPayload = { origin = Vector3.new(1, 2, 3), seq = 4 }
+
+--[[ And through a channel's declared schema, which is where a game actually reaches for it: the
+     handler's parameter and the alias have to be the same type. ]]
+local function handle(payload: ShotPayload): number
+	return payload.seq
+end
+
+local _seq: number = handle({ origin = Vector3.zero, seq = 9 })
+
 return nil

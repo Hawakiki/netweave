@@ -344,9 +344,44 @@ export type function CheckedSettings(spec, snapshot)
 		return value:is("number")
 	end
 
+	--[[
+		**Every field this function reads is declared optional, so every field it reads is a union.**
+
+		`Settings.rules` is `Rules?`, `Limits.queueCapacity` is `number?`, `contextGuard` is
+		`boolean?`. Against a table *literal* that never showed: `{ limits = { queueCapacity = 32 } }`
+		gives properties typed `table` and `number`. Against a value typed with the library's own
+		exported types it shows immediately — `local s: nw.Settings = { ... }; nw.configure(s)` was a
+		type error saying "`rules` takes a table of rules, got that", because `:is("table")` is false
+		for a union and `named()` has no word for one either.
+
+		The exported type could not build the argument it names, and the only file that called
+		`nw.configure` at all was the rejection file, where a diagnostic is what success looks like.
+		That is the `nw.configure` incident of M3 phase 0 in a second form, and M4's report is what
+		found it (`tools/exports.luau` now requires an `_ok` for every exported type, which is what
+		closes it for good).
+
+		Stripping `nil` is the whole fix: what is left is the type the field would have had if it
+		were required, and every test below already handles that.
+	]]
+	local function present(value: any): any
+		if not value or not value:is("union") then
+			return value
+		end
+
+		local rest = nil
+
+		for _, component in value:components() do
+			if not component:is("nil") then
+				rest = if rest then types.unionof(rest, component) else component
+			end
+		end
+
+		return rest
+	end
+
 	local function values(container: any, field: any, ok: any, expected: any)
 		for key, property in container:properties() do
-			local value: any = property.read
+			local value: any = present(property.read)
 
 			if value and not ok(value) then
 				local name: any = (key :: any):value()
@@ -358,7 +393,7 @@ export type function CheckedSettings(spec, snapshot)
 	reject(settings, "setting", sections)
 
 	local function section(name: any, field: any, allowed: any, ok: any, expected: any)
-		local declared: any = settings:readproperty(types.singleton(name))
+		local declared: any = present(settings:readproperty(types.singleton(name)))
 
 		if not declared then
 			return
@@ -375,7 +410,7 @@ export type function CheckedSettings(spec, snapshot)
 	section("rules", "rule", ruleNames, isSeverity, `a severity: "off", "warn" or "error"`)
 	section("limits", "limit", limitNames, isNumber, "a number")
 
-	local guard: any = settings:readproperty(types.singleton("contextGuard"))
+	local guard: any = present(settings:readproperty(types.singleton("contextGuard")))
 
 	if guard and not guard:is("boolean") then
 		error(`nw.configure: \`contextGuard\` takes a boolean, got {named(guard)}`)
