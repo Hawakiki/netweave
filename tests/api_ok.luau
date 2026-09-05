@@ -289,6 +289,39 @@ end)
 	findings rather than gaps: `nw.Views`, `nw.Settings` and `t.PayloadOf` cannot be annotated
 	correctly today.
 ]]
+--[[
+	**How a namespace is written down, and the one spelling that must not be used.**
+
+	`nw.Views<D>` names what `nw.namespace` returns. Three of the four ways to write it keep every
+	guarantee; the fourth — an annotated local with a value assigned into it — makes the file stop
+	reporting anything about that namespace, retroactively. It is pinned as a canary at the end of
+	`tests/api_reject.luau`, and the caution is on `View.Views` where a game reads it.
+
+	What this section is for is the other three: they are what the documentation tells a game to
+	write, so they are what has to keep compiling.
+]]
+local shots = nw.namespace("shots", {
+	fired = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow }),
+})
+
+--[[ A parameter, which is the shape a game reaches for first: a module that takes the namespace
+     rather than requiring it. ]]
+local function attach(namespace: nw.Views<typeof(shots.channels)>)
+	namespace.server.fired:listen(function(_ctx, payload)
+		local _read: number = payload.x
+	end)
+end
+
+attach(shots)
+
+--[[ A cast, and `typeof` — the two spellings for a local. Both keep the views typed; the cast is
+     the one to reach for when the type has to be named. ]]
+local byCast = shots :: nw.Views<typeof(shots.channels)>
+local byTypeof: typeof(shots) = shots
+
+byCast.client.fired:send({ x = 1 })
+byTypeof.client.fired:send({ x = 2 })
+
 local _verdict: nw.Verdict = nw.allow()
 local _denied: nw.Verdict = nw.deny("out of range")
 

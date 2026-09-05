@@ -222,13 +222,15 @@ do
 		`t.f32(-90, 90)` in the section above survived only because 90 is exactly representable,
 		which is why the suite never saw this: every bound it used was dyadic.
 	]]
+	--[[ The scalar rather than a struct around it: `t.struct` reads its fields at analysis, and a
+	     schema arriving through an `any` parameter is not one it can read. ]]
 	local function bound(name: string, descriptor: any, value: number)
-		local codec = Serdes.fromSchema(t.struct({ v = descriptor }))
+		local codec = Serdes.fromSchema(descriptor)
 
 		Buffer.take()
 		Buffer.load(nil)
 
-		local wrote = pcall(codec.write, value and { v = value })
+		local wrote = pcall(codec.write, value)
 
 		if not wrote then
 			Buffer.load(nil)
@@ -244,7 +246,7 @@ do
 			return
 		end
 
-		check(`{name} arrives within a rounding of what was sent`, math.abs(back.v - value) < 1e-6)
+		check(`{name} arrives within a rounding of what was sent`, math.abs(back - value) < 1e-6)
 	end
 
 	bound("an f32 upper bound of pi", t.f32(-math.pi, math.pi), math.pi)

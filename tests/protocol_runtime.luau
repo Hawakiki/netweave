@@ -803,38 +803,73 @@ do
 		with the hash asserted to move. A seventh class that adds an eighth codec fails here until it
 		is described.
 	]]
-	local function replicated(subject: any, data: any): (number, string)
+	--[[ Each declaration is written out rather than built from parameters: `nw.replicate`'s
+	     `subject` and `data` are read by type functions at analysis, and a schema arriving through an
+	     `any` parameter is not a schema they can read. The four cases differ by one field each. ]]
+	local function shapeOf(channels: { [string]: any }): (number, string)
 		Namespace.reset()
 
-		local declared = Namespace.declare("shape", {
-			mirrored = nw.replicate({
-				subject = subject,
-				data = data,
-				audience = nw.audience.everyone,
-				store = nw.store.of({}),
-			}),
-		})
-
+		local declared = Namespace.declare("shape", channels)
 		local protocol = Namespace.seal()
+
 		return protocol.hash, Protocol.signatureOf(declared.channels.mirrored)
 	end
 
-	local payload = t.struct({ n = t.u8 })
-	local base, baseText = replicated(t.u16, payload)
+	local base, baseText = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
 
-	local narrowed, narrowedText = replicated(t.u8, payload)
+	local narrowed, narrowedText = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u8,
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
 	differs("narrowing the subject moves the hash", narrowed, base)
 	differs("and the signature says so", narrowedText, baseText)
 
-	local restructured = replicated(t.struct({ a = t.u8, b = t.u8 }), payload)
+	local restructured = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.struct({ a = t.u8, b = t.u8 }),
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
 	differs("so does changing its shape entirely", restructured, base)
 
 	--[[ The control: the schema that was always covered still moves it, so a hash that moves for
 	     everything would not pass this section either. ]]
-	local moved = replicated(t.u16, t.struct({ n = t.u16 }))
+	local moved = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.u16 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
 	differs("the data schema still moves it too", moved, base)
 
-	equals("and the same declarations still hash the same", (replicated(t.u16, payload)), base)
+	local again = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	equals("and the same declarations still hash the same", again, base)
 
 	--[[ The patch layout is derived from `data`, so it cannot move on its own — what it earns is a
 	     cross-check: two peers whose data schemas somehow agreed while their derivations did not

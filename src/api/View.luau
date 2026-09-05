@@ -275,6 +275,29 @@ end
 	does **not** reduce for a module that requires it. It becomes `any`, with no diagnostic — so
 	`combat.server.fireWeapon:send(...)` would compile, and every direction violation in
 	`tests/api_reject.luau` would stop erroring while the file still claimed to test them.
+
+	**And there is one way to write it down that does the same thing.** `local ns: Views<D> = <a
+	namespace>` — an annotated local with a value assigned into it — makes the file stop reporting
+	anything about `ns`, retroactively and to the end of the file. Measured at
+	`--flag:LuauSolverV2=true` against the same declarations, counting the two diagnostics a
+	direction violation and a wrong-typed handler produce:
+
+	  | written as | diagnostics |
+	  |---|---|
+	  | no annotation | 2 |
+	  | `type V = Views<D>`, never assigned through | 2 |
+	  | `local v = ns :: Views<D>` | 2 |
+	  | `local v: Views<D>` with no value | 2 |
+	  | `local v: typeof(ns) = ns` | 2 |
+	  | a parameter typed `Views<D>`, called with `ns` | 2 |
+	  | **`local v: Views<D> = ns`** | **0** |
+
+	Six spellings keep the guarantees and one removes them, so the answer is to write one of the six
+	— a parameter, a cast, or `typeof` — and `tests/api_ok.luau` pins all three. The seventh is
+	pinned as a canary at the end of `tests/api_reject.luau`: it holds two statements that should
+	error, the header count says they do not, and if the count ever moves to 25 this caution can come
+	off. Found by M4's security report, which also found the reason nothing had caught it: no file in
+	`tests/` had ever written `Views<` at all.
 ]]
 export type Views<D> = {
 	name: string,

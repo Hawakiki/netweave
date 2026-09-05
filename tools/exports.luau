@@ -72,8 +72,6 @@ local SURFACES = {
 	check below fails if a listed name turns out to be covered, so the list cannot outlive the gap.
 ]]
 local UNCOVERED: { [string]: string } = {
-	["nw.Views"] = "M4 report, 중대: annotating with it erases G3, G6 and every payload type. "
-		.. "Covering it needs the type function fixed first, or the _ok file stops compiling.",
 	["nw.Settings"] = "M4 report, 위험: CheckedSettings refuses any argument typed nw.Settings, "
 		.. "because every field is optional and the check tests for the bare tag.",
 	["t.PayloadOf"] = "M4 report, 위험: never reduces across a require, so an annotation using it is "
