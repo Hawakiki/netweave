@@ -221,6 +221,21 @@ The shared plan's closing rule, adopted. It is not rhetoric here: measured on th
 `transport_runtime` is at 14% failure-path assertions and `ir_runtime` at 13%. A rule nobody counts
 is a rule nobody keeps, so phase 6 lands a counter and the acceptance criteria name a number.
 
+**Landed in phase 6, with two things the decision did not say.**
+
+The counter tags per **section**, not per assertion, and the two numbers are therefore not
+comparable: the 14% above was counted by reading assertions one at a time. A hostile case is written
+as a block — craft the bytes, feed them in, then assert the bad packet was refused *and that the
+ones behind it still arrived*. That middle assertion asserts a success and tests a failure, and
+tagging it per line invites arguing every one. Per section is also the granularity at which the
+ratio cannot be moved by relabelling. `transport_runtime` reads 59% under the new counter.
+
+And the rule applies to files whose job is refusal, which is not every file. `ir_runtime`'s 13% is
+not a gap: lowering a schema has one correct answer and no adversary, and padding it with refusal
+cases to reach a number would be the failure mode of every metric. The floors live in the four files
+the acceptance criteria name, declared in the file the way `-- netweave:expect N` is, so a floor
+someone lowered is a floor in the diff.
+
 
 ### D-11 — Settings are ESLint-shaped, and a severity cannot reach enforcement
 
@@ -481,14 +496,31 @@ evidence the claim is not merely unexamined:
 
 ### Phase 6 — the adversarial suite
 
-- [ ] `tests/hostile_runtime.luau`: every refusal path in `Batch`, `Inbound`, `Budget` and the
-      readers, driven by crafted bytes rather than by API calls
-- [ ] `tests/fuzz_runtime.luau`: structured mutation of valid batches — bit flips, truncation,
-      length and count corruption, id substitution, sidecar overstatement, replayed frames
-- [ ] The invariant is uniform: **the receive path never throws, and never loses a packet it did
-      not report losing**
-- [ ] A harness counter reports failure-path against success-path assertions per file, and the
-      suite fails when a security-relevant file falls under parity (D-10)
+- [x] `tests/hostile_runtime.luau`: every refusal path in `Batch`, `Inbound`, `Budget` and the
+      readers, driven by crafted bytes rather than by API calls. 135 assertions, 99% failure-path.
+- [x] `tests/fuzz_runtime.luau`: structured mutation of valid batches — bit flips, byte
+      substitution, truncation, noise appended, id substitution, sidecar over- and under-statement,
+      replayed frames, and whole-batch noise. 10,000 rounds on a printed seed.
+- [x] The invariant is uniform: **the receive path never throws, and never loses a packet it did
+      not report losing**. Both are asserted per case in `hostile_runtime` — for the three failures
+      that stop a batch, the report's byte count is asserted to equal exactly what was discarded —
+      and per round in `fuzz_runtime`.
+- [x] Two invariants the plan did not ask for and that turned out to be the valuable ones. **A
+      value that reaches a handler must satisfy its own schema**, checked with `codec.check` on
+      every delivery: a mutated batch may decode into a *different* valid value, and must never
+      decode into an invalid one. And **a canary batch after every mutation must still arrive**,
+      which is the only thing that would catch a sticky rejection, a stranded cursor or a
+      half-consumed sidecar, because every other suite starts from a clean decoder.
+- [x] A harness counter reports failure-path against success-path assertions per file, and the suite
+      fails when a file falls under the floor it declares (D-10). `tests/harness.luau`.
+- [x] **Found by the fuzzer:** an unknown control kind on reserved id 0 was stepped over in
+      silence — the only exception to "nothing vanishes" in 10,000 rounds. It is reported at `parse`
+      now. The forward-compatibility argument for silence lost to this milestone's rule that nothing
+      on the receive path is silent, and the repeat suppression already caps what saying so costs.
+- [x] **Found while writing the hostile cases:** a two-variant enum has no unrepresentable tag. One
+      bit, and both values name a variant, so the extra bits a hostile peer sets are masked off and
+      what comes out is legal. Not a defect — but a test that thought it was writing an invalid tag
+      was testing nothing, and three variants is where the case actually lives.
 
 ### Phase 7 — the learning curve
 

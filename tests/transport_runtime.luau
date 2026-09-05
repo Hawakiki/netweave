@@ -25,26 +25,25 @@ local Observer = require("../src/api/Observer")
 local Outbound = require("../src/transport/Outbound")
 local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
+local harness = require("./harness")
 local t = require("../src/types")
 
-local failures = 0
+--[[
+	The sections below are tagged failure- or success-path, and the file declares a floor
+	(`PLAN-M3` D-10).
 
-local function fail(message: string)
-	failures += 1
-	print(`FAIL  {message}`)
-end
+	The tag is per section because that is the granularity these tests are written at. A G5 case
+	crafts one bad packet among three and then asserts three things: the bad one was refused, the
+	other two arrived, and the batch did not stop. All three are assertions about **failure
+	isolation** — the middle one asserts a success but tests what happens when something goes wrong,
+	and calling it success-path would be reading the assertion instead of the test.
 
-local function check(name: string, condition: boolean)
-	if not condition then
-		fail(name)
-	end
-end
-
-local function equals(name: string, actual: any, expected: any)
-	if actual ~= expected then
-		fail(`{name}: expected {tostring(expected)}, got {tostring(actual)}`)
-	end
-end
+	What is genuinely success-path is here too, and is tagged so: framing arithmetic, the fan-out,
+	the audience resolution, the coalescing. Those are the file's other half and the reason its floor
+	is not the 0.95 `budget_runtime` declares.
+]]
+local suite = harness.suite("transport_runtime", 0.5)
+local check, equals = suite.check, suite.equals
 
 --[[ A channel is a plain record to this layer: an id and a codec. Building them by hand rather
      than through `nw.namespace` keeps these tests about the envelope. ]]
@@ -132,6 +131,8 @@ end
 -- Framing
 -- ---------------------------------------------------------------------------------------------
 
+suite.passing()
+
 do
 	equals("a fixed schema frames statically", Fixed.codec.framing, "static")
 	equals("and knows its size", Fixed.codec.fixedSize, 3)
@@ -189,6 +190,8 @@ end
 -- The length reservation, widened
 -- ---------------------------------------------------------------------------------------------
 
+suite.passing()
+
 do
 	reset()
 
@@ -239,6 +242,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- Isolation — guarantee G5
 -- ---------------------------------------------------------------------------------------------
+
+suite.failing()
 
 do
 	reset()
@@ -366,6 +371,8 @@ end
 -- Budget refusal happens before the payload is read
 -- ---------------------------------------------------------------------------------------------
 
+suite.failing()
+
 do
 	reset()
 
@@ -390,6 +397,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- The instance sidecar
 -- ---------------------------------------------------------------------------------------------
+
+suite.passing()
 
 do
 	reset()
@@ -437,6 +446,8 @@ do
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
 
 	local packed, instances = Buffer.take()
+
+	suite.failing()
 
 	--[[ Corrupt the first packet's `n` past its declared bound, so it is refused after having
 	     been about to consume a sidecar entry. ]]
@@ -556,6 +567,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- Outbound
 -- ---------------------------------------------------------------------------------------------
+
+suite.passing()
 
 --[[ A loopback link. Everything the real one does to a `RemoteEvent`, recorded instead. ]]
 type Sent = { reliable: boolean, destination: any, packed: buffer, instances: { any } }
@@ -961,6 +974,8 @@ end
 -- Inbound
 -- ---------------------------------------------------------------------------------------------
 
+suite.passing()
+
 local function inboundOf(isServer: boolean, deny: { [string]: string }): (Inbound.Inbound, { string })
 	local reported: { string } = {}
 
@@ -1020,6 +1035,8 @@ end
 
 do
 	reset()
+
+	suite.failing()
 
 	--[[ A policy that denies stops the handler and reports at the authorize stage. The packet
 	     decoded and was in budget; what refused it was the game's own rule. ]]
@@ -1119,6 +1136,8 @@ end
 -- Intent coalescing
 -- ---------------------------------------------------------------------------------------------
 
+suite.passing()
+
 do
 	reset()
 
@@ -1176,6 +1195,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- The listener-less queue
 -- ---------------------------------------------------------------------------------------------
+
+suite.failing()
 
 do
 	reset()
@@ -1351,6 +1372,8 @@ end
 -- A policy is game code, and game code does not get the batch (PLAN-M3 D-1)
 -- ---------------------------------------------------------------------------------------------
 
+suite.failing()
+
 do
 	reset()
 
@@ -1412,6 +1435,8 @@ end
 -- A verdict is `ok == true` or it is a refusal (PLAN-M3 D-2)
 -- ---------------------------------------------------------------------------------------------
 
+suite.failing()
+
 do
 	reset()
 
@@ -1472,6 +1497,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- A raising policy does not leak the context (PLAN-M3 D-1)
 -- ---------------------------------------------------------------------------------------------
+
+suite.failing()
 
 do
 	reset()
@@ -1541,6 +1568,8 @@ end
 -- Every channel has a byte ceiling, and the game declared none of it (PLAN-M3 D-5)
 -- ---------------------------------------------------------------------------------------------
 
+suite.failing()
+
 do
 	reset()
 
@@ -1598,6 +1627,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- A batch cannot hold more than it is allowed to (PLAN-M3 D-6)
 -- ---------------------------------------------------------------------------------------------
+
+suite.failing()
 
 do
 	reset()
@@ -1754,10 +1785,6 @@ do
 end
 reset()
 
-if failures > 0 then
-	error(`{failures} transport assertions failed`)
-end
-
-print("OK      transport_runtime")
+suite.finish()
 
 return true

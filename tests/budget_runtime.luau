@@ -17,25 +17,18 @@
 ]]
 
 local Budget = require("../src/transport/Budget")
+local harness = require("./harness")
 
-local failures = 0
+--[[
+	Every section below is failure-path, and that is not a labelling convenience — it is what this
+	module is. A rate limiter's job is refusal, and an assertion that the twentieth packet was
+	admitted is the near side of the boundary the twenty-first is refused at; the two are counted by
+	the same loop and cannot be separated without pretending. `PLAN-M3` D-10.
+]]
+local suite = harness.suite("budget_runtime", 0.95)
+local check, equals, fail = suite.check, suite.equals, suite.fail
 
-local function fail(message: string)
-	failures += 1
-	print(`FAIL  {message}`)
-end
-
-local function check(name: string, condition: boolean)
-	if not condition then
-		fail(name)
-	end
-end
-
-local function equals(name: string, actual: any, expected: any)
-	if actual ~= expected then
-		fail(`{name}: expected {tostring(expected)}, got {tostring(actual)}`)
-	end
-end
+suite.failing()
 
 local clock = 0
 
@@ -472,10 +465,6 @@ do
 	equals("a declared burst outranks the floor", admitted, 3)
 end
 
-if failures > 0 then
-	error(`{failures} budget assertions failed`)
-end
-
-print("OK      budget_runtime")
+suite.finish()
 
 return true
