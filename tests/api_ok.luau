@@ -277,4 +277,30 @@ vault.client.inventory:listen(function(subject, value)
 	local _total: number = subject + value.hp + value.gold
 end)
 
+--[[
+	The exported types a game writes down, written down.
+
+	`tools/exports.luau` requires every `export type` on the public surface to appear in a file that
+	must compile, and these three had no such file — not because they are broken but because nothing
+	had ever annotated them. That is the same gap `nw.configure` shipped through in M3 phase 0, and
+	the reason the rule is "write the `_ok` half" rather than "write a test".
+
+	The ones still missing are listed in `tools/exports.luau` with the reason, and three of them are
+	findings rather than gaps: `nw.Views`, `nw.Settings` and `t.PayloadOf` cannot be annotated
+	correctly today.
+]]
+local _verdict: nw.Verdict = nw.allow()
+local _denied: nw.Verdict = nw.deny("out of range")
+
+local diagnostics: nw.Diagnostics = nw.diagnostics()
+local _refusals: number = diagnostics.total
+
+--[[ A tally is reached through the diagnostics rather than built, so this is the annotation a game
+     writes when it walks them — one channel, one stage, one count. ]]
+for _, byStage in diagnostics.channels do
+	for _, tally: nw.Tally in byStage do
+		local _count: number = tally.count
+	end
+end
+
 return nil

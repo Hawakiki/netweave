@@ -229,6 +229,7 @@ lune run tests/baseline_runtime
 lune run tests/store_runtime
 lune run tests/replication_runtime
 lune run tools/messages       # every error( in src/api names the fix, not the rule
+lune run tools/exports        # every public type is written in an _ok file, or listed as a gap
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike
@@ -282,11 +283,17 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
 under the floor it declares. Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
 90%, `transport_runtime` 66%, and the rule behind the number is §9.
 
-Two checks read source off disk rather than running it, which is why they live outside `src/` and
+Three checks read source off disk rather than running it, which is why they live outside `src/` and
 `tests/` — the analyzer walks those two roots and cannot resolve `@lune/fs`:
 
 - `tools/messages.luau` — every `error(` in `src/api/` names the fix, and the worked example in
   `docs/DESIGN-API.md` is the same text as the one `tests/example_runtime.luau` runs
+- `tools/exports.luau` — every `export type` on the public surface is written down in a
+  `tests/*_ok.luau`, or named in that file's `UNCOVERED` list with the reason it cannot be. The list
+  fails in both directions, so it shrinks as gaps close and cannot quietly grow. M4's security
+  report found three exported types that no `_ok` file had ever annotated — `nw.Views<D>`,
+  `nw.Settings` and `t.PayloadOf` — and all three were broken in a way a `_reject` file cannot see,
+  because each *removes* diagnostics rather than adding one.
 - `bench/check.luau` — everything under `bench/` parses
 
 A rejection file that stops erroring means a guarantee has silently stopped being enforced. That
