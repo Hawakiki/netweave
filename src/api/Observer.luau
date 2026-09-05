@@ -81,6 +81,7 @@ export type Stage =
 	| "protocol"
 	| "query"
 	| "direction"
+	| "replicate"
 
 --[=[
 	@interface Rejection

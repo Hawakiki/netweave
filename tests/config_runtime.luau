@@ -441,7 +441,7 @@ do
 
 	local described = Config.describe()
 
-	equals("every rule is listed", #described, 10)
+	equals("every rule is listed", #described, 11)
 	equals("sorted", described[1].rule, "authorize")
 
 	local wire = 0
@@ -455,7 +455,10 @@ do
 		equals(`{row.rule} reports its live severity`, row.severity, Config.severityOf(row.rule))
 	end
 
-	equals("nine of the ten are wire rules", wire, 9)
+	--[[ `replicate` joined them in M4 phase 4. It is a wire rule in the sense that decides here —
+	     it cannot raise — even though what crosses the line is the game's own volume rather than a
+	     peer's; raising on the send path mid-tick would take down the frame that noticed. ]]
+	equals("ten of the eleven are wire rules", wire, 10)
 end
 
 -- ---------------------------------------------------------------------------------------------
