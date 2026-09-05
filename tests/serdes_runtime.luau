@@ -204,6 +204,66 @@ do
 	trip("floats are not narrowed", t.f32(-90, 90), -90, 4)
 end
 
+do
+	--[[
+		**A bound an f32 cannot hold, sent back at that bound.**
+
+		The writer validates the double the game passed against the bounds it declared, then
+		`buffer.writef32` rounds — and if the bound is not itself an f32 value the rounding can land
+		outside it. `t.f32(-pi, pi)` refused pi at `parse`, against its own sender, on a value it had
+		accepted one line earlier: f32(pi) is 3.14159274 and pi is 3.14159265.
+
+		Measured before the fix: **2,054 of 4,000** random f32 ranges refused their own bounds when
+		sent back. The bound is also the value a game sends most often, because it is what
+		`math.clamp(yaw, -math.pi, math.pi)` produces. `trip` cannot express this case — the value
+		that comes back is deliberately not the value that went in — so the assertion is that it
+		arrives at all, and within a rounding of where it was sent.
+
+		`t.f32(-90, 90)` in the section above survived only because 90 is exactly representable,
+		which is why the suite never saw this: every bound it used was dyadic.
+	]]
+	local function bound(name: string, descriptor: any, value: number)
+		local codec = Serdes.fromSchema(t.struct({ v = descriptor }))
+
+		Buffer.take()
+		Buffer.load(nil)
+
+		local wrote = pcall(codec.write, value and { v = value })
+
+		if not wrote then
+			Buffer.load(nil)
+			fail(`{name}: the encoder refused a value inside the declared range`)
+			return
+		end
+
+		Buffer.beginRead((Buffer.take()), nil)
+		local back, failure = codec.read()
+
+		if failure then
+			fail(`{name}: decode rejected with "{failure}"`)
+			return
+		end
+
+		check(`{name} arrives within a rounding of what was sent`, math.abs(back.v - value) < 1e-6)
+	end
+
+	bound("an f32 upper bound of pi", t.f32(-math.pi, math.pi), math.pi)
+	bound("an f32 lower bound of -pi", t.f32(-math.pi, math.pi), -math.pi)
+	bound("an f32 upper bound of 0.1", t.f32(0, 0.1), 0.1)
+	bound("an f32 upper bound of 0.3", t.f32(0, 0.3), 0.3)
+	bound("a dyadic bound, which always worked", t.f32(0, 1), 1)
+	bound("and f64, which is exact for a double", t.f64(0, 0.1), 0.1)
+
+	--[[ Widening the reader's bound must not widen the *writer's*: the declared range is the
+	     author's contract and a value outside it is still a programmer error. ]]
+	refuses(
+		"a value past a non-representable bound is still refused",
+		t.f32(-math.pi, math.pi),
+		math.pi + 0.01
+	)
+	refuses("and one below it", t.f32(-math.pi, math.pi), -math.pi - 0.01)
+end
+
 trip("a fixed string has no prefix", t.string(4, 4), "abcd", 4)
 trip("a bounded string is prefixed", t.string(0, 200), "hello", 6)
 trip("an empty bounded string", t.string(0, 200), "", 1)

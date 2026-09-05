@@ -59,6 +59,16 @@ local function sized(count: number): any
 	return table.create(count)
 end
 
+--[[ A double put through the rounding `buffer.writef32` will do to it. Four bytes of scratch rather
+     than the outgoing buffer, because this runs while closures are being built and the outgoing
+     buffer may be holding a batch. ]]
+local rounding = buffer.create(4)
+
+local function asF32(value: number): number
+	buffer.writef32(rounding, 0, value)
+	return buffer.readf32(rounding, 0)
+end
+
 local function isFinite(value: number): boolean
 	--[[ `value == value` is the NaN test; a rejected NaN would otherwise pass a range check by
 	     failing every comparison in the wrong direction. ]]
@@ -1046,6 +1056,29 @@ local function numberReader(node: Node): Reader
 	local storage = node.storage
 
 	if storage == "f32" or storage == "f64" then
+		--[[
+			**The bound the reader compares against is the one the encoding can hold.**
+
+			The writer validates the value the game passed, as a double, against the bounds the game
+			declared — that is the author's contract and it stays exact. Then `buffer.writef32`
+			rounds, and if the bound itself is not an f32 value the rounding can land *outside* it:
+			f32(pi) is 3.14159274 against pi's 3.14159265, so `t.f32(-pi, pi)` refused pi at
+			`parse`, against its own sender, on a value the writer had just accepted.
+
+			It is not an edge: 2,054 of 4,000 random f32 ranges refused their own bounds when sent
+			back, and the clamped value a game sends — `math.clamp(yaw, -math.pi, math.pi)` — is
+			exactly the one that lands there. The worked example's `t.f32(-90, 90)` survived only
+			because 90 happens to be dyadic.
+
+			Rounding to nearest is monotone, so comparing against `f32(min)` and `f32(max)` accepts
+			everything the writer accepted and nothing wider than one ulp beyond the declaration.
+			`f64` is exact for a double and is left alone.
+		]]
+		if storage == "f32" then
+			min = asF32(min)
+			max = asF32(max)
+		end
+
 		return function(_flags: Flags): any
 			local value = read()
 
