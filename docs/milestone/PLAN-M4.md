@@ -189,8 +189,14 @@ framerate alone could not have said:
   not** (§3.11-GG). One table lookup moved to build time is worth 1.6x on the whole packet.
 
 The answer is `Serdes.fusedStructWriter` — one claim per struct, offsets computed at declaration,
-unrolled to eight fields, every primitive named. 1.9x measured, 1.28x of Blink predicted against
-criterion 5's 1.30x bar, and the Studio run is what settles it.
+unrolled to eight fields, every primitive named. 1.9x under lune and 1.31x in Studio, both measured.
+
+~~1.28x of Blink predicted against criterion 5's 1.30x bar, and the Studio run is what settles it.~~
+**The Studio run settled it the other way: 85 FPS against 133, 1.56x, unmoved.** So D-5's own
+instruction — the gap is measured before it is chased — was followed on the *component* and skipped
+on the *frame*: a probe that takes one packet apart can prove the codec got faster and say nothing
+about the frame it lives in. The fourth question this phase should have asked, and did not, is what
+else is in that frame.
 
 ## 6. Tasks
 
@@ -587,9 +593,10 @@ API to write an example against.
       were 45-47% of the *pre-M2* encode, which is real and was never going to be 1.55x.
 - [x] **Decided, and against the number.** `Serdes.fusedStructWriter`: a struct whose fields are all
       fixed-size numbers claims its bytes once and writes them at offsets computed at declaration,
-      unrolled to eight fields with the general loop behind it. 23,992 → 12,741 ns per packet,
-      **1.9x**, which predicts **84 → about 101 FPS, 1.28x of Blink against criterion 5's 1.30x
-      bar.** The prediction is in `bench/RESULTS.md` before the Studio run that checks it.
+      unrolled to eight fields with the general loop behind it. 23,992 → 12,741 ns per packet under
+      lune, **1.9x**, ~~which predicts **84 → about 101 FPS, 1.28x of Blink against criterion 5's
+      1.30x bar**~~ — **wrong, see below.** The prediction went into `bench/RESULTS.md` before the
+      run, which is the only reason it can now be said plainly that it was wrong.
 - [x] **The finding that nearly did not happen.** The probe priced the fix at 2.7x and the first
       implementation delivered 10%. The gap between them is that
       `buffer.writeu8(out, at, value)` **written out** compiles to a fastcall performed inline, and
@@ -610,9 +617,26 @@ API to write an example against.
       where nothing is claimed in advance, all three error messages including one from the sixth
       slot, and the two implementations compared byte for byte on the same fields. Confirmed to bite
       by dropping the declared-minimum subtraction and by breaking one arm of the branch chain.
-- [ ] **Open until Studio runs it.** The 101 FPS is a prediction from a lune probe, not a
-      measurement, and `CLAUDE.md` §9 says a claim is not a number until the instrument that made it
-      is the one being quoted. The M4 matrix is where it is settled.
+- [x] **Studio ran it, and the prediction was wrong.** `bench/runs/2026-09-05-m4p7.json`, 19 of 19
+      runtime modules green in the same Play. `ArrayHeavy` Up: **85** against Blink's 133 —
+      **1.56x**, criterion 5 missed by the margin it was already missed by. netweave's own spread is
+      84..87 and the control group moved 2-4%, so this is not resolution and not the machine.
+- [x] **The optimisation is real; the frame did not care.** Measured on the same VM in the same
+      session: the codec 38,434 → 29,314 ns per packet, **1.31x** (lune said 1.88x), which is
+      1.8-2.3 ms removed from an 11.76 ms frame. The fastcall finding also reproduces on that VM —
+      11,042 named against 18,186 fetched, 1.65x against lune's 1.60x — so the *design* decision
+      stands and only the frame arithmetic falls.
+- [x] **So the profile's frame model is withdrawn.** It predicted a 4.38 ms gap and Studio had
+      measured 4.21 ms; that agreement was read as corroboration and **was a coincidence**. The
+      probe's own caution said what to do with a disagreement, and the disagreement is what arrived.
+      `bench/profile.luau` now reports both numbers and predicts nothing.
+- [ ] **Where the frame actually goes is open, with no measurement behind it.** Leading candidate,
+      *inferred*: Studio Play runs client and server in one process; the server decodes 200
+      `ArrayHeavy` packets a frame in the same budget, and the decode path never took M2's block
+      optimisation. `docs/SECURITY-REPORT-M4.md` measures decode at 2.5x the encode and 4x a
+      hand-rolled reader, and `Buffer.ensure` — written for exactly that — has no caller in `src/`.
+      `raw` finishing last at 30 FPS while serialising nothing points the same way. **Measure before
+      touching anything**: that is the whole lesson of this phase, twice over.
 
 ## 7. Acceptance criteria
 
