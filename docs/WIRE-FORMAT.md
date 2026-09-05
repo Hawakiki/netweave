@@ -258,8 +258,10 @@ including a field widened from `t.u8` to `t.u16`, a channel's class changed, and
 changed with its `args` untouched (`tests/protocol_runtime.luau`).
 
 What goes into the hash is everything both peers need in order to read each other's bytes: the
-qualified name, the class, and the lowered node tree of every schema the channel carries, plus the
-derived framing and size numbers as a cross-check on the lowering itself.
+qualified name, the class, and the lowered node tree of every schema the channel carries — for a
+`replicate` channel that is the **subject as well as the data**, because the subject's bytes come
+first in a change and a peer that reads them narrower is one byte short for every packet on that
+channel — plus the derived framing and size numbers as a cross-check on the lowering itself.
 
 What stays out is everything only one side enforces — `rate`, `burst`, `maxBytes`, `authorize`,
 `audience`, `unreliable`. A hash that moved when a server tuned a rate limit would force a client

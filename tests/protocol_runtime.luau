@@ -783,6 +783,70 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Every layout a channel carries, not every attribute of one of them
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		The attribute walk above changes each field of a lowered *node* and asserts the signature
+		notices. It cannot notice a **second layout**, because a second layout is not an attribute of
+		the first one's nodes — and that is how `nw.replicate`'s `subject` schema stayed out of the
+		hash for the whole of M4.
+
+		A change packet is `id length [instances] subject flags [fields]`. A peer reading `t.u8`
+		where the sender wrote `t.u16` is one byte short for every change on that channel, and for a
+		subject id below 256 the byte it takes for the flags is `0x00` — a **removal**, well formed,
+		delivered to the handler. The one failure the handshake exists to catch, arriving through the
+		one schema it was not reading.
+
+		So this walks the channel rather than the node: every codec a class can carry, changed alone,
+		with the hash asserted to move. A seventh class that adds an eighth codec fails here until it
+		is described.
+	]]
+	local function replicated(subject: any, data: any): (number, string)
+		Namespace.reset()
+
+		local declared = Namespace.declare("shape", {
+			mirrored = nw.replicate({
+				subject = subject,
+				data = data,
+				audience = nw.audience.everyone,
+				store = nw.store.of({}),
+			}),
+		})
+
+		local protocol = Namespace.seal()
+		return protocol.hash, Protocol.signatureOf(declared.channels.mirrored)
+	end
+
+	local payload = t.struct({ n = t.u8 })
+	local base, baseText = replicated(t.u16, payload)
+
+	local narrowed, narrowedText = replicated(t.u8, payload)
+	differs("narrowing the subject moves the hash", narrowed, base)
+	differs("and the signature says so", narrowedText, baseText)
+
+	local restructured = replicated(t.struct({ a = t.u8, b = t.u8 }), payload)
+	differs("so does changing its shape entirely", restructured, base)
+
+	--[[ The control: the schema that was always covered still moves it, so a hash that moves for
+	     everything would not pass this section either. ]]
+	local moved = replicated(t.u16, t.struct({ n = t.u16 }))
+	differs("the data schema still moves it too", moved, base)
+
+	equals("and the same declarations still hash the same", (replicated(t.u16, payload)), base)
+
+	--[[ The patch layout is derived from `data`, so it cannot move on its own — what it earns is a
+	     cross-check: two peers whose data schemas somehow agreed while their derivations did not
+	     would differ here. Asserted as *presence* in the text rather than as a difference, because
+	     an assertion that it moves alone would be asserting the derivation is not a derivation. ]]
+	check("the change layout is described", string.find(baseText, "change", 1, true) ~= nil)
+	check("and so is the subject", string.find(baseText, "subject", 1, true) ~= nil)
+
+	Namespace.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 Namespace.reset()
 

@@ -24,7 +24,11 @@
 	  * the qualified name, because that is what the id is sorted from
 	  * the class, because a peer that thinks a channel is a `signal` where this one thinks it is a
 	    `command` is running a different program
-	  * the lowered node tree of every schema the channel carries — `data`, or `args` and `returns`
+	  * the lowered node tree of every schema the channel carries — `data`, or `args` and `returns`,
+	    and for `replicate` the **`subject`** as well as the patch layout derived from `data`. That
+	    sentence was true of the code for every class but the seventh: `subject` was left out for the
+	    whole of M4, so two builds differing only in it hashed identically while one of them read a
+	    change one byte short (M4 phase 8, and `Protocol.signatureOf`)
 	  * the derived layout numbers, which are a cross-check: if two peers' node trees somehow agree
 	    while their framing or their maximum size does not, the lowering itself has diverged
 
@@ -185,6 +189,33 @@ function Protocol.signatureOf(channel: any): string
 
 	describeLayout("data", channel.codec and channel.codec.layout, out)
 	describeLayout("returns", channel.responseCodec and channel.responseCodec.layout, out)
+
+	--[[
+		**The subject is on the wire, so it is in the hash.**
+
+		A change packet is `id length [instances] subject flags [fields]` (`WIRE-FORMAT.md` §2): the
+		subject's bytes come first and the patch is read at whatever offset they end. A peer that
+		reads `t.u8` where the sender wrote `t.u16` is one byte short for every change on that
+		channel, forever — and for a subject id below 256 the byte it reads as the flags is `0x00`,
+		which is a **removal**: a well-formed packet, delivered to the handler, saying a subject went
+		away. Nothing refuses it.
+
+		Until M4 phase 8 this walked `data` and `returns` only, so two builds differing only in
+		`subject` hashed identically and printed byte-identical signatures. That is exactly the
+		failure class M3 phase 5 closed for field types (`PLAN-M3` D-7), reproduced by the class M4
+		added — which is the argument for describing every *layout* a channel carries rather than
+		listing the ones that existed when this was written.
+
+		`tests/protocol_runtime.luau` walks node attributes and could not see it: a second layout is
+		not an attribute of the first one's nodes.
+	]]
+	describeLayout("subject", channel.subjectCodec and channel.subjectCodec.layout, out)
+
+	--[[ The patch layout is derived from `data` and cannot disagree with it while the derivation is
+	     the same on both peers — so this is a cross-check on the derivation rather than a second
+	     schema, in the same spirit as the framing and size numbers `describeLayout` already ends
+	     each line with. ]]
+	describeLayout("change", channel.delta and channel.delta.layout, out)
 
 	return table.concat(out)
 end
