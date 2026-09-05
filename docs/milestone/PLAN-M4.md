@@ -739,6 +739,24 @@ they are struck through.
       mutations — the declared bound in place of the one f32 holds (2 failures), the eighth slot
       comparing the first field's bounds (1), and `span` not bounding the run (the truncation case
       *and* 72 of 4,200 fuzzed payloads raising, which is G4).
+- [x] **`Context.acquire` looked the character up for every packet, and now looks when something
+      reads it.** It runs per packet and read `.Character` and searched its children for a `Humanoid`
+      on every one — whether or not the channel had a policy, and whether or not the handler ever
+      asked. The comment justifying that was about sharing one lookup between the *policies* of one
+      request, which is right and still happens; paying for it on a request nobody asks is what the
+      report found. Both fields are computed together on either one's first read, so a policy that
+      wants one has already paid for the other, and each acquisition still gets its own answer — a
+      deferral, not a cache.
+- [x] The report filed that one as **inferred**. `tests/api_runtime.luau` makes it measured, and
+      counts rather than times it: a `FindFirstChildOfClass` is a Roblox call lune does not have, so
+      a clock would be timing a stand-in, where "how many times netweave asked" is the claim itself
+      and is the same number in both places. Twenty packets nobody looked at: **20 property reads and
+      20 tree searches before, 0 after**. A packet that does read: one of each, covering both fields.
+      Confirmed by restoring the eager lookup (5 failures) and by never clearing the flag, which
+      turns the deferral into a cache (1).
+- [x] `Context.detached` stays eager, and that is the class paying rather than an oversight: a query
+      has already cost a coroutine, a round trip and a reply packet, and its record is frozen so a
+      lazy field could not cache into it anyway.
 
 ## 7. Acceptance criteria
 
