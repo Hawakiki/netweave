@@ -100,6 +100,11 @@ local clientIn = Inbound.new({
 	isServer = false,
 })
 
+--[[ Whatever was installed goes back at the end. The benchmark place runs this suite and then the
+     matrix in one session, so leaving it uninstalled would send everything after this file into a
+     hole — the same reason `tests/api_runtime.luau` saves it. ]]
+local previous = Transport.peek()
+
 Transport.uninstall()
 Transport.install({
 	send = function(channel: any, value: any)
@@ -257,6 +262,11 @@ check("so broadcast does not exist on it", (combat.server :: any).loadout.broadc
 -- ---------------------------------------------------------------------------------------------
 
 Transport.uninstall()
+
+if previous then
+	Transport.install(previous)
+end
+
 Namespace.reset()
 Observer.reset()
 
