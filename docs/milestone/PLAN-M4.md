@@ -364,11 +364,64 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
       baseline, and without the drop the re-entering client is silently missing it. `CLAUDE.md` §9:
       a regression test is confirmed against the code it is written for.
 
-### Phase 5 — the seam and the adapters
+### Phase 5 — the seam and the adapters — **done**
 
-- [ ] `Store.luau` — the interface D-3 answered.
-- [ ] An adapter for Charm and one for Replica, each with a runtime test that replicates a real change through the real library.
-- [ ] The worked example in `DESIGN-API.md` gains a replication half, and `tools/messages.luau` checks it the way it checks the existing one.
+- [x] `Store.luau` — `subjects`, `read`, and an **optional** `changed`. Three constructors:
+      `Store.of` for a plain table, `Store.charm` for an atom and Charm's own `subscribe`, and
+      `Store.replica` for `Replica.Data`.
+- [x] **D-3's answer is refined by having built phases 3 and 4, and the refinement is worth naming.**
+      Phase 1 concluded "netweave is the transport a replication library plugs into", because
+      `charm-sync` already diffs and wants `connect(onSync)`. One step too far: **netweave adapts
+      the store, not the store's replication layer.**
+
+      Carrying `charm-sync`'s `SyncPayload` would mean moving an arbitrarily shaped patch table
+      through a schema-driven codec — as an opaque blob, which is exactly what phase 1 warned
+      throws the byte case away. `charm` underneath it is an atom and a `subscribe`, which is a
+      value and a signal, and that is all `Baseline` and `Delta` need. netweave **replaces**
+      `charm-sync` rather than riding it, and replaces ReplicaService's six RemoteEvents the same
+      way.
+- [x] **`changed` is optional, and that is the finding rather than a convenience.** Charm can say
+      when something moved (`charm/packages/charm/src/init.luau:821`); ReplicaService cannot — the
+      game calls `SetValue` and nothing observes it server-side (`ReplicaService.lua:403`). A seam
+      that required a change signal would have supported one of the two libraries it was designed
+      for. A store that cannot say is polled once a tick, which the transport does anyway — and the
+      polling is also the win, because six mutations in one frame are six RemoteEvent calls per
+      player under ReplicaService and one batched patch under netweave.
+- [x] netweave **never requires either library**. The game passes Charm's own `subscribe`, so the
+      adapter is a shape rather than a dependency — which is also the only thing `CLAUDE.md` §8
+      leaves available, there being no package path.
+- [x] ~~a runtime test that replicates a real change through the real library~~ — **not a test this
+      repository can have, and saying so is better than a test that looks like coverage.** Charm and
+      ReplicaService are in `_refsrc/`: read-only, gitignored, and forbidden to import from (§2).
+      A test requiring them would run on one machine and nowhere else.
+
+      `tests/store_runtime.luau` does what `tests/harness.luau` does for Instances under lune —
+      a stand-in that answers exactly what the code under test asks, with the real library's file
+      and line beside each so the shape can be checked against the source rather than against
+      memory. 42 assertions, and the last section is a real test rather than a shape check: the
+      seam driving an actual diff against actual baselines, including a subject appearing, one
+      going away, and a tick where nothing moved sending nothing.
+
+### Phase 5b — the public class and the transport
+
+**The plan omitted this and the omission is the point.** `nw.replicate` is in §3's scope table
+against `src/api/Channel.luau` and `src/netweave.luau`, and **no phase schedules it** — phase 3 is
+the diff, 4 is baselines, 5 is the seam, 6 is the hostile suite. Everything L3 needs to *work* was
+built and nothing declares it. Found by trying to write phase 5's third task, which needs a public
+API to write an example against.
+
+- [ ] `nw.replicate` in `Channel.luau`: required `data`, `audience`, `store`; forbidden `rate`,
+      `burst`, `maxBytes`, `authorize` and — the one that matters — `unreliable` (D-1).
+- [ ] The view: `:listen(value)` on the client, and **no `publish`** on the server, because the
+      store is the only way in. That absence is the class's whole argument made mechanical.
+- [ ] The tick: for each subject the store lists, for each client the audience admits, a snapshot
+      when they have no baseline and a patch when they do. `Outbound` already batches it.
+- [ ] **Wire the client's own `budget` rejection into `Baseline.desync`** — phase 4's break
+      detector, whose whole point is that the receiver already knows when netweave dropped
+      something. This is the packet that asks for a resnapshot.
+- [ ] The worked example in `DESIGN-API.md` gains a replication half, and `tools/messages.luau`
+      checks it the way it checks the existing one. *(Moved here from phase 5; it cannot be written
+      against an API that does not exist.)*
 
 ### Phase 6 — the hostile half
 
