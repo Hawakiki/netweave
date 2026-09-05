@@ -356,6 +356,10 @@ for mode, adapter in adapters do
 			down = down,
 			fireAll = fireAll,
 			encodeBytesPerPacket = encodeAlloc.bytesPerCall,
+			--[[ The spread, so a cell whose median is where the collector happened to run announces
+			     itself in the document rather than in the next milestone's plan (`Alloc.luau`). ]]
+			encodeBytesLow = encodeAlloc.low,
+			encodeBytesHigh = encodeAlloc.high,
 			encodeAllocSamples = encodeAlloc.usableSamples,
 			encodeAllocRepeats = encodeAlloc.repeats,
 		}
