@@ -331,7 +331,43 @@ local results = {
 	versions = {},
 	unavailable = unavailable,
 	cells = {},
+
+	--[[
+		The control group, filled in below.
+
+		A frame window contains a real engine frame, so Studio's own allocation — rendering,
+		physics, replication — is inside every encode cell. This measures a frame that sends
+		nothing, in the same units and with the same window count, so the engine's share is a number
+		in the run document rather than an unknown inside each cell. A cell whose median is not
+		comfortably above this one is measuring Studio (M4 phase 0).
+
+		`CLAUDE.md` §9: when a number looks like a change, the first question is what the code that
+		did not change did in the same run. Here the code that did not change is the engine.
+	]]
+	idle = {},
 }
+
+do
+	--[[ Before any mode runs, so no library's leftovers are still draining into it. ]]
+	local idleFrame = function()
+		RunService.PostSimulation:Wait()
+	end
+
+	local idle = Alloc.frames(idleFrame, Config.PACKETS_PER_FRAME, Config.ALLOC_WINDOWS)
+
+	results.idle = {
+		bytesPerPacket = idle.bytesPerCall,
+		bytesLow = idle.low,
+		bytesHigh = idle.high,
+		allocSamples = idle.usableSamples,
+		allocWindows = idle.repeats,
+	}
+
+	print(
+		`[bench] idle frame: {idle.bytesPerCall} B per packet-equivalent, `
+			.. `{idle.usableSamples}/{idle.repeats} windows`
+	)
+end
 
 for mode, adapter in adapters do
 	(results.versions :: any)[mode] = adapter.version
@@ -343,12 +379,25 @@ for mode, adapter in adapters do
 		local payload = adapter.payloads[schema]
 
 		--[[
-			Encode allocation. Bound to the exact payload so no wrapper closure allocates on top
-			of what the library does (PLAN-M0 R-3).
+			Encode allocation, one frame per window.
+
+			Built once, outside the measurement, so no closure is allocated per window — and bound to
+			the exact payload so no wrapper allocates on top of what the library does (PLAN-M0 R-3).
+
+			The `Wait` is the whole point rather than pacing: it ends the frame, so netweave's
+			`PostSimulation` flush and every competitor's equivalent run *inside* the window. Without
+			it the probe measures an outgoing buffer that is never emptied, which is what the M3
+			matrix was reporting (M4 phase 0, `bench/src/shared/Alloc.luau`).
 		]]
-		local encodeAlloc = Alloc.measure(function()
-			fire(payload)
-		end, Config.ALLOC_ITERATIONS, Config.ALLOC_REPEATS)
+		local encodeFrame = function()
+			for _ = 1, Config.PACKETS_PER_FRAME do
+				fire(payload)
+			end
+
+			RunService.PostSimulation:Wait()
+		end
+
+		local encodeAlloc = Alloc.frames(encodeFrame, Config.PACKETS_PER_FRAME, Config.ALLOC_WINDOWS)
 		drain()
 
 		local up = runUp(mode, adapter, schema)

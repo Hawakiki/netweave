@@ -326,6 +326,91 @@ That is a limit of the instrument and it is not fixed by running it again. What 
 per-frame window rather than a per-packet one — measured under lune in phase 9 at 400 usable windows
 out of 400 with a spread of zero — and porting that to Studio is M4's, not this run's.
 
+## M4 phase 0: the instrument, rebuilt on the send side
+
+`bench/runs/2026-09-05-m4p0-a.json` and `-b.json`, the same tree run twice. **This section is about
+the harness, not about any library** — M3 closed with the allocation column unable to tell a change
+from the collector, and M4 cannot measure delta compression on an instrument like that.
+
+### What was wrong
+
+The encode probe called `fire` five thousand times back to back and **never let a frame end**. For a
+batching library that means nothing is ever flushed: the payloads pile into one outgoing buffer that
+grows by doubling, so most calls allocate nothing and a handful allocate a block the size of
+everything before them. The median of twenty-five windows over that is a lottery on where the
+doublings landed.
+
+The window is one frame now, ending in a yield so every library's own scheduler flushes inside it.
+
+| `ArrayHeavy` encode | M3 instrument | M4 phase 0, run A | run B |
+|---|---|---|---|
+| netweave | 3932.2 <sub>[1311 .. 20972]</sub>, n=4 | **1909.8** <sub>[1884 .. 1925]</sub>, n=326 | **1920.0** |
+| blink | 4039.7 <sub>[2662 .. 6057]</sub>, n=5 | **2718.7** <sub>[2708 .. 2734]</sub>, n=282 | **2729.0** |
+| zap | 3932.2, n=4 | **1920.0** <sub>[1823 .. 1925]</sub>, n=320 | **1920.0** |
+| bytenet | 3722.2, n=7 | **614.4** <sub>[589 .. 625]</sub>, n=373 | **604.2** |
+| raw | no usable window, ever | **10.2** <sub>[5 .. 31]</sub>, n=302 | **10.2** |
+
+Surviving windows went from four-to-eight of twenty-five to **276-385 of 400**, the `ArrayHeavy`
+range from sixteen times to **0.3%**, and the two runs agree to **1.7% or better on every cell**.
+
+**The old numbers were not merely imprecise, they were biased high by a factor of two to six** —
+which is what an unflushed doubling buffer does. Two independent checks say the new ones are right:
+
+- netweave's 1909.8 B agrees with the phase 9 lune probe's **1908.4 B to 0.07%**, from a different
+  runtime through a different code path;
+- `raw`, which does no serialisation at all, lands on **10.24 B** — exactly the idle control group's
+  figure, because all that is left in its window is the engine.
+
+The ranking changed with the precision. The M3 column read blink 4040 / netweave 3932 / zap 3932 /
+bytenet 3722 — four libraries within 8%, which is to say a tie, which is to say noise. What is
+actually there is **bytenet at a third of the field**, netweave and zap together, and blink 42%
+behind them.
+
+### The idle control group
+
+`idle` in the run document is a frame that sends nothing, measured in the same units and window
+count: **10.24 B per packet-equivalent, 400/400 windows**, in both runs. A frame window contains a
+real engine frame, so Studio's own allocation is inside every encode cell and this is how much of
+it. Negligible against `ArrayHeavy`; about a quarter of a flag cell, which is why it is printed
+above the table rather than left implicit.
+
+### What phase 0 tried on the receive side and reverted
+
+The same frame window was applied to decode and then taken back out, because the two costs have
+opposite shapes. An outgoing buffer is still there at the frame boundary; a batch of decoded values
+is not — `inbound.receive` decodes, dispatches and returns its pending list to the pool, so a
+`PostSimulation` sample arrives *after* the peak it is trying to measure.
+
+Settled by measurement rather than argument. One decoded `ArrayHeavy` value is **32,097 bytes** under
+lune, which agrees with phase 9's independent probe to 0.15%:
+
+| `ArrayHeavy` decode, per packet | reported | against 32,097 B |
+|---|---|---|
+| frame boundary | 604 | out by 53x |
+| packet-aligned, inside the callback | ~10,200 | out by 3.2x |
+
+So the decode window stayed where it was. **Both are lower bounds**, because every window the
+collector visited is discarded and the survivors are the ones where it freed the least. Read the
+Studio decode column as "at least this much".
+
+### Where that leaves acceptance 9
+
+`PLAN-M4` criterion 9 asks for two runs of the unchanged tree agreeing within 10% on every cell.
+
+- **Encode `ArrayHeavy`: met**, every library within 1.7%.
+- **Encode flags: at the floor rather than met.** The cells move by one or two steps of 5.12 B,
+  which is 10-33% of a number that is only four to eight steps above zero. `collectgarbage("count")`
+  reports kilobytes, so a frame window resolves to ±1024 B — ±5.12 B per packet at this load — and
+  no arrangement of windows improves on that.
+- **Decode flags: met, and exactly.** 462.848 / 880.64 / 593.92 / 573.44 / 561.152 in both runs, for
+  all five modes, to the decimal.
+- **Decode `ArrayHeavy`: not met.** netweave −13%, blink −17%, zap −4%, bytenet +7.5%. Better than
+  the M3 instrument, where the same two cells moved **76% and 146%**, and still outside the bar.
+
+The criterion stays open on one column, and the reason is now understood rather than merely
+observed: a window large enough to hold a `ArrayHeavy` batch is a window the collector almost always
+visits, and Roblox exposes enough to detect that and not enough to correct for it.
+
 ## Delivery (client to server)
 
 | Cell | Sent | Received |
