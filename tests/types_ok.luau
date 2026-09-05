@@ -166,4 +166,15 @@ end
 
 local _heading: number = heading(_aim)
 
+--[[ `t.string`'s third argument. Annotated rather than written inline so the options table is
+     *checked* — an unannotated literal would be accepted as any table, which is the shape that let
+     `nw.configure` ship refusing every call it was given. ]]
+local _options: t.TextOptions = { utf8 = true, pattern = "[%w_]+" }
+local _named: t.Type<string> = t.string(1, 20, _options)
+
+--[[ And the callable itself, which is the type that carries that parameter: `Ranged<string>` does
+     not, so annotating it that way would compile and then refuse the options at the call site. ]]
+local _text: t.Text = t.string
+local _plain: t.Type<string> = _text(0, 8)
+
 return nil

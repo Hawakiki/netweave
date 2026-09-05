@@ -81,6 +81,11 @@ local ATTRIBUTES: { string } = {
 	"storage",
 	"min",
 	"max",
+	--[[ `t.string(1, 20, { pattern = "%d+" })` and a plain `t.string(1, 20)` are the same bytes and
+	     different protocols: a peer without the pattern accepts what a peer with it refuses. Same
+	     argument as `unit` on a vector, which has always been here. ]]
+	"utf8",
+	"pattern",
 	--[[ `t.quantized(-1, 1, 2 / 254)` and `t.quantized(-1, 1, 2 / 200)` lower to the same storage,
 	     the same bounds and different meanings for every byte on the wire. Without this they hashed
 	     identically and printed byte-identical signatures — the `subject` failure below, in a third

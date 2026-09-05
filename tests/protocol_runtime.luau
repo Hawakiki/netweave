@@ -371,6 +371,8 @@ do
 		lengthStorage = "u16",
 		count = 42,
 		step = 0.25,
+		utf8 = true,
+		pattern = "%d+",
 	}
 
 	local function channelWith(mutate: ((Ir.Node) -> ())?): any

@@ -823,6 +823,24 @@ Studio pass.
       `u53` left on the fused path, which is refused by the unrolled *writer* and taken by the
       unrolled reader — so the case that bites is a fraction forged into a struct's bytes (2).
       `bench/profile` 12,496 and `bench/decode` 21,034 across the whole of this, unmoved.
+- [x] **`t.string(min, max, { utf8, pattern })`** — what a string may *contain*, not only how long it
+      is. Client strings reach `SetAsync` keys, `Instance.Name` and chat, where invalid UTF-8 or a
+      control character surfaces as an error in game code with no packet to point at. Checked on both
+      sides: a raise at the `:send` that wrote it, a refused packet from a peer.
+- [x] **netweave anchors the pattern, and refuses one that carries its own anchor.** An unanchored
+      `"[%w_]+"` accepts anything *containing* a word character, which is the reading that lets
+      everything through; `"^" .. "^%w+$" .. "$"` matches a literal caret, silently, which is why the
+      author's own anchors are refused rather than stripped.
+- [x] The third argument is refused by everything else. `t.u8(0, 10, { utf8 = true })` was accepted
+      and ignored, which looks exactly like an option that worked.
+- [x] `utf8` and `pattern` join the protocol hash for the reason `unit` has always been in it: the
+      same bytes, and a peer without the constraint accepts what a peer with it refuses.
+- [x] Confirmed by mutation: the reader not anchoring (2 failures), the reader not checking UTF-8
+      (2), and `utf8` out of the hash (1). **The UTF-8 mutation did not bite the first time** — the
+      assertion used a schema declaring a pattern *and* `utf8`, and a word-character pattern refuses
+      every byte that is not one, so the two guards covered for each other. That is M3's `maxBytes`
+      incident (§9) in a fourth place, and it is why the mutations are run rather than reasoned
+      about. The assertion now goes through a `utf8`-only schema.
 
 ## 7. Acceptance criteria
 
