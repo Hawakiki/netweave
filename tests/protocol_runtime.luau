@@ -472,6 +472,16 @@ local function sinkOf(record: { Record }): Batch.Sink
 
 		answers = true,
 
+		--[[ Never reached: this file declares no replicated channel. Present because `Sink` is a
+		     closed type, and a stub that raises says so louder than one that quietly does nothing. ]]
+		change = function()
+			error("protocol_runtime declares no replicated channel")
+		end,
+
+		resync = function()
+			error("protocol_runtime declares no replicated channel")
+		end,
+
 		admit = function(): (string?, string?)
 			return nil, "budget"
 		end,

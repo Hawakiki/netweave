@@ -40,6 +40,15 @@ local REFUSED = "this client is already holding the most replication baselines t
 	.. "baselinesPerClient limit allows, so this subject is sent whole instead of as a change. "
 	.. "Raise the limit, or replicate fewer subjects to each player"
 
+--[[ The peer on the other end of a client's connection has no `Player` to be keyed by, and `nil` is
+     not a table key. This stands in for "the server" on the client's side and cannot collide with a
+     `Player` — the same sentinel, for the same reason, as `src/api/Protocol.luau`. ]]
+local SERVER: any = table.freeze({})
+
+local function keyOf(who: any?): any
+	return if who == nil then SERVER else who
+end
+
 type Subjects = { [any]: any }
 type Channels = { [any]: Subjects }
 
@@ -67,24 +76,37 @@ export type Baseline = {
 --[=[
 	@within Baseline
 	@function new
+	@param bounded boolean? -- whether `baselinesPerClient` applies; true unless said otherwise
 	@return Baseline
 
 	One store. The driver holds a single instance; a test holds its own.
+
+	:::caution
+	**The server's is bounded and the client's is not**, and the asymmetry is deliberate. On the
+	server this is memory sized by how many people join, which is what `baselinesPerClient` exists
+	for. On the client it is what the server chose to send — already bounded, by that limit, at the
+	other end — and refusing to remember one here would not save anything, it would make the next
+	change unreadable.
+
+	Bounded is the default because forgetting to ask for it on the server is an unbounded leak,
+	where forgetting to turn it off on the client is a loud desync.
+	:::
 ]=]
-function Baseline.new(): Baseline
+function Baseline.new(bounded: boolean?): Baseline
+	local limited = bounded ~= false
 	local records: { [any]: Channels } = {}
 
 	--[[ Counted rather than walked. The limit is read on every `keep`, so recomputing the size each
 	     time would make the bound cost more than the thing it bounds. ]]
 	local counts: { [any]: number } = {}
 
-	local function channelsOf(who: any): Channels
-		local channels = records[who]
+	local function channelsOf(key: any): Channels
+		local channels = records[key]
 
 		if not channels then
 			channels = {}
-			records[who] = channels
-			counts[who] = 0
+			records[key] = channels
+			counts[key] = 0
 		end
 
 		return channels
@@ -92,7 +114,7 @@ function Baseline.new(): Baseline
 
 	return {
 		of = function(who: any, channel: any, subject: any): any
-			local channels = records[who]
+			local channels = records[keyOf(who)]
 
 			if not channels then
 				return nil
@@ -103,7 +125,8 @@ function Baseline.new(): Baseline
 		end,
 
 		keep = function(who: any, channel: any, subject: any, value: any): boolean
-			local channels = channelsOf(who)
+			local key = keyOf(who)
+			local channels = channelsOf(key)
 			local subjects = channels[channel]
 
 			if not subjects then
@@ -118,9 +141,7 @@ function Baseline.new(): Baseline
 				return true
 			end
 
-			local limit = Settings.limitOf("baselinesPerClient")
-
-			if counts[who] >= limit then
+			if limited and counts[key] >= Settings.limitOf("baselinesPerClient") then
 				--[[
 					Refused, and what that costs is a *snapshot every tick* for this subject and
 					this client rather than a patch — correct and expensive, which is how a bound
@@ -134,12 +155,13 @@ function Baseline.new(): Baseline
 			end
 
 			subjects[subject] = value
-			counts[who] = counts[who] + 1
+			counts[key] = counts[key] + 1
 			return true
 		end,
 
 		drop = function(who: any, channel: any, subject: any)
-			local channels = records[who]
+			local key = keyOf(who)
+			local channels = records[key]
 
 			if not channels then
 				return
@@ -152,14 +174,15 @@ function Baseline.new(): Baseline
 			end
 
 			subjects[subject] = nil
-			counts[who] = counts[who] - 1
+			counts[key] = counts[key] - 1
 		end,
 
 		--[[ Everything this client had on this channel, gone. The next tick therefore sends
 		     snapshots, which is the resnapshot path D-2's break detector and D-4's audience entry
 		     both end in — one mechanism, reached three ways. ]]
 		desync = function(who: any, channel: any)
-			local channels = records[who]
+			local key = keyOf(who)
+			local channels = records[key]
 
 			if not channels then
 				return
@@ -178,19 +201,20 @@ function Baseline.new(): Baseline
 			end
 
 			channels[channel] = nil
-			counts[who] = counts[who] - held
+			counts[key] = counts[key] - held
 		end,
 
 		--[[ They left. Tested the way `PLAN-M3` tested the queue drop, because it is the same
 		     defect waiting in a different table: state that outlives the connection that justified
 		     it. ]]
 		forget = function(who: any)
-			records[who] = nil
-			counts[who] = nil
+			local key = keyOf(who)
+			records[key] = nil
+			counts[key] = nil
 		end,
 
 		held = function(who: any): number
-			return counts[who] or 0
+			return counts[keyOf(who)] or 0
 		end,
 
 		reset = function()

@@ -21,6 +21,7 @@
 	and one bad packet must not take it (`DESIGN-API.md` G4, G5).
 ]]
 
+local Baseline = require("../replication/Baseline")
 local Batch = require("./Batch")
 --[[ Aliased, because this module already exports a type named `Config` for its own constructor
      options and two `Config`s in one file is a reading hazard even where Luau permits it. ]]
@@ -47,6 +48,16 @@ local Inbound = {}
      Stored on the queue itself, because changing the limit must not desynchronise the ring
      arithmetic of a queue that already exists. ]]
 local DEFAULT_QUEUE_CAPACITY = 256
+
+--[[ Constant like every other refusal reason, and reached only by an endpoint that was handed a
+     replicated channel without anywhere to keep what the other end has — which is a wiring mistake
+     rather than anything a peer can provoke. ]]
+local NO_BASELINES = "a replicated packet arrived at an endpoint with no baseline store, so there "
+	.. "is nothing to fold it into. Pass `baselines` to Inbound.new"
+
+--[[ A peer asked for a channel that is not replicated, or is not a channel at all. Constant,
+     because it is the one thing about replication a hostile peer can send at will. ]]
+local NOT_REPLICATED = "a peer asked to be resynchronised on an id that is not a replicated channel"
 
 --[[ Constant because a flood is exactly when it is said. It used to carry `dropped {n} so far`,
      which allocated a string per dropped packet to print a number three times — the repeat
@@ -78,6 +89,14 @@ export type Config = {
 	--[[ Who has agreed on the declarations. Absent, every peer is taken at its word — which is what
 	     a test that is not about the handshake wants. ]]
 	agreement: Protocol.Agreement?,
+	--[[ What each peer has, per replicated subject. On a client this is what arrived; on a server
+	     it is what was sent, and the same store serves both because "the other end has this" is
+	     one fact seen from two directions. Absent, a replicated packet is reported and dropped. ]]
+	baselines: Baseline.Baseline?,
+	--[[ Called when a replicated packet was refused, which means this endpoint's picture of that
+	     channel is now unknowable. The driver wires it to the packet that asks for everything
+	     again; a test that does not care leaves it out and the baseline is simply cleared. ]]
+	desynced: ((channel: any) -> ())?,
 }
 
 export type Inbound = {
@@ -132,6 +151,10 @@ type Pending = {
 	channels: { any },
 	senders: { any },
 	values: { any },
+	--[[ Which replicated value this is. Its own array rather than packed into `values`, because
+	     packing would allocate a table per packet on the one path whose whole argument is that it
+	     does not. Empty for every other class. ]]
+	subjects: { any },
 	sizes: { number },
 	calls: { number },
 	statuses: { number },
@@ -143,6 +166,7 @@ local function emptyPending(): Pending
 		channels = {},
 		senders = {},
 		values = {},
+		subjects = {},
 		sizes = {},
 		calls = {},
 		statuses = {},
@@ -161,6 +185,8 @@ function Inbound.new(config: Config): Inbound
 	local admit = config.admit
 	local isServer = config.isServer
 	local queries = config.queries
+	local baselines = config.baselines
+	local onDesync = config.desynced
 	local agreement = config.agreement
 
 	--[[
@@ -210,6 +236,29 @@ function Inbound.new(config: Config): Inbound
 
 	local function report(channel: any, who: any?, stage: Observer.Stage, reason: string, bytes: number)
 		Observer.emit(if channel then channel.qualified else "?", who, stage, reason, bytes)
+	end
+
+	--[[
+		Everything this endpoint believed about a replicated channel, given up.
+
+		A change is only meaningful against the value it was computed from, so a change that did not
+		arrive — refused at any stage, for any reason — makes every change after it unreadable. There
+		is no partial recovery and no way to notice later: the values would simply be wrong.
+
+		So the baseline goes and the other end is asked to start again. `PLAN-M4` D-2 called this a
+		break detector and expected a sequence number on the wire to find the gap; there is none,
+		because **this endpoint already knows** — it is the one that refused the packet.
+	]]
+	local function desync(channel: any)
+		local store = baselines
+
+		if store then
+			store.desync(sender, channel)
+		end
+
+		if onDesync then
+			onDesync(channel)
+		end
 	end
 
 	--[[
@@ -332,15 +381,26 @@ function Inbound.new(config: Config): Inbound
 		serving.answer(channel, who, id, Batch.OK, result)
 	end
 
-	local function call(channel: any, who: any?, value: any, bytes: number, id: number)
+	local function call(channel: any, who: any?, value: any, bytes: number, id: number, subject: any?)
 		--[[ Annotated so `xpcall` resolves: a handler read off an `any` channel is narrowed to "not
 		     false or nil" by the caller's check, which is not a callable type. ]]
 		local handler: (...any) -> ...any = channel.handler
 
 		if not isServer then
 			--[[ A client's inbound is the server's outbound, and the server is not a peer to be
-			     checked. No context, no policy — the payload alone. ]]
-			local ok, failure = xpcall(handler, traceback, value)
+			     checked. No context, no policy — the payload alone, and for a replicated channel
+			     the subject in front of it, because the client keeps one value per subject and a
+			     handler that could not tell them apart would be useless. A `nil` value there is the
+			     subject going away. ]]
+			--[[ Two statements rather than an `if` expression, which yields one value where this
+			     needs two. ]]
+			local ok, failure
+
+			if channel.class == "replicate" then
+				ok, failure = xpcall(handler, traceback, subject, value)
+			else
+				ok, failure = xpcall(handler, traceback, value)
+			end
 
 			if not ok then
 				report(channel, nil, "handler", tostring(failure), bytes)
@@ -406,6 +466,7 @@ function Inbound.new(config: Config): Inbound
 		local channels = list.channels
 		local senders = list.senders
 		local values = list.values
+		local subjects = list.subjects
 		local sizes = list.sizes
 		local calls = list.calls
 		local statuses = list.statuses
@@ -417,12 +478,14 @@ function Inbound.new(config: Config): Inbound
 			local channel = channels[index]
 			local who = senders[index]
 			local value = values[index]
+			local subject = subjects[index]
 			local id = calls[index]
 			local status = statuses[index]
 
 			channels[index] = nil
 			senders[index] = nil
 			values[index] = nil
+			subjects[index] = nil
 
 			--[[ A status of zero or more is a reply, and a reply resumes a thread instead of calling
 			     a handler. Anything else — including a query *request* — goes to `call`. ]]
@@ -433,7 +496,7 @@ function Inbound.new(config: Config): Inbound
 					waiting.answered(channel, id, status, value)
 				end
 			else
-				call(channel, who, value, sizes[index], id)
+				call(channel, who, value, sizes[index], id, subject)
 			end
 		end
 
@@ -629,6 +692,7 @@ function Inbound.new(config: Config): Inbound
 		filling.channels[count] = channel
 		filling.senders[count] = sender
 		filling.values[count] = value
+		filling.subjects[count] = nil
 		filling.sizes[count] = bytes
 		filling.calls[count] = id
 		filling.statuses[count] = status
@@ -705,6 +769,32 @@ function Inbound.new(config: Config): Inbound
 
 			if disagreement then
 				report(nil, sender, "protocol", disagreement, bytes)
+			end
+		end,
+
+		--[[
+			A peer asking for a replicated channel in full.
+
+			Clearing what this endpoint believes that peer has is the whole answer: the next tick
+			finds no baseline and writes a change against nothing, which is every field. There is no
+			separate snapshot path to invoke because there is no separate snapshot.
+
+			Refused rather than assumed when the id names nothing, or names something that is not
+			replicated — a peer that can ask about an id it made up could otherwise make the server
+			walk its channel table on demand.
+		]]
+		resync = function(id: number, bytes: number)
+			local channel = resolve(id)
+
+			if not channel or channel.class ~= "replicate" then
+				report(nil, sender, "replicate", NOT_REPLICATED, bytes)
+				return
+			end
+
+			local store = baselines
+
+			if store then
+				store.desync(sender, channel)
 			end
 		end,
 
@@ -788,8 +878,59 @@ function Inbound.new(config: Config): Inbound
 			filling.channels[count] = channel
 			filling.senders[count] = sender
 			filling.values[count] = value
+			filling.subjects[count] = nil
 			filling.sizes[count] = bytes
 			filling.calls[count] = id or 0
+			filling.statuses[count] = -1
+		end,
+
+		--[[
+			A replicated subject's change, folded into what this endpoint has.
+
+			The fold happens **here, during the read**, because the bytes are here and nowhere else;
+			the handler runs in the dispatch phase like every other class, so a handler that yields
+			cannot let the next packet decode against a half-applied value. That is D-6's
+			read-then-dispatch applied to a payload that mutates state rather than replacing it.
+		]]
+		change = function(channel: any, subject: any, bytes: number)
+			local store = baselines
+
+			if not store then
+				report(channel, sender, "replicate", NO_BASELINES, bytes)
+				return
+			end
+
+			local base = store.of(sender, channel, subject)
+			local value = channel.delta.apply(base)
+
+			if value == nil then
+				--[[ Gone. Dropped here rather than left for the handler, so that a handler which
+				     raises cannot leave this endpoint believing it still has the subject. ]]
+				store.drop(sender, channel, subject)
+			else
+				store.keep(sender, channel, subject, value)
+			end
+
+			local count = filling.count + 1
+
+			if count > pendingCeiling then
+				full = true
+				report(channel, sender, "budget", ceilingReason, bytes)
+
+				--[[ The change was applied and is being dropped before the handler sees it, which
+				     leaves the game's own mirror behind this endpoint's baseline. Everything on this
+				     channel has to be asked for again. ]]
+				desync(channel)
+				return
+			end
+
+			filling.count = count
+			filling.channels[count] = channel
+			filling.senders[count] = sender
+			filling.values[count] = value
+			filling.subjects[count] = subject
+			filling.sizes[count] = bytes
+			filling.calls[count] = 0
 			filling.statuses[count] = -1
 		end,
 
@@ -797,6 +938,13 @@ function Inbound.new(config: Config): Inbound
 
 		refuse = function(channel: any?, stage: string, reason: string, bytes: number, id: number?)
 			report(channel, sender, stage :: Observer.Stage, reason, bytes)
+
+			--[[ Any refusal of a replicated packet is a change this endpoint will never see, and
+			     every change after it is relative to one it does not have. The stage does not
+			     matter — parse, budget or protocol, the consequence is the same. ]]
+			if channel and channel.class == "replicate" then
+				desync(channel)
+			end
 
 			--[[
 				A refused query is answered rather than left hanging, in both directions.

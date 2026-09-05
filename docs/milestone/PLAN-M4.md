@@ -448,12 +448,43 @@ API to write an example against.
       feature whose only test is a rejection file has no test. The fourth rejection is the one worth
       naming: **`world.server.inventory:publish(...)` does not compile**, which is the class's
       argument enforced rather than described.
-- [ ] The tick: for each subject the store lists, for each client the audience admits, a change
-      against whatever that client has — which is `nil` for one that has nothing. `Outbound` already
-      batches it, and the single packet shape above means there is no branch to get wrong.
-- [ ] **Wire the client's own `budget` rejection into `Baseline.desync`** — phase 4's break
-      detector, whose whole point is that the receiver already knows when netweave dropped
-      something. This is the packet that asks for a resnapshot.
+- [x] The tick, in `src/replication/Tick.luau` rather than in the driver, so it can be run by hand
+      under lune. For each subject the store lists, for each client the audience admits, a change
+      against whatever that client has — `nil` for one that has nothing. Plus two passes nothing in
+      the plan had asked for and both of which the end-to-end suite needed: the players who hold a
+      baseline and are **no longer recipients**, and the subjects the store has **stopped listing**.
+      Neither is visible from the loop over what exists now.
+- [x] `Batch.writeChange` and the `RESYNC` control kind; `Outbound.change` and `.resync`;
+      `Inbound`'s `change` and `resync` sinks, a `subjects` array on the pending list so a handler
+      can be told which value it was given, and a client baseline that is deliberately **not**
+      bounded — the server's copy already is, and refusing to remember one here would make the next
+      change unreadable rather than save anything.
+- [x] **The client's own refusal, at any stage, clears the channel and asks for it again.** Phase 4
+      said the receiver already knows when netweave dropped something; this is it saying so. No
+      sequence number, which on a three-byte change would have been a third of it.
+- [x] `tests/replication_runtime.luau`: two peers in one process, the real envelope, the real tick.
+      **35 assertions**, and three defects came out of writing it —
+
+      **`Batch.writeChange` never wrote the version byte.** The reader then took the length prefix
+      for a channel id and the batch decoded as garbage without failing a single check, because a
+      version of 1 is also a channel id of 1.
+
+      **A baseline held the store's own table.** `Replica.Data.hp = 4` mutates in place — that is
+      what ReplicaService's entire API does — so the baseline *became* the new value and the next
+      diff compared a table against itself and found nothing. Every subject would have frozen at
+      whatever it was when first sent, silently, on every client. Charm does not have the problem
+      because its atoms are immutable, which is exactly why a seam built only for Charm would have
+      been the wrong seam. Snapshotted once per subject per tick, shared by every recipient.
+
+      **`nil` is not a table key**, and a client has no peer object for the server. The same
+      sentinel `Protocol` already uses, for the same reason.
+- [x] The rig had a defect of its own worth as much as the three: it fed **every** packet to one
+      client regardless of who it was addressed to, so a client told a subject was gone was handed
+      the other client's copy on the next frame and looked correct. It asserted nothing about
+      audiences, which is half of what this milestone is. Two peers now, routed by destination.
+- [x] `docs/WIRE-FORMAT.md` §2 gains the change and the resync. Id 0's reservation earned itself: a
+      control kind was added without touching the batch version, because the length in front of a
+      control body is what makes an unknown kind steppable.
 - [ ] The worked example in `DESIGN-API.md` gains a replication half, and `tools/messages.luau`
       checks it the way it checks the existing one. *(Moved here from phase 5; it cannot be written
       against an API that does not exist.)*
