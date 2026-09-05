@@ -72,10 +72,6 @@ local SURFACES = {
 	check below fails if a listed name turns out to be covered, so the list cannot outlive the gap.
 ]]
 local UNCOVERED: { [string]: string } = {
-	["nw.Settings"] = "M4 report, 위험: CheckedSettings refuses any argument typed nw.Settings, "
-		.. "because every field is optional and the check tests for the bare tag.",
-	["t.PayloadOf"] = "M4 report, 위험: never reduces across a require, so an annotation using it is "
-		.. "an error type. Covering it needs the local-instantiation fix Trust.luau already uses.",
 	["t.Ranged"] = "the return of t.u8 and friends, never written by hand.",
 	["t.Classed"] = "the return of t.instance, never written by hand.",
 	["t.Encoding"] = "names the eight storages for internal tables; a game never writes one.",

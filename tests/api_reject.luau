@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 23
+-- netweave:expect 24
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -222,6 +222,21 @@ local world = nw.namespace("world", {
 })
 
 world.server.inventory:publish(1, { hp = 1 })
+
+--[[ 24. An **optional** payload carries the same brand a required one does, and until M4 it carried
+     none: `T?` is a union, and the branding tested for a bare table. A `signal` handed its handler a
+     plain `{ screen: number }?`, `nw.Trusted<Req?>` reduced to `Req?`, and the two coincided — so
+     client data reached a function annotated for trusted data with nothing at the call site to see.
+     `tests/api_ok.luau` holds the positive half; this is the one that must not compile. ]]
+local function authoritativeOptional(_request: nw.Trusted<{ screen: number }?>) end
+
+local menus = nw.namespace("menus", {
+	open = nw.signal({ data = t.optional(t.struct({ screen = t.u8 })), rate = 10 }),
+})
+
+menus.server.open:listen(function(_ctx, request)
+	authoritativeOptional(request)
+end)
 
 -- ---------------------------------------------------------------------------------------------
 -- The canary: two diagnostics this file expects and does not get

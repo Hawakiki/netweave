@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 8
+-- netweave:expect 10
 
 --[[
 	Every assignment here must be rejected. `lune run analyze` fails if the count on line 1 stops
@@ -44,5 +44,22 @@ local _wrongNested: Type<{ entities: { { id: string, name: string } } }> = neste
 
 --[[ 8. A struct field has to be a netweave type at all. ]]
 local _notAType = t.struct({ id = 5 })
+
+--[[
+	9 and 10. **`PayloadOf` has to reduce**, and only a rejection can say whether it does.
+
+	It is the one `export type function` in `src/types/init.luau` that the module never referenced,
+	and per `spike/declare/README.md` Q5 that means it silently became an error type for anyone
+	requiring the module. `tests/types_ok.luau` writes the alias and cannot see the difference: an
+	error type accepts everything, so the positive half passes either way. What changes is *here* —
+	when the reduction is gone these two stop erroring and the count drops to 8.
+
+	9 is a payload that does not match the schema. 10 is the message the docstring promises for
+	something that is not a netweave type at all.
+]]
+local shot = t.struct({ seq = t.u16 })
+
+local _mistypedPayload: t.PayloadOf<typeof(shot)> = { seq = "not a number" }
+type _notASchema = t.PayloadOf<number>
 
 return nil
