@@ -490,6 +490,48 @@ end
 
 --[=[
 	@within CodecBuffer
+	@function claim
+	@param length number
+	@return buffer -- where to write
+	@return number -- the offset to write the first byte at
+
+	Takes `length` bytes and hands back the buffer and where they start, so a caller that knows its
+	own layout can write all of them itself.
+
+	```lua
+	local out, at = Buffer.claim(6)
+	buffer.writeu8(out, at, entity.id)
+	buffer.writeu8(out, at + 1, entity.x)
+	```
+
+	:::caution
+	The buffer is only valid until the next call that can grow it, which is any `write*` or another
+	`claim` outside a block. Write the bytes and drop the reference; never keep it across a field.
+	:::
+
+	:::note
+	This is the one primitive that pays a call **per struct** rather than per value, and that is the
+	whole of its reason to exist: `PLAN-M4` phase 7 measured a 100-entity payload spending half its
+	encode time in closure calls, and a struct of six numbers costs seven of them before a byte is
+	written. `Serdes` uses it for a struct whose fields are all fixed-size numbers.
+	:::
+]=]
+function Codec.claim(length: number): (buffer, number)
+	if blockDepth > 0 then
+		local offset = blockCursor
+		blockCursor = offset + length
+		return outgoing, offset
+	end
+
+	--[[ `allocate` first and *then* read `outgoing`: growth replaces the buffer, so a reference
+	     taken before the call would be the old one and the bytes would be written into a buffer
+	     nothing is going to send. ]]
+	local offset = allocate(length)
+	return outgoing, offset
+end
+
+--[=[
+	@within CodecBuffer
 	@function reserve
 	@param length number
 	@return number -- the offset to patch later

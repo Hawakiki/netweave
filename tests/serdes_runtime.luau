@@ -833,6 +833,217 @@ do
 	check("and is refused", failure ~= nil)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- A struct of numbers, written in one claim (PLAN-M4 phase 7)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`Serdes.fusedStructWriter` is a second implementation of what `structWriter` does, taken for
+	every struct whose fields are all fixed-size numbers — which is most of them. It writes the same
+	bytes by a different route: one claim, offsets computed at declaration, the checks unrolled, and
+	the primitive named at the call site rather than looked up.
+
+	Two implementations of one contract is the shape that drifts (`CLAUDE.md` §9), so what follows
+	walks the seams between them: the arity boundary, a storage of each width, an offset field, a
+	float, a dynamic array where the bytes are not claimed in advance, and each of the three
+	messages. The round trips above already cover the happy path; these are the edges where the two
+	writers could disagree without anything noticing.
+]]
+
+do
+	--[[ One field, which is the shortest the unroll goes, and eight, which is the last arity before
+	     it hands back to the loop. Nine is the loop, and it has to produce the same bytes. ]]
+	trip("a one-field struct", t.struct({ a = t.u8 }), { a = 7 }, 1)
+
+	trip(
+		"eight fields, the last arity the unroll covers",
+		t.struct({
+			a = t.u8,
+			b = t.u8,
+			c = t.u8,
+			d = t.u8,
+			e = t.u8,
+			f = t.u8,
+			g = t.u8,
+			h = t.u8,
+		}),
+		{ a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8 },
+		8
+	)
+
+	trip(
+		"nine, which falls back to the loop",
+		t.struct({
+			a = t.u8,
+			b = t.u8,
+			c = t.u8,
+			d = t.u8,
+			e = t.u8,
+			f = t.u8,
+			g = t.u8,
+			h = t.u8,
+			i = t.u8,
+		}),
+		{ a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9 },
+		9
+	)
+
+	--[[ One field of each width the branch chain names, in one struct, so a chain that fell through
+	     to the wrong arm would put the bytes in the wrong place and the round trip would say so. ]]
+	trip(
+		"every storage the chain names, mixed",
+		t.struct({ a = t.u8, b = t.u16, c = t.u32, d = t.f32, e = t.f64 }),
+		{ a = 200, b = 60000, c = 4000000000, d = 0.5, e = 0.25 },
+		19
+	)
+
+	--[[ A declared minimum is subtracted before the value is stored and added back on the way out.
+	     The fused writer does that subtraction itself rather than through `numberWriter`, which is
+	     exactly the kind of thing a second implementation forgets. ]]
+	trip(
+		"fields whose storage is narrowed against a declared minimum",
+		t.struct({ a = t.i16(-100, 100), b = t.u16(1000, 1255) }),
+		{ a = -100, b = 1255 },
+		2
+	)
+
+	trip("and the other end of both ranges", t.struct({ a = t.i16(-100, 100), b = t.u16(1000, 1255) }), {
+		a = 100,
+		b = 1000,
+	}, 2)
+
+	--[[ A float is the one case where the whole-number check must *not* fire. ]]
+	trip(
+		"a struct of floats keeps its fractions",
+		t.struct({ x = t.f32, y = t.f64 }),
+		{ x = 0.5, y = 0.125 },
+		12
+	)
+
+	--[[ Inside a dynamic array the payload's size is not known, so nothing is claimed in advance and
+	     `Buffer.claim` has to allocate instead of stepping a cursor. Same struct, different path
+	     through the primitive, and the bytes have to match. ]]
+	trip(
+		"a dynamic array of them, where the bytes are not claimed up front",
+		t.array(t.struct({ x = t.u8, y = t.u8 }), 0, 4),
+		{ { x = 1, y = 2 }, { x = 3, y = 4 }, { x = 5, y = 6 } },
+		7
+	)
+
+	--[[ And nested, where the outer struct is not fusable and the inner one is. ]]
+	trip(
+		"a fused struct inside one that is not",
+		t.struct({ tag = t.string(0, 8), pos = t.struct({ x = t.u8, y = t.u8 }) }),
+		{ tag = "hi", pos = { x = 3, y = 4 } },
+		5
+	)
+end
+
+do
+	--[[ The three refusals, which are `numberWriter`'s messages and have to stay its messages: a
+	     missing field names the field, and the other two name the value. Checked as text rather than
+	     as "it raised", because the reason a schema-driven encoder is worth having is that it says
+	     which field. ]]
+	local codec = Serdes.fromSchema(t.struct({ a = t.u8, b = t.u8 }))
+
+	local _, missing = pcall(codec.write, { a = 1 })
+	Buffer.load(nil)
+	check(
+		`a missing field names it, not an offset: {tostring(missing)}`,
+		string.find(tostring(missing), 'field "b" is missing', 1, true) ~= nil
+	)
+
+	local _, high = pcall(codec.write, { a = 1, b = 900 })
+	Buffer.load(nil)
+	check(
+		`a value over the range says so: {tostring(high)}`,
+		string.find(tostring(high), "outside the declared range 0..255", 1, true) ~= nil
+	)
+
+	local _, fraction = pcall(codec.write, { a = 1, b = 1.5 })
+	Buffer.load(nil)
+	check(
+		`a fraction in an integer field says so: {tostring(fraction)}`,
+		string.find(tostring(fraction), "not a whole number", 1, true) ~= nil
+	)
+
+	--[[ The same three, from the sixth slot rather than the second, because the unroll writes each
+	     field out separately and a check pasted eight times is eight chances to name the wrong
+	     variable. ]]
+	local wide = Serdes.fromSchema(t.struct({
+		a = t.u8,
+		b = t.u8,
+		c = t.u8,
+		d = t.u8,
+		e = t.u8,
+		f = t.u8,
+	}))
+
+	local _, sixth = pcall(wide.write, { a = 1, b = 2, c = 3, d = 4, e = 5 })
+	Buffer.load(nil)
+	check(
+		`the sixth field is named when it is the one missing: {tostring(sixth)}`,
+		string.find(tostring(sixth), 'field "f" is missing', 1, true) ~= nil
+	)
+
+	refuses("and a value under the declared minimum", t.struct({ a = t.i16(-100, 100) }), { a = -101 })
+end
+
+do
+	--[[
+		**The check the whole optimisation rests on**: the two writers agree, byte for byte, on a
+		struct the fused one takes and one it refuses.
+
+		`t.struct` with a boolean in it is not fusable — a flag lives in the payload's bitfield, not
+		at a byte offset — so this pair runs both implementations over the same values and compares
+		what came out. A divergence here is a wire that decodes to the wrong thing on a client that
+		is a version behind, which is the failure mode no round trip in this file would catch,
+		because both ends would be wrong together.
+	]]
+	local fused = Serdes.fromSchema(t.struct({ a = t.u8, b = t.u16, c = t.u8, d = t.u8, e = t.u8, f = t.u8 }))
+
+	--[[ Nine fields is past `FUSED_MAX`, so this one is written by the loop — the same fields in the
+	     same order, plus three the comparison ignores. Fields are emitted in name order, so the six
+	     shared ones occupy the same first bytes in both. ]]
+	local looped = Serdes.fromSchema(t.struct({
+		a = t.u8,
+		b = t.u16,
+		c = t.u8,
+		d = t.u8,
+		e = t.u8,
+		f = t.u8,
+		g = t.u8,
+		h = t.u8,
+		i = t.u8,
+	}))
+
+	local sample = { a = 9, b = 4000, c = 3, d = 4, e = 5, f = 6 }
+
+	Buffer.take()
+	Buffer.load(nil)
+	fused.write(sample)
+	local one = (Buffer.take())
+
+	Buffer.load(nil)
+	looped.write({ a = 9, b = 4000, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9 })
+	local two = (Buffer.take())
+
+	equals("the fused struct is seven bytes", buffer.len(one), 7)
+	equals("and the looped one is those seven plus three", buffer.len(two), 10)
+
+	local identical = true
+
+	for offset = 0, 6 do
+		if buffer.readu8(one, offset) ~= buffer.readu8(two, offset) then
+			identical = false
+		end
+	end
+
+	check("and the two writers produced the same bytes", identical)
+
+	Buffer.load(nil)
+end
+
 if failures > 0 then
 	error(`{failures} serdes assertions failed`)
 end

@@ -163,10 +163,19 @@ So the two hypotheses separate cleanly:
 - **The adapter's two tables per send were not the cause.** They are gone, and on the flag schemas
   where they *were* the whole measurement the encode figure fell from 609.3 B to **81.92 B, Zap's
   number to the decimal**. The fix worked; it just was not what mattered on arrays.
-- **`Serdes` never calling `Buffer.allocate` stands as the cause.** 600 allocations for one
+- ~~**`Serdes` never calling `Buffer.allocate` stands as the cause.** 600 allocations for one
   `ArrayHeavy` packet against six for a flag packet is the only explanation offered so far that
   predicts a gap on one schema family and none on the other, and the re-measurement did not
-  falsify it.
+  falsify it.~~ **Falsified by the M2 run below, and this file went on saying it for two
+  milestones.** M2 phase 0 removed those 600 calls per packet — `openBlock` claims the payload once
+  and the `put*` family writes into the claim — and the very next matrix measured 86 FPS against 85.
+  The prediction was made, the fix was shipped, the number did not move, and nobody came back to
+  this paragraph.
+
+  M4 phase 7 priced it directly: `bench/profile.luau` puts the allocate-per-value cost at **45-47%
+  of the pre-M2 encode**, so removing it *was* worth something — just not on the axis this
+  paragraph claimed, because at 200 packets a frame it is 1.6 ms of a 11.9 ms frame and the rest of
+  the ladder was still there underneath it. The real composition is measured below.
 
 The `ArrayHeavy` encode-allocation cell reads 3932.2 B afterwards against 609.3 before, which
 looks like a regression and is not readable: 4 of 25 windows survived the collector against 24
@@ -410,6 +419,60 @@ Studio decode column as "at least this much".
 The criterion stays open on one column, and the reason is now understood rather than merely
 observed: a window large enough to hold a `ArrayHeavy` batch is a window the collector almost always
 visits, and Roblox exposes enough to detect that and not enough to correct for it.
+
+## M4 phase 7: the `ArrayHeavy` framerate gap, taken apart
+
+`lune run bench/profile`, not a Studio run. The matrix has said 84-86 FPS against Blink's 130-139
+since M1 and cannot say why, because a frame holds rendering, physics and replication as well as the
+codec. This probe encodes the same 100-entity payload with the frame taken away, in rungs that
+differ from each other by one thing each.
+
+**The engine half cancels, so the frame gap is the encode gap.** At 200 packets a frame the codec
+predicted a 4.38 ms difference against generated code; Studio measured 4.21 ms (84 against 130 FPS).
+Two instruments, different VMs, 4% apart — which is corroboration rather than proof, but the useful
+answer would have been disagreement: it would have meant something outside `Serdes` was paying for
+the gap and every hour spent there would have been spent in the wrong file.
+
+| rung, ns per packet | before phase 7 | after |
+|---|---|---|
+| `inline` — what Blink and Zap generate | 2,096 | 2,096 |
+| `inline + range` — the same, plus the schema's own checks | 4,393 | 4,393 |
+| `put` — one call per value | 9,212 | 9,212 |
+| `write` — one call per value, allocating its own bytes | 17,367 | 17,367 |
+| **`netweave`** | **23,992** | **12,741** |
+
+Where the 24 µs went: 10% the range and whole-number checks netweave promises and generated code
+mostly does not do, 30% one call per value, and **52% a closure per value plus the struct walk that
+finds the field to hand it** — seven calls for a six-field struct before a byte is written.
+
+**The fix is one claim per struct with the offsets computed at declaration time**, which is
+`Serdes.fusedStructWriter`, taken for any struct whose fields are all fixed-size numbers. 1.9x, and
+the prediction it makes for the matrix is **84 → about 101 FPS, 1.28x of Blink against `PLAN-M1`
+criterion 5's 1.30x bar.** That prediction is recorded here before the Studio run that checks it;
+if the run disagrees, the disagreement is the finding and this table is where it gets written down.
+
+### The part that was nearly missed
+
+The first version of the probe priced the fix at 2.7x and the first implementation delivered 10%.
+The difference is not an accounting error — it is the thing that makes code generation fast, and it
+is worth writing down plainly:
+
+**`buffer.writeu8(out, at, value)` written out is compiled to a fastcall and performed inline, with
+no call frame. The same function reached through a table is an ordinary call.** A builder driven by
+a schema reaches for the table without thinking about it; the probe's hand-written rungs did not,
+which is why they were 2x too optimistic. The `dispatched` rung is the control that isolates it:
+identical code, one table lookup moved from build time to run time, **1.6x on the whole packet** —
+more than every other layer of the encode put together.
+
+So `fusedStructWriter` names all five primitives in a branch chain rather than holding one in an
+upvalue. And the answer to "why do Blink and Zap win here" is not that they avoid closures, because
+netweave now does too. It is that a generator emits the *name* of the primitive, and until this
+phase netweave could not.
+
+A third shape was tried and lost outright: keep the loop, read each field's offset and bounds out of
+parallel arrays. **25,490 ns — slower than doing nothing**, because the array reads cost more than
+the calls they save. That is why the writer is unrolled by arity rather than looped, and it is not a
+matter of taste.
 
 ## Delivery (client to server)
 

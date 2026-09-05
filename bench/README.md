@@ -147,7 +147,23 @@ src/shared/       Payloads, Metrics, Alloc, Config, Modes + one adapter per libr
 src/server/       receive, count, validate, decode-side heap delta, Down-direction load
 src/client/       run order, load, sampling, result document
 check.luau        parses everything under bench/
+envelope.luau     the netweave batch envelope, byte for byte, without Studio
+profile.luau      where an ArrayHeavy encode's time goes, without Studio
 ```
+
+`profile.luau` is the instrument M4 phase 7 added, and it answers a question the matrix cannot: a
+framerate covers rendering, physics and replication as well as the codec, so a gap in it cannot be
+attributed to anything. The probe takes one packet apart rung by rung — generated-code ceiling,
+the schema's checks, one call per value, the real codec — and each rung differs from its neighbour
+by one thing.
+
+```sh
+lune run bench/profile
+```
+
+Read it the way `RESULTS.md` asks you to read the allocation column: the **ratios between rungs**
+transfer, the absolute nanoseconds are lune's rather than Studio's, and every rung prints its
+median and its slowest pass beside the number so you can see how much of it is the machine.
 
 Nothing under `vendor/` is hand-written. Regenerate rather than edit.
 

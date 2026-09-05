@@ -167,13 +167,30 @@ baseline dropped, which is the same code as a disconnect.
 The probe the plan asked for here needs baselines to exist, so it moves to phase 4 rather than being
 written against nothing.
 
-### D-5 — the framerate gap is measured before it is chased
+### D-5 — the framerate gap is measured before it is chased — **answered in phase 7**
 
 `PLAN-M3` deferred `ArrayHeavy` framerate (84 against Blink's 130) with the cause narrowed but not
 measured: 600 closure calls per packet against generated inline code. §3.10-BB found the allocation
 advantage was encode-only, so this is a different axis and needs its own number. **The instrument
 comes first** — between the two M3 runs, on unchanged code, Blink's `ArrayHeavy` decode allocation
 moved 76% and Zap's 146%. Tuning against that is tuning against noise.
+
+**Answered, and the instrument earned its place first.** `bench/profile.luau` (§3.11) takes the
+encode apart in rungs that differ by one thing each, and three things came out of it that the
+framerate alone could not have said:
+
+- The frame gap **is** the encode gap. The codec predicted 4.38 ms against generated code; Studio
+  measured 4.21 ms. Nothing outside `Serdes` needed looking at.
+- The cause M1 wrote down was **already falsified by M2's own matrix** and `bench/RESULTS.md` had
+  repeated it for two milestones. Priced properly it was 45-47% of the *pre-M2* encode — real, and
+  never capable of explaining 1.55x.
+- The cause that was actually there is half closure-per-value and half something nobody had named:
+  **a builtin called by name compiles to a fastcall and the same function fetched from a table does
+  not** (§3.11-GG). One table lookup moved to build time is worth 1.6x on the whole packet.
+
+The answer is `Serdes.fusedStructWriter` — one claim per struct, offsets computed at declaration,
+unrolled to eight fields, every primitive named. 1.9x measured, 1.28x of Blink predicted against
+criterion 5's 1.30x bar, and the Studio run is what settles it.
 
 ## 6. Tasks
 
@@ -550,8 +567,52 @@ API to write an example against.
 
 ### Phase 7 — the framerate gap
 
-- [ ] Measure it on the fixed instrument: where do the 600 closure calls per `ArrayHeavy` packet actually go?
-- [ ] Decide against the number, not the intuition. `PLAN-M1` criterion 5 asks for 1.3x of the best library; 84 against 130 is 1.55x.
+- [x] **A frame is not an instrument.** The matrix has said 84 against 130 since M1 and cannot say
+      why, because a frame holds rendering, physics and replication as well as the codec.
+      `bench/profile.luau` encodes the same 100-entity payload with the frame taken away, in rungs
+      that differ from each other by one thing each: generated code, generated code plus the
+      schema's checks, one call per value, one call per value that allocates, and the real codec.
+      Two runs of it agree within 1.3% on every rung.
+- [x] **The engine half cancels, so the frame gap is the encode gap.** At 200 packets a frame the
+      codec predicted a 4.38 ms difference against generated code; Studio measured 4.21 ms. Two
+      instruments on two VMs, 4% apart. Disagreement would have been the useful answer — it would
+      have meant something outside `Serdes` was paying for the gap.
+- [x] Where the 24 µs went: **10%** the range and whole-number checks netweave promises, **30%** one
+      call per value, **52%** a closure per value plus the struct walk that finds the field to hand
+      it. Seven calls for a six-field struct before a byte is written.
+- [x] **The M1 hypothesis was falsified two milestones ago and `bench/RESULTS.md` went on repeating
+      it.** M1 blamed 600 `allocate` calls per packet; M2 phase 0 removed them and the next matrix
+      read 86 FPS against 85. The prediction was made, the fix shipped, the number did not move, and
+      nobody came back to the paragraph. It is struck through now, with the cost priced: those calls
+      were 45-47% of the *pre-M2* encode, which is real and was never going to be 1.55x.
+- [x] **Decided, and against the number.** `Serdes.fusedStructWriter`: a struct whose fields are all
+      fixed-size numbers claims its bytes once and writes them at offsets computed at declaration,
+      unrolled to eight fields with the general loop behind it. 23,992 → 12,741 ns per packet,
+      **1.9x**, which predicts **84 → about 101 FPS, 1.28x of Blink against criterion 5's 1.30x
+      bar.** The prediction is in `bench/RESULTS.md` before the Studio run that checks it.
+- [x] **The finding that nearly did not happen.** The probe priced the fix at 2.7x and the first
+      implementation delivered 10%. The gap between them is that
+      `buffer.writeu8(out, at, value)` **written out** compiles to a fastcall performed inline, and
+      the same function reached through a table does not — and a builder driven by a schema reaches
+      for the table without thinking about it. The `dispatched` rung isolates it at **1.6x on the
+      whole packet**, more than every other layer put together, so the writer names all five
+      primitives in a branch chain. It is also the honest answer to why code generators win here:
+      not that they avoid closures, but that they emit the *name* of the primitive.
+- [x] And one shape that lost outright, kept in the probe so it is not tried again: claim once but
+      keep the loop, reading each field's offset and bounds out of parallel arrays. **25,490 ns,
+      slower than doing nothing.** The array reads cost more than the calls they save, which is why
+      the unroll is not a matter of taste.
+- [x] `Buffer.claim` is the one new primitive — the bytes and where they start, one call per struct
+      instead of one per value. It works inside a claimed block and outside one, so a dynamic
+      payload gets it too.
+- [x] `tests/serdes_runtime.luau` gains the seams between the two writers: both arity boundaries, a
+      storage of each width in one struct, a narrowed range at both ends, floats, a dynamic array
+      where nothing is claimed in advance, all three error messages including one from the sixth
+      slot, and the two implementations compared byte for byte on the same fields. Confirmed to bite
+      by dropping the declared-minimum subtraction and by breaking one arm of the branch chain.
+- [ ] **Open until Studio runs it.** The 101 FPS is a prediction from a lune probe, not a
+      measurement, and `CLAUDE.md` §9 says a claim is not a number until the instrument that made it
+      is the one being quoted. The M4 matrix is where it is settled.
 
 ## 7. Acceptance criteria
 
