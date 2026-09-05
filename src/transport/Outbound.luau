@@ -311,7 +311,7 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 		--[[ A publish resolves its audience and fans out. `everyone` takes the one-call path;
 		     everything else is serialised once and copied per recipient. ]]
 		publish = function(channel: any, subject: any, value: any)
-			local count = Recipients.of(channel.audience, subject, roster, recipients)
+			local count = Recipients.of(channel.audience, subject, roster, recipients, channel)
 
 			if count == -1 then
 				self.broadcast(channel, value)
