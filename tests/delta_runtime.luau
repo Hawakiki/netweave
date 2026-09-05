@@ -340,6 +340,109 @@ do
 	)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- A subject that arrived, and one that went away
+-- ---------------------------------------------------------------------------------------------
+
+suite.passing()
+
+do
+	--[[
+		The two things the root bit is for, and the reason replication needs no second packet shape.
+
+		**A snapshot is a change against nothing.** `write(nil, value)` finds every field different
+		and writes all of them, which is what a client with no baseline needs — and it costs what a
+		whole encode would have, because the patch's flags fit in the byte the schema's own flags
+		were already using.
+	]]
+	local schema = t.struct({
+		hp = t.u8,
+		gold = t.u16,
+		tag = t.optional(t.u8),
+		pos = t.struct({ x = t.u8, y = t.u8 }),
+	})
+
+	local delta = Delta.build(Ir.lower(schema))
+	local codec = Serdes.fromSchema(schema)
+	local value = { hp = 7, gold = 900, tag = nil, pos = { x = 3, y = 4 } }
+
+	Buffer.take()
+	Buffer.load(nil)
+	check("a value against nothing is a change", delta.write(nil, value))
+	local arrival = buffer.len((Buffer.take()))
+
+	Buffer.load(nil)
+	codec.write(value)
+	local snapshot = buffer.len((Buffer.take()))
+
+	equals("and costs what the whole value would have", arrival, snapshot)
+
+	--[[ It has to round-trip against nothing too, or a client's first packet would leave it with a
+	     table missing whatever the differ decided was equal to nil. ]]
+	Buffer.load(nil)
+	delta.write(nil, value)
+	local packed = Buffer.take()
+	Buffer.beginRead(packed, nil)
+	local arrived: any = delta.apply(nil)
+
+	check("and rebuilds the whole value", deepEquals(arrived, value))
+	equals("including an optional that is absent", arrived.tag, nil)
+end
+
+suite.failing()
+
+do
+	local schema = t.struct({ hp = t.u8, gold = t.u16 })
+	local delta = Delta.build(Ir.lower(schema))
+	local held = { hp = 5, gold = 10 }
+
+	--[[ **Gone.** The root bit clear, and no body at all — which is the packet `PLAN-M4` D-4 needs
+	     for "one leaving needs to be told to forget", and which would otherwise have been a second
+	     shape on the wire with a discriminator in front of both. ]]
+	Buffer.take()
+	Buffer.load(nil)
+	check("a value going away is a change", delta.write(held, nil))
+	local removal = buffer.len((Buffer.take()))
+
+	Buffer.load(nil)
+	delta.write(nil, held)
+	local arrival = buffer.len((Buffer.take()))
+
+	check(`a removal of {removal} bytes is smaller than the arrival of {arrival}`, removal < arrival)
+
+	Buffer.load(nil)
+	delta.write(held, nil)
+	local packed = Buffer.take()
+	Buffer.beginRead(packed, nil)
+
+	equals("and reads back as nothing", delta.apply(held), nil)
+
+	--[[ Telling a client that nothing is gone is the same packet as telling it nothing changed, so
+	     it has to be refused here rather than written — otherwise every tick would carry one
+	     removal per subject no client has ever seen. ]]
+	Buffer.load(nil)
+	check("nothing to nothing is not a change", not delta.write(nil, nil))
+	equals("and wrote nothing", buffer.len((Buffer.take())), 0)
+
+	--[[ And the arrival of a subject whose fields are *all* absent still has to arrive, or the
+	     client never learns it exists. This is the one case where the differ finds nothing and the
+	     packet is sent anyway. ]]
+	local sparse = t.struct({ a = t.optional(t.u8), b = t.optional(t.u8) })
+	local thin = Delta.build(Ir.lower(sparse))
+
+	Buffer.load(nil)
+	check("a subject with nothing set still arrives", thin.write(nil, {}))
+
+	local empty = Buffer.take()
+	Buffer.beginRead(empty, nil)
+	local seen = thin.apply(nil)
+
+	check("and reads back as a value rather than a removal", seen ~= nil)
+	equals("with nothing in it", next(seen :: any), nil)
+
+	Buffer.load(nil)
+end
+
 suite.finish()
 
 return true

@@ -27,7 +27,6 @@ local Baseline = require("../src/replication/Baseline")
 local Buffer = require("../src/codec/Buffer")
 local Delta = require("../src/replication/Delta")
 local Ir = require("../src/codec/Ir")
-local Serdes = require("../src/codec/Serdes")
 local Store = require("../src/replication/Store")
 local harness = require("./harness")
 local t = require("../src/types")
@@ -228,10 +227,10 @@ do
 		works for one it works for all three, and asserting it three times would be asserting that
 		`Store` returns a table.
 	]]
+	--[[ One packet shape, as in `tests/baseline_runtime.luau`: a change against `nil` is what a
+	     client with no baseline gets, and it costs what a whole encode would have. ]]
 	local schema = t.struct({ hp = t.u8, gold = t.u16 })
-	local layout = Ir.lower(schema)
-	local delta = Delta.build(layout)
-	local whole = Serdes.build(layout)
+	local delta = Delta.build(Ir.lower(schema))
 
 	local world: { [any]: any } = { [1] = { hp = 10, gold = 5 }, [2] = { hp = 1, gold = 0 } }
 	local store = Store.of(world)
@@ -251,13 +250,7 @@ do
 			Buffer.take()
 			Buffer.load(nil)
 
-			local sent = if base == nil
-				then (function()
-					whole.write(current)
-					return true
-				end)()
-				else delta.write(base, current)
-
+			local sent = delta.write(base, current)
 			local packed = Buffer.take()
 			bytes += buffer.len(packed)
 
@@ -266,7 +259,7 @@ do
 			end
 
 			Buffer.beginRead(packed, nil)
-			views[subject] = if base == nil then whole.read() else delta.apply(views[subject])
+			views[subject] = delta.apply(views[subject])
 			baselines.keep(alice, channel, subject, current)
 		end
 

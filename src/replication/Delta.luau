@@ -307,6 +307,22 @@ function buildMerger(node: Node): Merger
 			end
 
 			if result == nil then
+				--[[
+					Nothing below moved.
+
+					Against a baseline that had this struct, that is the struct unchanged and it
+					comes back by reference — which is the sharing this module exists for.
+
+					Against **no baseline at all** it is a value whose every field is an absent
+					optional, and that value still *exists*. Returning the nil baseline there would
+					make it indistinguishable from a subject that was removed, which is the one
+					thing the root bit is supposed to separate. Found by testing an arrival of
+					`t.struct({ a = t.optional(t.u8), b = t.optional(t.u8) })` with neither set.
+				]]
+				if base == nil then
+					return {}, true
+				end
+
 				return base, false
 			end
 
@@ -386,31 +402,23 @@ export type Delta = {
 function Delta.build(state: Ir.Layout): Delta
 	local layout = Ir.patch(state)
 	local root = layout.root
-	local scope = layout.scope
 
-	local differ = buildDiffer(root)
-	local merger = buildMerger(root)
+	--[[ The root is the existence bit `Ir.patch` put on, and this reads it directly rather than
+	     through `buildDiffer`'s optional case, because the two branches under it are not "changed
+	     or not" — they are *gone* and *here is what moved*, and only one of them has a body. ]]
+	local rootChunk = root.chunkIndex :: number
+	local rootMask = root.mask :: number
+	local inner = root.inner :: Node
 
-	--[[ A schema with no fields derives no bits, so there is nowhere to say that anything changed.
-	     Degenerate rather than impossible — `t.struct({})` is a legal schema — and answering "no"
-	     is the only honest thing a patch of it can say. ]]
-	if not scope then
-		return {
-			layout = layout,
+	local differ = buildDiffer(inner)
+	local merger = buildMerger(inner)
 
-			write = function(): boolean
-				return false
-			end,
-
-			apply = function(base: any): any
-				return base
-			end,
-		}
-	end
-
-	local chunks = (scope :: Scope).chunks
+	--[[ There is always a scope now: the root's own bit guarantees at least one, so the schema with
+	     no fields that used to need a degenerate branch has one too. ]]
+	local scope = layout.scope :: Scope
+	local chunks = scope.chunks
 	local count = #chunks
-	local bytes = (scope :: Scope).bytes
+	local bytes = scope.bytes
 	local accumulator: Flags = table.create(count, 0)
 
 	local patches: { (offset: number, value: number) -> () } = sized(count)
@@ -437,21 +445,48 @@ function Delta.build(state: Ir.Layout): Delta
 				accumulator[index] = 0
 			end
 
-			if not differ(old, new, accumulator) then
+			local function commit(): boolean
+				for index = 1, count do
+					patches[index](base + offsets[index], accumulator[index])
+				end
+
+				return true
+			end
+
+			if new == nil then
+				--[[ Gone. The root bit stays clear and there is no body at all, so a removal is the
+				     flag bytes and the subject that framed them — usually two. Telling a client
+				     nothing is gone would be the same packet, so that case has to be caught here
+				     rather than written. ]]
+				if old == nil then
+					Buffer.rollback(used, instances)
+					return false
+				end
+
+				return commit()
+			end
+
+			local changed = differ(old, new, accumulator)
+
+			--[[ `old == nil` is a subject this client has never seen, and it is sent even when the
+			     differ found nothing — a struct of optionals that are all absent still has to
+			     *arrive*, or the client never learns the subject exists. ]]
+			if old ~= nil and not changed then
 				Buffer.rollback(used, instances)
 				return false
 			end
 
-			for index = 1, count do
-				patches[index](base + offsets[index], accumulator[index])
-			end
-
-			return true
+			accumulator[rootChunk] = bor(accumulator[rootChunk], rootMask)
+			return commit()
 		end,
 
 		apply = function(base: any): any
 			for index = 1, count do
 				accumulator[index] = reads[index]()
+			end
+
+			if band(accumulator[rootChunk], rootMask) == 0 then
+				return nil
 			end
 
 			local value = merger(base, accumulator)
