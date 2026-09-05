@@ -59,16 +59,37 @@ return table.freeze({
 	--[[
 		Encode-side allocation probe, run as its own short phase away from bandwidth sampling.
 
-		Small windows, many of them. A large window is more likely to contain a collection, and a
-		disturbed window is discarded — the first run got zero usable samples for `raw` at 500x5.
+		~~Small windows, many of them. A large window is more likely to contain a collection, and a
+		disturbed window is discarded — the first run got zero usable samples for `raw` at 500x5.~~
+		**Both were true and neither was the problem** (M4 phase 0).
+
+		`ALLOC_ITERATIONS` sends back to back without ever ending a frame, so for a batching library
+		nothing is flushed and 5,200 payloads pile into one buffer that grows by doubling. Most calls
+		then allocate nothing and a few allocate a block the size of everything before them, which is
+		bursty by construction — so the median of `ALLOC_REPEATS` windows is a lottery on where the
+		doublings landed. Every `ArrayHeavy` encode cell in the M3 matrix survived four to eight
+		windows of twenty-five with a four-to-sixteen-times range, and netweave's median moved 40%
+		between two runs of identical code.
+
+		`ALLOC_WINDOWS` replaces both: one **frame** per window, ending in a yield so every library's
+		own scheduler flushes inside the window, and many more windows because a frame is cheap.
+		`Alloc.frames` has the argument; the two constants above stay for `Alloc.measure`, which
+		nothing in the matrix uses any more.
 	]]
 	ALLOC_ITERATIONS = 200,
 	ALLOC_REPEATS = if SMOKE then 5 else 25,
+	ALLOC_WINDOWS = if SMOKE then 20 else 400,
 
 	--[[
 		Decode-side allocation. The receiver samples the heap every this many logical packets and
 		keeps the median of the windows the collector did not disturb. A single delta across a whole
 		run does not work: the smoke run produced a negative number in 11 of 12 cells.
+
+		**Stays packet-aligned, and M4 phase 0 is where that stopped being an accident.** The send
+		side moved to a frame window in that phase and the receive side was moved with it and then
+		moved back, because the two costs have opposite shapes: an outgoing buffer is still there at
+		the frame boundary and a batch of decoded values is not. `bench/src/server/init.server.luau`
+		carries the measurement that settled it.
 	]]
 	DECODE_ALLOC_WINDOW = if SMOKE then 100 else 500,
 

@@ -108,6 +108,31 @@ local function resetCell(mode: string, schema: string)
 	end
 end
 
+--[[
+	~~Decode allocation, sampled at the frame boundary.~~ **Tried in M4 phase 0 and reverted, with
+	the reason, because it is the same defect as the one that phase fixed on the send side — pointing
+	the other way.**
+
+	The send side's cost is an outgoing buffer that grows and is still there at the frame boundary,
+	so a frame window catches it and a probe that never ends a frame does not. The receive side's
+	cost is the opposite shape: `inbound.receive` decodes a whole batch, dispatches it and returns
+	the pending list to the pool, so by the time `PostSimulation` runs the two hundred decoded values
+	are already garbage. A frame-boundary sample arrives after the peak it is trying to measure.
+
+	Measured rather than reasoned. One decoded `ArrayHeavy` value is **32,097 bytes**, held, under
+	lune — which agrees with phase 9's independent probe at 32,048.2 B to 0.15%. Against that:
+
+	  * frame boundary: **604 B per packet**, out by 53x
+	  * this packet-aligned window: **~10,000 B per packet**, out by 3.2x
+
+	So the window stays where it is, inside the receive callback, where the values are still live.
+	**Both figures are lower bounds** — every window the collector visited is discarded and the
+	survivors are the ones where it freed the least, which biases down rather than up — and the
+	Studio decode column should be read as "at least this much" rather than as a measurement. The
+	number that is not a lower bound is the lune one, and `CLAUDE.md` §9's rule about running the
+	half that lune can run applies to the harness as much as to the suite.
+]]
+
 for mode, adapter in adapters do
 	for _, schema in Modes.SCHEMAS do
 		resetCell(mode, schema)
@@ -121,9 +146,14 @@ for mode, adapter in adapters do
 			cell.received += 1
 
 			--[[
-				Windowed heap delta. The collector cannot be stopped in Roblox, so a window it
-				ran inside comes out negative; those are dropped and the median of the rest is
-				reported (PLAN-M0 R-2, corrected).
+				Windowed heap delta, every `DECODE_ALLOC_WINDOW` packets, sampled here inside the
+				receive callback rather than at the frame boundary — the block above this loop says
+				why, and it is the one place in this harness where a packet-aligned window is the
+				correct one.
+
+				The collector cannot be stopped in Roblox, so a window it ran inside comes out
+				negative; those are dropped and the median of the rest is reported (PLAN-M0 R-2,
+				corrected).
 			]]
 			if cell.received - cell.allocWindowStart >= window then
 				local now = heapBytes()

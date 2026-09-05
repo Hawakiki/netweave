@@ -128,6 +128,24 @@ push("`n` is how many sample windows survived the collector, and the bracketed r
 push("and highest of those windows. **A median whose range is a factor wide is not a number** — see")
 push('`bench/README.md`, "Reading the allocation numbers".')
 push("")
+
+--[[ The control group first, because every encode cell below contains one engine frame and this is
+     how much of the number that is. A run from before M4 phase 0 has no `idle` block and says so
+     rather than printing a zero. ]]
+if run.idle and run.idle.bytesPerPacket then
+	push(
+		`**Idle frame: {round(run.idle.bytesPerPacket, 1)} B `
+			.. `<sub>[{round(run.idle.bytesLow, 1)} .. {round(run.idle.bytesHigh, 1)}]</sub>`
+			.. `, {run.idle.allocSamples}/{run.idle.allocWindows} windows.** A frame that sends`
+	)
+	push("nothing, in the same units. Every encode cell below contains one engine frame; this is how")
+	push("much of it is Studio. A cell near this figure is measuring the engine, not the library.")
+	push("")
+else
+	push("_This run predates the idle control group (M4 phase 0), so the engine's share of each")
+	push("encode cell is unknown._")
+	push("")
+end
 push("| Cell | Encode B/call | n | Decode B/packet | n |")
 push("|---|---|---|---|---|")
 for _, schema in SCHEMAS do

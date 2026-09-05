@@ -115,11 +115,49 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
 
 ## 6. Tasks
 
-### Phase 0 — the instrument
+### Phase 0 — the instrument — **done**
 
-- [ ] Port the per-frame allocation window from the phase 9 lune probe into `bench/src/shared/Alloc.luau`. Under lune it returned 400 usable windows out of 400 with a spread of zero where the per-packet window returned four out of twenty-five spanning 16x.
-- [ ] Re-run the M3 matrix twice on the unchanged tree and show the spread collapsed. If it does not, the port failed and no number after this point means anything.
-- [ ] Record the result in `bench/RESULTS.md` beside the M3 tables, whichever way it goes.
+- [x] Port the per-frame allocation window into `bench/src/shared/Alloc.luau` — `Alloc.frames`.
+      **The port turned into a diagnosis.** The encode probe called `fire` five thousand times back
+      to back and never let a frame end, so for a batching library nothing was ever flushed and the
+      payloads piled into one outgoing buffer that grows by *doubling*: most calls allocating
+      nothing, a handful allocating a block the size of everything before them. The median of
+      twenty-five windows over that was a lottery on where the doublings landed. The window is one
+      frame now, ending in a yield, so every library's own scheduler flushes inside it.
+- [x] Re-run twice on the unchanged tree and show the spread collapsed. **It did, on the column that
+      was broken.** Surviving windows 4-8 of 25 → **276-385 of 400**; the `ArrayHeavy` range 16x →
+      **0.3%**; the two runs agree to **1.7% or better on every encode cell**.
+
+      The old numbers were **biased high by two to six times**, not merely imprecise. Two
+      independent checks say the new ones are right: netweave's 1909.8 B agrees with phase 9's lune
+      probe at 1908.4 B to **0.07%**, and `raw` — which serialises nothing — lands exactly on the
+      idle control group's 10.24 B, because all that is left in its window is the engine.
+
+      The ranking changed with the precision. M3 read blink 4040 / netweave 3932 / zap 3932 /
+      bytenet 3722, four libraries inside 8%, which is a tie, which is noise. What is there is
+      bytenet at a third of the field, netweave and zap together, blink 42% behind.
+- [x] **An idle control group, which was not in the plan and should have been.** A frame window
+      contains a real engine frame, so Studio's own allocation is inside every encode cell. `idle`
+      in the run document is a frame that sends nothing, same units, same window count: **10.24 B,
+      400/400**, in both runs. `CLAUDE.md` §9's control-group rule, applied to the harness itself.
+- [x] ~~The same window on the receive side.~~ **Tried and reverted, with the measurement that
+      settled it.** The two costs have opposite shapes: an outgoing buffer is still there at the
+      frame boundary and a batch of decoded values is not, because `inbound.receive` decodes,
+      dispatches and returns its pending list to the pool before `PostSimulation` runs. One decoded
+      `ArrayHeavy` value is **32,097 B** under lune (phase 9's independent probe: 32,048.2 B, 0.15%
+      apart); the frame boundary reported **604 B**, out by 53x, against the packet-aligned window's
+      ~10,200, out by 3.2x. Both are lower bounds — the discarded windows are the ones the collector
+      visited — so the Studio decode column reads "at least this much".
+- [x] Record it in `bench/RESULTS.md` — "M4 phase 0: the instrument, rebuilt on the send side",
+      including what did not work. `bench/README.md` carries the same for whoever runs it next.
+- [ ] **Acceptance 9 is met on three of four columns and stays open on the fourth.** Encode
+      `ArrayHeavy` within 1.7%; decode flags identical to the decimal for all five modes; encode
+      flags at the **±5.12 B quantisation floor** rather than inside 10%, which no arrangement of
+      windows improves on because `collectgarbage("count")` reports kilobytes. Decode `ArrayHeavy`
+      moves 13-17% — far better than the M3 instrument's 76% and 146%, still outside the bar. A
+      window big enough to hold an `ArrayHeavy` batch is one the collector almost always visits, and
+      Roblox exposes enough to detect that and not enough to correct for it. **Carried to phase 7**,
+      which is the only phase that needs that cell.
 
 ### Phase 1 — read the neighbours
 
