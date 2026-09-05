@@ -23,6 +23,7 @@
 	     so the loss is measured rather than merely admitted.
 ]]
 
+local Baseline = require("../src/replication/Baseline")
 local Batch = require("../src/transport/Batch")
 local Budget = require("../src/transport/Budget")
 local Buffer = require("../src/codec/Buffer")
@@ -105,6 +106,14 @@ local declared = Namespace.declare("h", {
 	--[[ A second listener-less channel, because a queue keeps the depth it was built with and the
 	     one above has already been filled by the case that tests overflow. ]]
 	hushed = nw.signal({ data = t.struct({ n = t.u8 }), rate = 1000 }),
+	--[[ Server to client and driven by a store, so a client's packet on it is doubly illegitimate:
+	     wrong direction, and a class whose only way in is a store this peer cannot reach. ]]
+	mirrored = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ n = t.u8 }),
+		audience = nw.audience.everyone,
+		store = nw.store.of({}),
+	}),
 })
 
 local protocol = Namespace.seal()
@@ -121,6 +130,7 @@ local Asked = declared.channels.asked
 local Silent = declared.channels.silent
 local Broadcast = declared.channels.broadcast
 local Hushed = declared.channels.hushed
+local Replicated = declared.channels.mirrored :: any
 
 --[[ An id past the last one assigned. Nothing resolves it, which is the one failure the format
      cannot isolate. ]]
@@ -1155,6 +1165,124 @@ do
 
 	agreement.forget(mallory)
 	announced = 0
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Replication, from the side that must not be able to touch it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		A replicated channel is server-to-client, so **everything in this section is a client
+		sending something that cannot legitimately exist**. G6 refuses it before decode, at
+		`direction`, and the assertions are about what it costs rather than whether it lands.
+
+		The baseline store is the interesting part. It is memory the server holds per client, and a
+		peer that could add to it, or empty it, would have found either a leak or an amplifier.
+	]]
+	local held = Baseline.new(true)
+
+	local replicated = Inbound.new({
+		resolve = Namespace.channelById,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = true,
+		baselines = held,
+	})
+
+	--[[ Seeded the way the tick would, so there is something to lose. ]]
+	held.keep(mallory, Replicated, 1, { n = 1 })
+	held.keep(mallory, Replicated, 2, { n = 2 })
+	equals("the server is holding two baselines", held.held(mallory), 2)
+
+	--[[ Forty packets on the replicated id, which is the shape a client would send if it wanted to
+	     be replicated *to* on its own terms. ]]
+	for index = 1, 40 do
+		Batch.writeChange(Replicated, index, nil, { n = index })
+	end
+
+	local changes, alsoCarried = Buffer.take()
+	local stood = pcall(replicated.receive, changes, alsoCarried, mallory)
+
+	check("a batch of well-formed changes does not raise", stood)
+	equals("every one refused at direction", reportedAt("direction"), 40)
+	equals("and none of them decoded", reportedAt("parse"), 0)
+
+	--[[ **A client cannot make the server hold a baseline it did not ask for.** The only thing that
+	     writes one is the tick, driven by the store and the audience; there is no packet that
+	     reaches `keep`. Forty tried. ]]
+	equals("the server holds exactly what it held", held.held(mallory), 2)
+	equals("the first is untouched", held.of(mallory, Replicated, 1).n, 1)
+	equals("and so is the second", held.of(mallory, Replicated, 2).n, 2)
+
+	--[[
+		**And it cannot make the server forget one either**, which is the half that was live until
+		this section was written.
+
+		Any refusal of a replicated packet clears the channel and asks for it again — right on the
+		client, where a refusal means a change was lost. On the server it meant one malformed byte
+		bought a full resend of everything that peer could see, every batch, forever. The endpoint
+		that gives up a baseline is now the one that receives changes.
+	]]
+	equals("and did not forget one because a peer sent rubbish", held.held(mallory), 2)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		The resync control packet, which is the one thing a client sends that makes the server do
+		work it did not choose.
+
+		It is bounded rather than refused: clearing a baseline already cleared costs a table lookup,
+		and however many arrive in one tick provoke one resend in the tick that follows. The most a
+		peer can extract is a whole state per tick, which is what `nw.state` sends unconditionally.
+	]]
+	local held = Baseline.new(true)
+
+	local replicated = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+	})
+
+	held.keep(mallory, Replicated, 1, { n = 1 })
+
+	for _ = 1, 300 do
+		Batch.writeResync(Replicated.id)
+	end
+
+	local packed = Buffer.take()
+	local survived = pcall(replicated.receive, packed, nil, mallory)
+
+	check("three hundred resync requests do not raise", survived)
+	equals("the baseline is cleared once and stays cleared", held.held(mallory), 0)
+
+	reset()
+
+	--[[ A resync naming something that is not a replicated channel — an ordinary id, and one that
+	     is not a channel at all. Refused rather than assumed: a peer that could ask about ids it
+	     made up could otherwise walk the server's channel table on demand. ]]
+	Batch.writeResync(Fixed.id)
+	Batch.writeResync(60000)
+
+	local madeUp = Buffer.take()
+	local stood = pcall(replicated.receive, madeUp, nil, mallory)
+
+	check("a resync for a channel that is not replicated does not raise", stood)
+	equals("both are refused", reportedAt("replicate"), 2)
 end
 
 -- ---------------------------------------------------------------------------------------------

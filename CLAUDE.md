@@ -280,7 +280,7 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
 
 **A security-relevant suite counts its own shape** through `tests/harness.luau`, and refuses to pass
 under the floor it declares. Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
-92%, `transport_runtime` 59%, and the rule behind the number is §9.
+90%, `transport_runtime` 66%, and the rule behind the number is §9.
 
 Two checks read source off disk rather than running it, which is why they live outside `src/` and
 `tests/` — the analyzer walks those two roots and cannot resolve `@lune/fs`:

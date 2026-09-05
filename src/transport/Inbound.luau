@@ -250,6 +250,21 @@ function Inbound.new(config: Config): Inbound
 		because **this endpoint already knows** — it is the one that refused the packet.
 	]]
 	local function desync(channel: any)
+		--[[
+			**Only the end that receives changes gives one up**, and the asymmetry is a bound rather
+			than a tidiness.
+
+			Replication flows server to client, so the client is the one that can lose a change. On
+			the server a packet on a replicated id is a client sending something it must not — G6
+			refuses it before decode — and the server's baseline is authoritative: nothing was lost.
+			Clearing it there would let any peer force a full resend of everything it can see with
+			one malformed byte, which is a cheaper amplifier than the resync packet that at least
+			has to name a real channel.
+		]]
+		if isServer then
+			return
+		end
+
 		local store = baselines
 
 		if store then
@@ -901,7 +916,18 @@ function Inbound.new(config: Config): Inbound
 			end
 
 			local base = store.of(sender, channel, subject)
-			local value = channel.delta.apply(base)
+			local value, failure = channel.delta.apply(base)
+
+			--[[ A change that could not be read is not a removal, and treating it as one would drop
+			     a subject because a peer sent a short packet. The baseline is left exactly as it was
+			     and the channel is given up on: this endpoint cannot know how much of that change it
+			     took before it ran out, so every change after it is against a value that may or may
+			     not be what the sender thinks. ]]
+			if failure then
+				report(channel, sender, "parse", failure, bytes)
+				desync(channel)
+				return
+			end
 
 			if value == nil then
 				--[[ Gone. Dropped here rather than left for the handler, so that a handler which
