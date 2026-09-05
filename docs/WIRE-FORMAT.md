@@ -164,12 +164,47 @@ channels.
 Both peers derive ids from their own copy of the declarations. If those disagree — a stale client,
 a partial deploy — every packet decodes as the wrong channel.
 
-At startup each peer computes a 32-bit FNV-1a hash over the sorted qualified names joined with
-`\n`, and the client sends it on channel 0. A mismatch is refused loudly at startup rather than
-producing corrupt payloads for the session's lifetime.
+Each peer computes a 32-bit FNV-1a hash over its own declarations, and the client sends it on
+reserved id 0 as the **first packet of its first batch**. A peer whose hash differs is refused from
+that point, before decode, at stage `protocol`.
 
-The hash covers names only, not types. A changed field type with an unchanged name is not caught
-here; the per-field validation catches it as a rejection instead.
+```
+control := 0:varint  kind:u8  length:varint  body
+hello   := kind=1  length=4  hash:u32
+```
+
+The length is what lets id 0 hold "anything v2 needs": a kind a reader has never heard of is
+stepped over rather than fatal. Three bytes of overhead, once per session, against having to bump
+the batch version to add a control message.
+
+### The hash covers the lowered IR
+
+~~The hash covers names only, not types. A changed field type with an unchanged name is not caught
+here; the per-field validation catches it as a rejection instead, which is the right place because
+it is per packet rather than per session.~~ **Wrong on both counts, corrected in M3 phase 5.**
+
+The per-field validation refuses *every* packet for the rest of the session, and it never says why.
+Measured on eleven single-change pairs, the name-only hash was identical for **ten** of them —
+including a field widened from `t.u8` to `t.u16`, a channel's class changed, and a query's `returns`
+changed with its `args` untouched (`tests/protocol_runtime.luau`).
+
+What goes into the hash is everything both peers need in order to read each other's bytes: the
+qualified name, the class, and the lowered node tree of every schema the channel carries, plus the
+derived framing and size numbers as a cross-check on the lowering itself.
+
+What stays out is everything only one side enforces — `rate`, `burst`, `maxBytes`, `authorize`,
+`audience`, `unreliable`. A hash that moved when a server tuned a rate limit would force a client
+redeploy for a server-side edit, which is a good way to make sure rate limits never get tuned.
+
+**32 bits is a deploy-skew detector, not a cryptographic claim.** Two genuinely different protocols
+collide with probability 2^-32, and nothing here resists an adversary choosing a collision. Nothing
+needs to: a client that forges a matching hash still has every field of every packet validated
+against the schema it claims to share.
+
+**A peer that says nothing is accepted.** The handshake diagnoses deploy skew; it is not an
+authorization boundary, and treating it as one would be theatre — a hostile client omits the hello
+and is then held to exactly the same per-field validation as one that sent it. Refusing a silent
+peer would only turn a dropped packet into a player who cannot play.
 
 ## 5. Payload layout
 

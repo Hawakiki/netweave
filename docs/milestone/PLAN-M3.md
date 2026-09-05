@@ -151,9 +151,26 @@ the same shape `RESEARCH §3.7-H` credits Zap for.
 
 ### D-7 — The protocol hash covers types
 
-Currently it covers channel names only, so changing `t.u8` to `t.u16` on a field leaves the hash
-**identical**: a stale client connects successfully and is then refused on every packet, forever,
-with no diagnosis. Hashing the lowered IR makes that a single, legible failure at join.
+~~Currently it covers channel names only~~ **— done in phase 5, and the gap was wider than this
+said.**
+
+The claim was that changing `t.u8` to `t.u16` leaves the hash identical. Measured on eleven
+single-change pairs, the name-only hash was identical for **ten**: a field renamed, added, narrowed,
+made optional; an array bound raised; an enum variant added or renamed; a channel's *class* changed;
+and a query's `returns` changed with its `args` untouched. Only a channel renamed moved it — which
+is the one thing hashing names can catch.
+
+The hash now covers the qualified name, the class, and the lowered node tree of every schema the
+channel carries, plus the derived framing and size numbers as a cross-check on the lowering itself.
+It deliberately excludes `rate`, `burst`, `maxBytes`, `authorize`, `audience` and `unreliable`:
+those are one side's policy, and a hash that moved when a server tuned a rate limit would force a
+client redeploy for a server-side edit, which is how a project learns to stop tuning rate limits.
+
+Two things were added that the decision did not ask for and that it needs to be worth anything.
+`nw.signature()` prints the text the hash is taken over, because "the hashes do not match" without
+it is a dead end — the affordance is a diff, not a number. And `Batch.Sink.admit` gained a stage
+alongside its reason, so that a mismatched peer's packets report at `protocol` rather than at
+`budget`; a refusal filed under the wrong stage is a diagnostic that misdirects.
 
 ### D-8 — netweave does not encrypt, and says so
 
@@ -438,11 +455,29 @@ evidence the claim is not merely unexamined:
 
 ### Phase 5 — the protocol handshake
 
-- [ ] The hash covers the lowered IR, not channel names (D-7)
-- [ ] A test that changes exactly one field's type and asserts the hash **moves** — the current
-      behaviour is that it does not
-- [ ] Mismatch is refused at stage `"protocol"` with both hashes in the reason
-- [ ] The check happens once at join, not per packet
+- [x] The hash covers the lowered IR, not channel names (D-7). `src/api/Protocol.luau`; the codec
+      keeps its `Layout` so nothing is lowered twice.
+- [x] A test that changes exactly one field's type and asserts the hash **moves** — and eleven other
+      single-change pairs. Reverting to the name-only signature collapses **ten of the eleven** to
+      the same number, including a class change and a query's `returns`. Measured, not asserted.
+- [x] Six things that must **not** move it: `rate`, `burst`, `audience`, `unreliable`, the order the
+      fields were typed in, and declaring the same thing twice. A hash that moved when a server
+      tuned a rate limit would force a client redeploy for a server-side edit.
+- [x] Mismatch is refused at stage `"protocol"` with both hashes in the reason
+- [x] The check happens once at join, not per packet — but the *refusal* is per packet, because the
+      hello is in the first batch and the packets behind it in that same batch are the first ones
+      that must not land. `Batch.Sink.admit` now returns a stage alongside its reason so that
+      refusal reports honestly rather than as `budget`.
+- [x] Reserved id 0 carries `kind:u8 length:varint body`, so a control kind a build has never heard
+      of is stepped over rather than fatal. Id 0 was reserved for "anything v2 needs", and a
+      reserved slot that cannot be extended is not reserved for anything.
+- [x] `nw.signature()`: the text the hash is taken over. A hash that differs says *that* two builds
+      disagree and nothing about where; this is what makes the mismatch diagnosable rather than a
+      dead end.
+- [x] **A peer that says nothing is accepted, deliberately.** The handshake diagnoses deploy skew
+      and is not an authorization boundary — a hostile client omits the hello and is held to exactly
+      the same per-field validation, so refusing a silent peer gains nothing and costs a real client
+      whose hello was lost. Written into `WIRE-FORMAT.md` §4 rather than left as behaviour.
 
 ### Phase 6 — the adversarial suite
 

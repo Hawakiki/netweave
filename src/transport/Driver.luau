@@ -26,6 +26,7 @@ local Inbound = require("./Inbound")
 local Link = require("./Link")
 local Namespace = require("../api/Namespace")
 local Outbound = require("./Outbound")
+local Protocol = require("../api/Protocol")
 local Query = require("./Query")
 local Recipients = require("./Recipients")
 local Transport = require("../api/Transport")
@@ -69,14 +70,27 @@ function Driver.install()
 		spawn = task.spawn,
 	})
 
+	--[[ Read late, and through a function, because the protocol does not exist until every
+	     namespace has been declared — see `ensure` below. ]]
+	local agreement = Protocol.new({
+		hash = function(): number
+			return Namespace.protocol().hash
+		end,
+
+		announce = function(who: any?)
+			outbound.hello(if who == nil then Outbound.SERVER else who, Namespace.protocol().hash)
+		end,
+
+		isServer = isServer,
+	})
+
 	local inbound = Inbound.new({
 		resolve = Namespace.channelById,
 		admit = budget.admit,
 		isServer = isServer,
 		queries = query,
+		agreement = agreement,
 	})
-
-	link.receive(inbound.receive)
 
 	--[[
 		Ids cannot be assigned until every namespace has been declared, because an id depends on
@@ -88,11 +102,37 @@ function Driver.install()
 	local ready = false
 
 	local function ensure()
-		if not ready then
-			Namespace.seal()
-			ready = true
+		if ready then
+			return
+		end
+
+		Namespace.seal()
+		ready = true
+
+		--[[
+			The client's hello goes out here, the moment the protocol is real and before anything
+			else this peer will ever send.
+
+			`ensure` is the only place that knows when the numbering is fixed, and being first in the
+			buffer is what makes the hash the first packet of the first batch — so a server that
+			disagrees can refuse the rest of that same batch rather than accepting one batch of
+			payloads that decode as the wrong channels.
+
+			The server does not announce unprompted, because at install there is nobody to announce
+			to. It answers on a mismatch instead (`src/api/Protocol.luau`).
+		]]
+		if not isServer then
+			outbound.hello(Outbound.SERVER, Namespace.protocol().hash)
 		end
 	end
+
+	--[[ Sealing on the way in as well as on the way out. A client that only listens never sends, so
+	     `ensure` would never run and its hello would never leave — and a listen-only client on a
+	     stale build is exactly the one whose mis-decodes are hardest to explain. ]]
+	link.receive(function(packed: buffer, instances: { Instance }, sender: any?)
+		ensure()
+		inbound.receive(packed, instances, sender)
+	end)
 
 	--[[
 		Once a frame, in this order.
@@ -125,6 +165,7 @@ function Driver.install()
 			inbound.forget(player)
 			budget.forget(player)
 			query.forget(player)
+			agreement.forget(player)
 		end)
 	end
 

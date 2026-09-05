@@ -27,6 +27,7 @@ local Batch = require("./Batch")
 local Settings = require("../api/Config")
 local Context = require("../api/Context")
 local Observer = require("../api/Observer")
+local Protocol = require("../api/Protocol")
 local Query = require("./Query")
 
 local Inbound = {}
@@ -67,6 +68,9 @@ export type Config = {
 	     endpoint either serves queries or refuses them, and there is no half of it that makes
 	     sense on its own. Absent, a query packet is reported and dropped. ]]
 	queries: Query.Queries?,
+	--[[ Who has agreed on the declarations. Absent, every peer is taken at its word — which is what
+	     a test that is not about the handshake wants. ]]
+	agreement: Protocol.Agreement?,
 }
 
 export type Inbound = {
@@ -145,6 +149,7 @@ function Inbound.new(config: Config): Inbound
 	local admit = config.admit
 	local isServer = config.isServer
 	local queries = config.queries
+	local agreement = config.agreement
 
 	--[[
 		The sender of the batch currently being **read**.
@@ -555,15 +560,45 @@ function Inbound.new(config: Config): Inbound
 		     reads replies, and neither ever reads the other (`src/transport/Batch.luau`). ]]
 		answers = isServer,
 
-		admit = function(channel: any, bytes: number): string?
+		admit = function(channel: any, bytes: number): (string?, string?)
 			--[[ Once the pending set is full the rest of the batch is refused here, before decode,
 			     rather than decoded and then dropped. Refusing has to stay cheaper than accepting or
 			     the limit becomes the amplifier. ]]
 			if full then
-				return `batch holds more than {pendingCeiling} packets; the rest were dropped`
+				return `batch holds more than {pendingCeiling} packets; the rest were dropped`, "budget"
 			end
 
-			return admit(channel, sender, bytes)
+			--[[
+				A peer whose declarations disagree with this one's is refused **before decode**, and
+				that ordering is the point rather than an optimisation.
+
+				Their ids map to different channels, so their bytes would not fail to decode — they
+				would decode into whatever channel this peer has at that number, and be delivered to
+				its handler as a well-formed payload. A wrong payload arriving successfully is worse
+				than no payload, and it is the failure `PLAN-M3` D-7 is written against.
+
+				Checked per packet rather than per batch because the hello is *in* the first batch:
+				the packets behind it in that same batch are the first ones that must not land.
+			]]
+			if agreement then
+				local disagreement = agreement.verdict(sender)
+
+				if disagreement then
+					return disagreement, "protocol"
+				end
+			end
+
+			--[[ The injected `admit` is the rate budget, which has one stage; naming it here rather
+			     than defaulting keeps the two callers of `sink.refuse` symmetrical. ]]
+			return admit(channel, sender, bytes), "budget"
+		end,
+
+		--[[ A peer announcing its own declarations. Handled here rather than routed onward, because
+		     what it decides is whether the rest of this batch is admitted at all. ]]
+		hello = function(hash: number)
+			if agreement then
+				agreement.greet(sender, hash)
+			end
 		end,
 
 		deliver = function(channel: any, value: any, bytes: number, id: number?)

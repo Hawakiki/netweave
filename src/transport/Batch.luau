@@ -64,9 +64,10 @@ local TWO_BYTE_MAX = 16383
 	@within Batch
 	.resolve (id: number) -> any -- the channel with that wire id, or nil
 	.answers boolean -- true where a query packet is a request: the server
-	.admit (channel: any, bytes: number) -> string? -- nil to decode it, or a reason to refuse
+	.admit (channel: any, bytes: number) -> (string?, string?) -- nil to decode it, or a reason and its stage
 	.deliver (channel: any, value: any, bytes: number, call: number?) -> ()
 	.reply (channel: any, call: number, status: number, value: any?, bytes: number) -> ()
+	.hello (hash: number) -> () -- a peer's protocol hash, off a control packet
 	.refuse (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> ()
 
 	What [Batch.read] calls as it walks a batch. Every member is resolved once by the caller and
@@ -82,11 +83,37 @@ export type Sink = {
 	     client, and a property of the endpoint rather than of the packet — which is what lets one
 	     wire id carry both directions of a query without a byte to say which. ]]
 	answers: boolean,
-	admit: (channel: any, bytes: number) -> string?,
+	--[[ nil to decode the packet, or a reason and the stage to report it at. The stage is the
+	     sink's to choose because the same refusal point serves two of them: over the rate is
+	     `budget`, and a peer on a protocol this one does not share is `protocol`. ]]
+	admit: (channel: any, bytes: number) -> (string?, string?),
 	deliver: (channel: any, value: any, bytes: number, call: number?) -> (),
 	reply: (channel: any, call: number, status: number, value: any?, bytes: number) -> (),
+	--[[ A peer's protocol hash, off a control packet. Once per session per peer, in the first batch
+	     it sends. ]]
+	hello: (hash: number) -> (),
 	refuse: (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> (),
 }
+
+--[=[
+	@prop HELLO number
+	@within Batch
+
+	The control kinds carried on channel id 0, which is reserved (`WIRE-FORMAT.md` §3).
+
+	`HELLO` is a peer announcing the hash of its own declarations, once, in its first batch.
+]=]
+--[[
+	A control packet carries its body length, and an unknown kind is skipped rather than fatal.
+
+	Id 0 is reserved "for the handshake, and anything v2 needs", and a reserved slot that cannot be
+	extended without breaking every v1 reader is not reserved for anything. The length is what makes
+	a kind this build has never heard of steppable — three bytes of overhead, once per session,
+	against having to bump the batch version to add a control message.
+]]
+local HELLO = 1
+
+Batch.HELLO = HELLO
 
 --[=[
 	@prop OK number
@@ -285,6 +312,26 @@ function Batch.writePacket(channel: any, value: any)
 	Batch.writeBody(channel, value)
 end
 
+--[=[
+	@within Batch
+	@function writeHello
+	@param hash number -- this peer's protocol hash
+
+	The handshake packet, on reserved channel id 0.
+
+	Written once per session, as the first packet this peer sends, so the peer on the other end
+	learns whether it is talking to a build it agrees with before it has read anything else in the
+	batch (`WIRE-FORMAT.md` §4).
+]=]
+function Batch.writeHello(hash: number)
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(0)
+	Buffer.writeU8(HELLO)
+	Buffer.writeVarint(4)
+	Buffer.writeU32(hash)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Reading
 -- ---------------------------------------------------------------------------------------------
@@ -328,6 +375,52 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 		if Buffer.rejected() then
 			sink.refuse(nil, "parse", "truncated channel id", size - packetStart)
 			return
+		end
+
+		--[[
+			Id 0 is control traffic and has no channel behind it (`WIRE-FORMAT.md` §3).
+
+			It is read before `resolve` because resolving 0 would fail, and the failure would be the
+			unrecoverable one: the batch would stop on the very packet that exists to explain why the
+			two peers disagree.
+		]]
+		if id == 0 then
+			local kind = Buffer.readU8()
+			local length = if Buffer.rejected() then 0 else Buffer.readVarint()
+
+			if Buffer.rejected() then
+				sink.refuse(nil, "parse", "truncated control packet", size - packetStart)
+				return
+			end
+
+			local bodyStart = Buffer.cursor()
+			local bodyEnd = bodyStart + length
+
+			if bodyEnd > size then
+				sink.refuse(nil, "parse", "control body runs past the batch", size - packetStart)
+				return
+			end
+
+			--[[ Only the kinds this build knows are read. Anything else is stepped over, which is
+			     what the length is for. ]]
+			if kind == HELLO and length >= 4 then
+				Buffer.setLimit(bodyEnd)
+
+				local hash = Buffer.readU32()
+
+				if not Buffer.rejected() then
+					sink.hello(hash)
+				end
+			end
+
+			--[[ The same tail every other packet takes, written out rather than jumped over. A
+			     control packet carries no instances, so the sidecar cursor stands still — which is
+			     a claim, not an omission, and is why the seek is here at all. ]]
+			Buffer.setLimit(size)
+			Buffer.seek(bodyEnd)
+			Buffer.seekInstances(Buffer.instanceCursor())
+			Buffer.clearRejection()
+			continue
 		end
 
 		local channel = sink.resolve(id)
@@ -455,7 +548,7 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 		else
 			--[[ Everything from here is recoverable: the packet's end is known, so whatever happens
 			     the loop can step over it and carry on. ]]
-			local denial = sink.admit(channel, bytes)
+			local denial, stage = sink.admit(channel, bytes)
 
 			--[[
 				The declared length against the channel's ceiling, before a byte of the payload is
@@ -478,7 +571,7 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 			end
 
 			if denial then
-				sink.refuse(channel, "budget", denial, bytes, call)
+				sink.refuse(channel, stage or "budget", denial, bytes, call)
 			else
 				Buffer.setLimit(payloadEnd)
 

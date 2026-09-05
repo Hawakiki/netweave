@@ -56,6 +56,7 @@ local Channel = require("./api/Channel")
 local Config = require("./api/Config")
 local Context = require("./api/Context")
 local Namespace = require("./api/Namespace")
+local Protocol = require("./api/Protocol")
 local Observer = require("./api/Observer")
 local Policy = require("./api/Policy")
 local Transport = require("./api/Transport")
@@ -242,14 +243,50 @@ end
 	@function protocol
 	@return Protocol
 
-	The agreed channel numbering: an FNV-1a hash over every qualified channel name, sorted, plus
+	The agreed protocol: an FNV-1a hash over every channel's name, class and **lowered schema**, plus
 	the names themselves in id order.
 
-	Both peers compute this independently. A mismatch means a stale client or a partial deploy, and
-	it is worth refusing loudly at startup — every packet in the session would otherwise decode as
-	the wrong channel, silently (`docs/WIRE-FORMAT.md` §4).
+	Both peers compute this independently and the client sends its hash as the first packet it ever
+	sends. A peer whose hash differs is refused at stage `"protocol"` from that point on — every
+	packet between them would otherwise decode as a different channel, successfully, and be handed
+	to a handler as a well-formed payload (`docs/WIRE-FORMAT.md` §4).
+
+	:::note
+	The hash deliberately ignores `rate`, `burst`, `maxBytes`, `authorize`, `audience` and
+	`unreliable`. Those are one side's policy, and a hash that moved when a server tuned a rate limit
+	would force a client redeploy for a server-side edit.
+	:::
 ]=]
 nw.protocol = Namespace.protocol
+
+--[=[
+	@within netweave
+	@function signature
+	@return string
+
+	The text the protocol hash is taken over: every channel, in id order, with its class and the
+	shape its schema lowered to.
+
+	```lua
+	print(nw.signature())
+	--> combat.fireWeapon|command
+	--> data=static/14/14/0:struct(origin:vector3(...)seq:number(storage=u16;...))
+	```
+
+	A hash that differs tells you *that* two builds disagree and nothing about where. Print this on
+	both sides and diff it: the line that differs is the declaration that differs. That is the whole
+	affordance, and without it "the hashes do not match" is a dead end.
+]=]
+nw.signature = function(): string
+	local protocol = Namespace.protocol()
+	local byName: { [string]: any } = {}
+
+	for _, qualified in protocol.names do
+		byName[qualified] = Namespace.channelByName(qualified)
+	end
+
+	return Protocol.signature(protocol.names, byName)
+end
 
 --[=[
 	@type Trusted<T> T

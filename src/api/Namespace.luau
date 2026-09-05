@@ -39,6 +39,7 @@
 ]]
 
 local Channel = require("./Channel")
+local Protocol = require("./Protocol")
 local View = require("./View")
 
 local Namespace = {}
@@ -159,37 +160,25 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 end
 
 --[[
-	FNV-1a, 32-bit, over the sorted qualified names joined with newlines (`WIRE-FORMAT.md` §4).
+	~~FNV-1a over the sorted qualified names.~~ **Moved to `src/api/Protocol.luau` in M3 phase 5, and
+	widened to cover the lowered IR.**
 
-	The hash covers *names* only. A field whose type changed under an unchanged name is not caught
-	here — the per-field validation catches that as a rejection instead, which is the right place
-	because it is per packet rather than per session.
+	The old note here said a field whose type changed under an unchanged name was left to the
+	per-field validation, "which is the right place because it is per packet rather than per
+	session". That was wrong twice over: the per-field validation refuses *every* packet for the rest
+	of the session, and it never says why. `PLAN-M3` D-7.
 ]]
-local function fnv1a(text: string): number
-	local hash = 2166136261
-
-	for index = 1, #text do
-		hash = bit32.bxor(hash, string.byte(text, index))
-		hash = bit32.band(hash * 16777619, 0xFFFFFFFF)
-	end
-
-	return hash
-end
 
 --[=[
 	@interface Protocol
 	@within Namespace
-	.hash number -- FNV-1a over the sorted qualified names
+	.hash number -- FNV-1a over the lowered IR of every channel
 	.count number -- how many channels were numbered
 	.names { string } -- sorted, so `names[id]` is the channel with that id
 
-	What both peers must agree on before any packet is meaningful.
+	Re-exported from [Protocol], which is where it is computed.
 ]=]
-export type Protocol = {
-	hash: number,
-	count: number,
-	names: { string },
-}
+export type Protocol = Protocol.Protocol
 
 local protocol: Protocol? = nil
 
@@ -239,11 +228,9 @@ function Namespace.seal(): Protocol
 		byId[id] = channel
 	end
 
-	local computed: Protocol = table.freeze({
-		hash = fnv1a(table.concat(names, "\n")),
-		count = #names,
-		names = table.freeze(names),
-	}) :: any
+	--[[ After the ids are assigned, not before: the signature is taken in id order, and a channel
+	     without an id has nothing to be in order by. ]]
+	local computed = Protocol.digest(names, byName)
 
 	protocol = computed
 	sealed = true
@@ -286,6 +273,33 @@ function Namespace.channelById(id: number): any?
 	end
 
 	return byId[id]
+end
+
+--[=[
+	@within Namespace
+	@function channelByName
+	@param qualified string -- `"combat.fireWeapon"`
+	@return Channel?
+	@private
+
+	The channel behind a qualified name, sealing the protocol if that has not happened yet.
+
+	Exists for `nw.signature()`, which walks the protocol's own name list and needs the declaration
+	behind each one. A search rather than a table, because it runs once when a human asks why two
+	builds disagree.
+]=]
+function Namespace.channelByName(qualified: string): any?
+	if not protocol then
+		Namespace.seal()
+	end
+
+	for _, channel in byId do
+		if channel.qualified == qualified then
+			return channel
+		end
+	end
+
+	return nil
 end
 
 --[=[
