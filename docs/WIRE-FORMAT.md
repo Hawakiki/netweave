@@ -169,6 +169,14 @@ A change is only meaningful against the value it was computed from, so a change 
 makes every change after it unreadable. Nothing recovers from that by itself and nothing notices
 later: the values would simply be wrong.
 
+**So a patch with no baseline under it is refused rather than merged.** A change's flag bits say
+which fields it carries; every other field is "unchanged", which is only readable against a value
+that has it. Merged into nothing, a patch produces a value with fields missing — one the channel's
+own schema refuses, reaching a handler that was promised it could not. A receiver that has no
+baseline for a subject therefore accepts only a change that carries every field the schema requires,
+which is exactly the change written against nothing above. Anything else is a refusal, at `parse`,
+and the recovery is the packet below. Found by fuzzing the client side in M4 phase 6.
+
 The peer that *refused* the packet is the one that knows, so it says so, on the reserved control id:
 
 ```

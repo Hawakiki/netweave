@@ -443,6 +443,62 @@ do
 	Buffer.load(nil)
 end
 
+do
+	--[[
+		**A patch against a baseline that is not there is refused.**
+
+		The bits at the front of a patch say which fields it carries; the rest are "unchanged", which
+		is only readable against a value that has them. Merging one into nothing produced a struct
+		with fields missing — a value the channel's own `codec.check` refuses, handed to a handler
+		that was promised it could not be.
+
+		Nobody has to be attacking for it to happen: a client that refuses one change holds a
+		baseline the server has already moved past, and the next honest patch is computed against
+		something it no longer has. `PLAN-M4` phase 6 found it with the fuzzer, 8 times in 4,000
+		mutated rounds, and the recovery it needs — refuse, then ask for the channel again — was
+		already built.
+	]]
+	local schema = t.struct({ hp = t.u8, gold = t.u16 })
+	local delta = Delta.build(Ir.lower(schema))
+
+	local held = { hp = 5, gold = 10 }
+
+	Buffer.take()
+	Buffer.load(nil)
+	check("one field moving is a patch", delta.write(held, { hp = 6, gold = 10 }))
+
+	local packed = Buffer.take()
+
+	Buffer.beginRead(packed, nil)
+	local value, failure = delta.apply(nil)
+
+	equals("and against no baseline it is nothing", value, nil)
+	check("with a reason, which is what separates it from a removal", failure ~= nil)
+
+	--[[ The same bytes against the baseline they were written for. Without this the assertion above
+	     would hold for a `Delta` that refused every patch ever written. ]]
+	Buffer.beginRead(packed, nil)
+	local merged, refused = delta.apply(held)
+
+	equals("the same patch against the baseline it was written for merges", refused, nil)
+	check("into the value it describes", deepEquals(merged, { hp = 6, gold = 10 }))
+
+	--[[ A nested struct the patch did not touch is the same hole one level down, and it is a
+	     separate branch of the merger — the one that recurses rather than reading a value. ]]
+	local nested = Delta.build(Ir.lower(t.struct({ n = t.u8, pos = t.struct({ x = t.u8, y = t.u8 }) })))
+
+	Buffer.load(nil)
+	nested.write({ n = 1, pos = { x = 1, y = 2 } }, { n = 2, pos = { x = 1, y = 2 } })
+
+	local partial = Buffer.take()
+	Buffer.beginRead(partial, nil)
+
+	local _, missing = nested.apply(nil)
+	check("a sub-struct nothing carried is refused too", missing ~= nil)
+
+	Buffer.load(nil)
+end
+
 suite.finish()
 
 return true

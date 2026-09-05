@@ -502,9 +502,51 @@ API to write an example against.
 
 ### Phase 6 — the hostile half
 
-- [ ] A client cannot make the server hold a baseline it did not ask for.
-- [ ] A malformed or replayed delta is refused per packet, at a stage of its own, and the batch survives — G4 and G5 as they apply here.
-- [ ] `fuzz_runtime` mutates deltas as well as packets, with the same "nothing vanishes" invariant.
+- [x] A client cannot make the server hold a baseline it did not ask for. Forty well-formed changes
+      on the replicated id, from a client, in one batch: every one refused at `direction` before
+      decode, none of them parsed, and the server holding exactly the two baselines it held. Nothing
+      on the receive path reaches `keep` — the only thing that writes a baseline is the tick, driven
+      by the store and the audience — and now something has tried.
+- [x] **And it cannot make the server forget one either**, which was live until this phase.
+      `Inbound.desync` cleared the sender's baselines for a channel on *any* refusal, at both ends;
+      on the server that meant one malformed byte bought a full resend of everything that peer could
+      see, every batch, forever. It is gated to the endpoint that *receives* changes. Confirmed by
+      removing the guard and watching `the server holds exactly what it held` go from 2 to 0.
+- [x] The resync control packet is the one thing a client sends that makes the server work it did
+      not choose, so it is bounded rather than refused: 300 in one batch clear a baseline once and
+      the tick that follows resends once. A resync naming a channel that is not replicated, and one
+      naming id 60000, are both refused at `replicate` rather than assumed — a peer that could ask
+      about ids it invented could otherwise walk the channel table on demand.
+- [x] A malformed delta is refused per packet, at `parse`, and the batch survives. **Two defects
+      before a test was written for either.** `Delta.apply` neither cleared nor checked
+      `Buffer.rejected()`, so a change whose flag bits claimed fields the packet did not carry read
+      past its own end and came back holding whatever the next packet's bytes were — silently,
+      because nothing asked. And `Inbound` treated a change that could not be read as a *removal*,
+      dropping a subject because a peer sent a short packet. `apply` returns `(any, string?)` now
+      and the sink refuses on the reason, which is what separates a removal from a lie.
+- [x] `fuzz_runtime` mutates deltas as well as packets: a second endpoint with `isServer = false`
+      and a baseline store, 4,000 rounds of arrivals, patches and removals over the same nine
+      mutations, with the same four invariants. The sender's picture of the client is kept and
+      diverges as refusals land, and a desync clears it — which is the resync answered, and without
+      it the run would have spent every round after the first refusal against a reader with no
+      baselines at all.
+- [x] **It found the one nobody had thought of.** A patch says which fields it carries; the rest are
+      "unchanged", which is only readable against a value that has them. Merged into *nothing* it
+      produced a struct with fields missing — a value the channel's own `codec.check` refuses,
+      handed to a handler that was promised that cannot happen. 8 violations in 4,000 rounds, and
+      **no attacker is needed**: a client that refuses one change holds a baseline the server has
+      already moved past, so the next honest patch is computed against something it no longer has.
+      `Delta`'s merger rejects a required field it has neither a bit nor a baseline for, the channel
+      is given up on, and the resync that already existed is what recovers it. Confirmed by taking
+      the two rejections out and watching the same eight come back.
+- [x] Two of the nine mutations are **not** claimed against changes, and the reason is written into
+      the file: this schema carries no Instances, so trimming or padding the sidecar changes nothing
+      a change reader can see. The assertion would have passed — a refusal earlier in the run leaves
+      the reader without baselines and the next honest patch is refused in whichever round it falls
+      in — which is §9's "passing for the wrong reason" exactly. The claim was dropped rather than
+      made loosely.
+- [x] `hostile_runtime` 186 assertions at 99% failure-path, `fuzz_runtime` 40 at 90%, `delta_runtime`
+      139 at 22% with the partial-merge refusal as a named case rather than only a fuzz finding.
 
 ### Phase 7 — the framerate gap
 

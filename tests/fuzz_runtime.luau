@@ -26,6 +26,7 @@
 	the observer saw is in the counters.
 ]]
 
+local Baseline = require("../src/replication/Baseline")
 local Batch = require("../src/transport/Batch")
 local Budget = require("../src/transport/Budget")
 local Buffer = require("../src/codec/Buffer")
@@ -44,6 +45,11 @@ local check, equals, fail = suite.check, suite.equals, suite.fail
 --[[ Seeded, and the seed is printed. A fuzz failure nobody can reproduce is an anecdote. ]]
 local SEED = 20260905
 local ROUNDS = 10000
+
+--[[ Fewer rounds than the batch fuzz above, and the reason is that a change is a smaller surface:
+     one channel, one packet shape, and flag bytes that are at most two. Every mutation still breaks
+     something well inside this many, which is what the counters at the end check. ]]
+local CHANGES = 4000
 
 math.randomseed(SEED)
 
@@ -85,6 +91,21 @@ local declared = Namespace.declare("f", {
 		rate = 100000,
 		timeout = 5,
 		authorize = allows,
+	}),
+	--[[ Server to client, so it is fuzzed against the endpoint that receives it — see the second
+	     run at the end of this file. Its schema carries a flag, an optional and a nested struct,
+	     because a change's own bitfield is the thing being mutated and a schema with one bit would
+	     mutate one bit. ]]
+	mirrored = nw.replicate({
+		subject = t.u16,
+		data = t.struct({
+			n = t.u8,
+			flag = t.boolean,
+			maybe = t.optional(t.u16),
+			pos = t.struct({ x = t.u8, y = t.u8 }),
+		}),
+		audience = nw.audience.everyone,
+		store = nw.store.of({}),
 	}),
 })
 
@@ -588,6 +609,296 @@ print(`        seed {SEED}, {ROUNDS} rounds, {delivered} delivered, {reported} r
 
 for _, mutation in mutations do
 	print(`        {mutation.name}: {exercised[mutation.name]} run, {broke[mutation.name]} refused`)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The other direction: changes, mutated, arriving at a client
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Everything above is a client attacking a server, because that is the direction every other
+	channel class runs in. A replicated channel runs the other way, so the bytes that matter are the
+	ones a client reads — and a client reads them *against a baseline*, which is state the sender
+	chose and the reader cannot check.
+
+	That makes the flag bytes at the front of a change the most interesting bytes in the format. They
+	are not a value; they are an instruction about which values follow, and a mutated one says
+	"three fields are here" over a packet carrying one. So the same mutations run again, over a
+	stream of arrivals, patches and removals, against the same four invariants.
+]]
+
+local Mirrored = declared.channels.mirrored :: any
+
+local landed = 0
+local removals = 0
+local desyncs = 0
+
+--[[ Set when the reader gives up on the channel, and honoured by the encoder below. Without it this
+     run would spend most of its rounds against a reader that has no baselines at all — every patch
+     refused, the merge never reached — which is the fuzz equivalent of testing one branch ten
+     thousand times. ]]
+local resend = false
+
+--[[ Unbounded, the way `Driver` builds a client's: what arrived is already bounded by what the
+     server agreed to send (`src/transport/Driver.luau`). ]]
+local baselines = Baseline.new()
+
+local mirror = Inbound.new({
+	resolve = Namespace.channelById,
+
+	admit = function(): string?
+		return nil
+	end,
+
+	--[[ The one line that makes this a client. A replicated packet is refused before decode on a
+	     server (G6), so the receive path for changes can only be exercised from this side. ]]
+	isServer = false,
+	baselines = baselines,
+
+	desynced = function()
+		desyncs += 1
+		resend = true
+	end,
+})
+
+--[[ A client's handler takes the subject in front of the payload, and both are checked: the subject
+     names which value this is, so one its own codec refuses is as much a violation of invariant 2 as
+     a payload would be. A nil payload is the subject going away. ]]
+Mirrored.handler = function(subject: any, value: any)
+	if value == nil then
+		removals += 1
+	else
+		landed += 1
+	end
+
+	local misnamed = Mirrored.subjectCodec.check(subject)
+
+	if misnamed and #violations < 8 then
+		table.insert(violations, `a change named a subject its own codec refuses: {misnamed}`)
+	end
+
+	if value == nil then
+		return
+	end
+
+	local failure = Mirrored.codec.check(value)
+
+	if failure and #violations < 8 then
+		table.insert(violations, `a change decoded into a value its own schema refuses: {failure}`)
+	end
+end
+
+--[[ A handful, so a patch usually lands on a subject the reader has a baseline for. Fuzzing against
+     subjects that are always new would test the snapshot path four thousand times and the merge
+     never. ]]
+local SUBJECTS = { 1, 2, 3, 4 }
+
+--[[ What the *sender* believes this client holds. It diverges from what the client actually holds
+     the moment a mutation is refused, and that divergence is the point: a patch computed against a
+     baseline the reader no longer has is what a single dropped packet produces in production, with
+     no attacker anywhere. ]]
+local sent: { [number]: any } = {}
+
+local function fresh(): any
+	return {
+		n = math.random(0, 255),
+		flag = math.random() < 0.5,
+		maybe = if math.random() < 0.5 then math.random(0, 65535) else nil,
+		pos = { x = math.random(0, 255), y = math.random(0, 255) },
+	}
+end
+
+--[[ One field, so the change carries a bitfield with holes in it. A patch that moved everything
+     would decode the same whether the flags were read or assumed. ]]
+local function moved(old: any): any
+	local next_ = table.clone(old)
+	next_.pos = table.clone(old.pos)
+
+	local pick = math.random(1, 4)
+
+	if pick == 1 then
+		next_.n = math.random(0, 255)
+	elseif pick == 2 then
+		next_.flag = not old.flag
+	elseif pick == 3 then
+		next_.maybe = if math.random() < 0.5 then math.random(0, 65535) else nil
+	else
+		next_.pos.x = math.random(0, 255)
+	end
+
+	return next_
+end
+
+local function changes(): Sample
+	Buffer.take()
+	Buffer.load(nil)
+
+	--[[ The resync answered, which is the half of the recovery that lives on the server: a peer that
+	     asked for a channel again is a peer whose baselines are dropped, so the next tick sends
+	     snapshots (`src/transport/Outbound.luau`, `Tick.send`). Modelling it here is what keeps the
+	     merge path reachable after the first refusal. ]]
+	if resend then
+		table.clear(sent)
+		resend = false
+	end
+
+	for _ = 1, math.random(1, 5) do
+		local subject = SUBJECTS[math.random(1, #SUBJECTS)]
+		local old = sent[subject]
+		local new: any
+
+		if old == nil then
+			new = fresh()
+		elseif math.random() < 0.15 then
+			--[[ Gone: the root bit clear and no body, which is the one packet on this channel that
+			     carries no values at all and therefore the one whose length prefix is doing all of
+			     the work. ]]
+			new = nil
+		else
+			new = moved(old)
+		end
+
+		--[[ False is "nothing to say", and the sender's picture only advances when something was
+		     written — the same rule `Tick.send` follows, for the same reason. ]]
+		if Batch.writeChange(Mirrored, subject, old, new) then
+			sent[subject] = new
+		end
+	end
+
+	local packed, instances = Buffer.take()
+	return { packed = packed, instances = instances }
+end
+
+--[[ A snapshot with every field present, on a subject nothing else touches. A patch would be a
+     canary that depends on the baseline the previous mutation left behind, which is the thing being
+     tested rather than the thing to measure with. ]]
+local healthy = (function(): Sample
+	Buffer.take()
+	Buffer.load(nil)
+
+	Batch.writeChange(Mirrored, 9000, nil, { n = 1, flag = true, maybe = 2, pos = { x = 3, y = 4 } })
+
+	local packed, instances = Buffer.take()
+	return { packed = packed, instances = instances }
+end)()
+
+local changeRaises = 0
+local changeSilent = 0
+local changeCanaries = 0
+local changeNotes: { string } = {}
+local changeExercised: { [string]: number } = {}
+local changeBroke: { [string]: number } = {}
+
+for _, mutation in mutations do
+	changeExercised[mutation.name] = 0
+	changeBroke[mutation.name] = 0
+end
+
+local function noteChange(text: string)
+	if #changeNotes < 8 then
+		table.insert(changeNotes, text)
+	end
+end
+
+for round = 1, CHANGES do
+	local mutation = mutations[math.random(1, #mutations)]
+	changeExercised[mutation.name] += 1
+
+	local sample = mutation.apply(changes())
+	local before = landed + removals + reported
+	local refusedBefore = reported
+
+	local survived = pcall(mirror.receive, sample.packed, sample.instances, nil)
+
+	if reported > refusedBefore then
+		changeBroke[mutation.name] += 1
+	end
+
+	if not survived then
+		changeRaises += 1
+		noteChange(`round {round}: {mutation.name} raised on the change path`)
+	end
+
+	if buffer.len(sample.packed) > 1 and landed + removals + reported == before then
+		changeSilent += 1
+		noteChange(
+			`round {round}: {mutation.name} produced {buffer.len(sample.packed)} bytes of change that `
+				.. `neither arrived nor were reported`
+		)
+	end
+
+	local wasLanded = landed
+	local intact = pcall(mirror.receive, healthy.packed, healthy.instances, nil)
+
+	if intact and landed == wasLanded + 1 then
+		changeCanaries += 1
+	else
+		noteChange(`round {round}: the canary did not survive {mutation.name}`)
+	end
+end
+
+suite.failing()
+
+equals(`{CHANGES} mutated changes raise nothing on the receive path`, changeRaises, 0)
+equals("no change with bytes in it vanishes without a word", changeSilent, 0)
+equals("an honest change still arrives after every one of them", changeCanaries, CHANGES)
+equals("and nothing merged into a value its own schema refuses", #violations, 0)
+
+for index = 1, math.min(#changeNotes, 8) do
+	fail(`  seed {SEED}: {changeNotes[index]}`)
+end
+
+for index = 1, math.min(#violations, 8) do
+	fail(`  seed {SEED}: {violations[index]}`)
+end
+
+--[[
+	The byte mutations, and **not the two sidecar ones**, which is a narrower list than the batch run
+	above uses: this channel's schema carries no Instances, so neither trimming nor padding the
+	sidecar changes anything a change reader can see.
+
+	Asserting them here would have passed, and for a reason that has nothing to do with the sidecar:
+	a refusal earlier in the run leaves the reader without baselines, so the *next* honest patch is
+	refused too and lands in whichever round it happens to fall in. That is the shape §9 calls a test
+	passing for the wrong reason, and the fix is to not make the claim rather than to make it
+	loosely.
+]]
+local bytewise = {
+	"bit flip",
+	"byte substituted",
+	"truncated",
+	"extended with noise",
+	"channel id substituted",
+	"replayed",
+	"noise",
+}
+
+for _, name in bytewise do
+	check(`{name} broke a change too`, changeBroke[name] > 0)
+end
+
+--[[ **A refusal is a desync.** A change this endpoint could not read leaves it holding a baseline
+     the sender has already moved past, so every change after it would merge into the wrong value —
+     which is worse than losing one, and is why the channel is given up on rather than patched
+     over. ]]
+check("and gave up on the channel rather than merging into it", desyncs > 0)
+
+suite.passing()
+
+--[[ The canary's subject, at the end of the run, still holds what the canary says it holds. A
+     mutated change that merged into somebody else's baseline would show here and in no assertion
+     above, because the handler only ever sees the value one merge produced. ]]
+local kept = baselines.of(nil, Mirrored, 9000)
+
+check("the canary's baseline survived every mutation", kept ~= nil and Mirrored.codec.check(kept) == nil)
+equals("with the value it was sent", if kept then kept.n else nil, 1)
+
+print(`        {CHANGES} changes, {landed} merged, {removals} removed, {desyncs} desynced`)
+
+for _, mutation in mutations do
+	print(
+		`        {mutation.name}: {changeExercised[mutation.name]} run, {changeBroke[mutation.name]} refused`
+	)
 end
 
 -- ---------------------------------------------------------------------------------------------

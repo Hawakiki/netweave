@@ -48,6 +48,24 @@ type Flags = { number }
 local band = bit32.band
 local bor = bit32.bor
 
+--[[
+	A patch whose bits say "these fields did not move" is only readable against a value that has
+	them. With no baseline it merges into a value missing whatever the patch did not carry, and that
+	value reaches the handler as a `t.struct` with a field absent — the one thing every declaration
+	promises cannot happen.
+
+	It is not a hostile case. A client that refuses one change holds a baseline the server has
+	already moved past, so the next honest patch is computed against something the reader no longer
+	has; the fuzzer produced it in 8 of 4,000 mutated rounds without ever having to aim at it
+	(`PLAN-M4` phase 6). The recovery already exists — a refused change desyncs the channel and asks
+	for it again — and this is what makes the refusal happen instead of the merge.
+
+	One shared string rather than a built one: a reason that allocates per packet is the property
+	`CLAUDE.md` §9 says the rejection path has to keep, and a flood of short patches is exactly the
+	shape that would exercise it.
+]]
+local NO_BASELINE = "a change patched a subject this endpoint has no baseline for"
+
 local PATCH_CHUNK: { [number]: (offset: number, value: number) -> () } = {
 	[1] = Buffer.patchU8,
 	[2] = Buffer.patchU16,
@@ -339,6 +357,12 @@ function buildMerger(node: Node): Merger
 
 		return function(base: any, flags: Flags): (any, boolean)
 			if band(flags[chunk], mask) == 0 then
+				--[[ A sub-struct the patch did not touch, and nothing to fall back on. See
+				     `NO_BASELINE`: the whole struct would be absent from the merged value. ]]
+				if base == nil then
+					Buffer.reject(NO_BASELINE)
+				end
+
 				return base, false
 			end
 
@@ -348,8 +372,16 @@ function buildMerger(node: Node): Merger
 
 	local _, readInner = Serdes.nodeCodec(inner)
 
+	--[[ Whether the *state* said this field may be absent. An `optional` that the patch did not
+	     touch is legitimately nil against no baseline; anything else is a hole. ]]
+	local required = inner.kind ~= "optional"
+
 	return function(base: any, flags: Flags): (any, boolean)
 		if band(flags[chunk], mask) == 0 then
+			if required and base == nil then
+				Buffer.reject(NO_BASELINE)
+			end
+
 			return base, false
 		end
 
@@ -368,12 +400,15 @@ local Delta = {}
 	@within Delta
 	.layout Layout -- the patch layout, derived from the state layout
 	.write (old: any, new: any) -> boolean -- writes a patch, or nothing and false
-	.apply (base: any) -> any -- reads a patch and folds it into `base`
+	.apply (base: any) -> (any, string?) -- reads a patch and folds it into `base`, or a reason
 ]=]
 export type Delta = {
 	layout: Ir.Layout,
 	write: (old: any, new: any) -> boolean,
-	apply: (base: any) -> any,
+	--[[ `(nil, nil)` is the subject going away and `(nil, reason)` is a change that could not be
+	     read. A caller that treats the two the same drops a subject because a peer sent a short
+	     packet, which is the difference between a removal and a lie. ]]
+	apply: (base: any) -> (any, string?),
 }
 
 --[=[
@@ -480,17 +515,39 @@ function Delta.build(state: Ir.Layout): Delta
 			return commit()
 		end,
 
-		apply = function(base: any): any
+		apply = function(base: any): (any, string?)
+			--[[ Cleared and then checked, the same two things `Serdes`' reader does and for the same
+			     reason. Neither was here until M4 phase 6 went looking: a change whose flag bits
+			     claim fields the packet does not carry read **past its own end**, and the values
+			     came back as whatever the next packet's bytes happened to be — silently, because
+			     nothing asked. G5 says one malformed packet must not stop the rest, and a rejection
+			     carried forward from the packet before would do exactly that. ]]
+			Buffer.clearRejection()
+
 			for index = 1, count do
 				accumulator[index] = reads[index]()
 			end
 
+			local short = Buffer.rejected()
+
+			if short then
+				return nil, short
+			end
+
+			--[[ The subject is gone. `nil` with no failure beside it, which is what separates a
+			     removal from a change that could not be read. ]]
 			if band(accumulator[rootChunk], rootMask) == 0 then
-				return nil
+				return nil, nil
 			end
 
 			local value = merger(base, accumulator)
-			return value
+			local failure = Buffer.rejected()
+
+			if failure then
+				return nil, failure
+			end
+
+			return value, nil
 		end,
 	}
 end
