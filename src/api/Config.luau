@@ -60,12 +60,20 @@ local Config = {}
 	| Severity | On a wire rule | On a declaration rule |
 	|---|---|---|
 	| `"off"` | silent | the check does not run |
-	| `"warn"` | reported once per channel and stage | reported once, and execution continues |
-	| `"error"` | reported **every** time, with a traceback | raised |
+	| `"warn"` | reported up to `repeatsPerDiagnostic` times per channel and stage | reported once, and execution continues |
+	| `"error"` | the same, **with a traceback** | raised |
 
 	`"error"` on a wire rule does not raise and cannot be made to. Wire data reaching `error()` is
 	the failure G4 exists to prevent, so the strongest thing a severity can buy on the receive path
 	is more output.
+
+	:::caution
+	~~`"error"` reports **every** time.~~ **It is suppressed after `repeatsPerDiagnostic` like
+	`"warn"`, as of M3 phase 9.** A wire rule fires at a rate the *peer* chooses, and an `"error"`
+	costs a stack walk, so "every time" was a knob a hostile client could turn. What `"error"` buys
+	is the traceback and the louder sink; `nw.observe` still receives every rejection and
+	`nw.diagnostics()` still counts every one, which is where a flood is meant to be read.
+	:::
 ]=]
 export type Severity = "off" | "warn" | "error"
 
@@ -426,9 +434,15 @@ local RULES: { [string]: Rule } = {
 		summary = "a channel with no listener overflowed its queue",
 	},
 	protocol = {
-		--[[ Every one, because a mismatch means that client cannot play at all and the rate is
-		     bounded by joins rather than by packets. The repeat suppression would otherwise hide it
-		     after three, and the fourth player is as stuck as the first. ]]
+		--[[ Loud, because a mismatch means that client cannot play at all — a redeploy, not a
+		     dropped packet.
+
+		     ~~The repeat suppression would otherwise hide it after three, and the fourth player is
+		     as stuck as the first.~~ **That was an argument for `error` bypassing the suppression,
+		     and it does not any more** (M3 phase 9): this is a wire stage, so a peer chooses how
+		     often it fires, and `error` carries a traceback. The fourth player is answered by
+		     `nw.observe` and `nw.diagnostics()` instead, which is what the suppression line points
+		     at. ]]
 		default = "error",
 		floor = "off",
 		wire = true,
@@ -447,9 +461,13 @@ local RULES: { [string]: Rule } = {
 		summary = "a call came back without an answer",
 	},
 	direction = {
-		--[[ Every one, like `protocol`, and for the same reason: nobody sends on a channel they
-		     receive on by accident, so the first is worth as much as the fiftieth and there is no
-		     legitimate traffic for the suppression to protect. ]]
+		--[[ Loud, like `protocol`: nobody sends on a channel they receive on by accident, so the
+		     first one is worth a stack trace.
+
+		     ~~The first is worth as much as the fiftieth and there is no legitimate traffic for the
+		     suppression to protect.~~ **Backwards** — the suppression is not protecting the
+		     traffic, it is protecting the console and the thread that writes to it, and this is the
+		     cheapest refusal a hostile peer can provoke. See `Observer.announce`. ]]
 		default = "error",
 		floor = "off",
 		wire = true,

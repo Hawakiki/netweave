@@ -299,13 +299,13 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
--- "error" reports every occurrence
+-- "error" adds a traceback; it does not buy an unbounded number of them
 -- ---------------------------------------------------------------------------------------------
 
 do
 	Config.reset()
 	Observer.reset()
-	Config.configure({ rules = { budget = "error" } })
+	Config.configure({ rules = { budget = "error" }, limits = { repeatsPerDiagnostic = 3 } })
 
 	capture()
 
@@ -315,10 +315,24 @@ do
 
 	release()
 
-	equals("five refusals printed five times", #captured, 5)
+	--[[
+		~~Five refusals printed five times.~~ **Three**, as of M3 phase 9.
+
+		`error` used to print and return before the suppression, and two wire stages defaulted to it
+		on the argument that the fiftieth report is worth as much as the first. That is true of the
+		diagnostic and false of the cost: a wire rule fires at a rate the *peer* chooses, and an
+		`error` carries a stack walk. Running the Studio suite is what showed it — one test's 2,000
+		`direction` refusals filled the output window, each with a traceback.
+	]]
+	equals("an error-level rule goes quiet like any other", #captured, 3)
 	--[[ The stack is what separates "error" from "warn" here; its text is environment-specific, so
 	     what is asserted is that a stack is attached at all. ]]
 	check("with a stack attached", string.find(captured[1], "\n", 1, true) ~= nil)
+	equals(
+		"and every one of the five was counted",
+		Observer.diagnostics().channels["game.move"].budget.count,
+		5
+	)
 
 	Config.reset()
 	Observer.reset()

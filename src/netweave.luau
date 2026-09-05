@@ -154,7 +154,7 @@ nw.diagnostics = Observer.diagnostics
 	nw.configure({
 		rules = {
 			budget = "warn",     -- a sender over its declared rate
-			authorize = "error", -- every refusal, with a traceback
+			authorize = "error", -- with a traceback, and suppressed like any other
 			handler = "warn",
 		},
 		limits = { queueCapacity = 512 },
