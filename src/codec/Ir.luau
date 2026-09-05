@@ -390,9 +390,54 @@ local function lowerStruct(descriptor: Descriptor): Node
 	}
 end
 
+--[[
+	**A repeated thing that costs nothing is a count, and it has to be refused where it is written.**
+
+	`PLAN-M3` D-4 bounded a claimed length against the bytes remaining, and the comment under that
+	bound says "an element cannot be conjured from no bytes". That is the assumption this check
+	exists for, because there are elements that can:
+
+	  * `t.enum({ only = true })` — one variant, `bitsToIndex(1)` is zero bits
+	  * `t.string(0, 0)` and `t.buffer(0, 0)` — a length of exactly zero, so no prefix and no bytes
+	  * a `t.struct` whose every field is one of those
+
+	Measured before this check existed, with two bytes on the wire and no bound in sight:
+
+	  | schema | claimed | result |
+	  |---|---|---|
+	  | `t.array(t.u8)` | 65,535 | refused, 0.00 ms — the D-4 bound holds |
+	  | `t.array(t.enum({ x = true }))` | 65,535 | **accepted**, 65,535 entries, 1.7 ms, +1,024 KB |
+	  | `t.array(t.buffer(0, 0))` | 65,535 | **accepted**, 7.3 ms, +2,048 KB |
+	  | `t.array(t.struct({ e = t.enum({ x = true }) }))` | 65,535 | **accepted**, 6.8 ms, +6,144 KB |
+
+	**No receive-side rule can fix it**, and that is the whole argument for refusing the declaration.
+	For an element that costs nothing the honest packet and the flood are the *same bytes*: a length
+	and nothing else. Capping the count by the bytes remaining would cap an honest decode to zero,
+	because an honest one has no payload either. The only thing that separates them is a schema
+	author saying how many there can be, and a schema that repeats a value carrying no information
+	is not saying anything a number would not say better.
+
+	Exact-length arrays are left alone: `t.array(E, 4, 4)` writes no length at all, so there is
+	nothing for a peer to claim.
+]]
+local function carriesNothing(node: Node): boolean
+	return node.bits == 0 and node.fixedSize == 0 and (node.instances or 0) == 0
+end
+
 local function lowerArray(descriptor: Descriptor): Node
 	local elementDescriptor = descriptor.element :: Descriptor
 	local element = lower(elementDescriptor)
+
+	if descriptor.min ~= descriptor.max and carriesNothing(element) then
+		error(
+			`t.array was given an element that costs no bytes, no flags and no instances, so the `
+				.. `array carries only its own length — and a peer claiming 65535 of them builds `
+				.. `65535 entries out of two bytes, which an honest packet cannot be told apart `
+				.. `from. Send the count itself (t.u16), or give the element something to carry: a `
+				.. `single-variant t.enum, t.string(0, 0) and t.buffer(0, 0) are all zero bytes on `
+				.. `the wire.`
+		)
+	end
 
 	local node: Node = {
 		kind = "array",
@@ -455,6 +500,17 @@ end
 local function lowerMap(descriptor: Descriptor): Node
 	local key = lower(descriptor.key :: Descriptor)
 	local value = lower(descriptor.value :: Descriptor)
+
+	--[[ The same hazard as a dynamic array, over key and value together. A map is always dynamic, so
+	     there is no exact-length case to exempt. ]]
+	if carriesNothing(key) and carriesNothing(value) then
+		error(
+			`t.map was given a key and a value that together cost no bytes, no flags and no `
+				.. `instances, so the map carries only its own length — and a peer claiming 65535 `
+				.. `entries builds them out of two bytes. A key that costs nothing can only ever `
+				.. `name one entry anyway; give the key something to distinguish entries by.`
+		)
+	end
 
 	if key.bits > 0 then
 		key.scope = makeScope(key.bits)

@@ -605,9 +605,52 @@ end
 
 	A dictionary, length-prefixed and written as key/value pairs.
 ]=]
+--[[
+	**What can be a map key, and why the list is this short.**
+
+	A key has to be a value the *receiver* can look one up by. That is a property of how the decoded
+	value behaves as a table index, not of how it serialises:
+
+	  * `number`, `string`, `boolean` and `enum` decode to primitives, and two equal ones are the
+	    same key. Those work.
+	  * `instance` decodes to the reference the sidecar carried, and reference identity is exactly
+	    what a map keyed by an instance wants. That works too.
+	  * `struct`, `array`, `map` and `buffer` decode to **fresh tables**. Two entries the sender
+	    wrote with equal keys arrive as two distinct keys, and the game cannot look up either — it
+	    would have to walk the map comparing contents, which is not a map.
+	  * `optional` cannot be a key at all: a Lua table has no nil index. The presence bit it adds is
+	    dead weight that only a hostile packet can clear, and when it did, the reader raised on
+	    `result[nil]` — wire data reaching a Luau error, which is guarantee G4 (M4 report, finding 3).
+	  * `vector2`, `vector3`, `color3` and `cframe` are refused for the same reason as tables, but the
+	    reason is one this file must not have to know: whether two separately decoded datatypes are
+	    the same table key depends on whether the runtime interns them. **A schema is not allowed to
+	    depend on that**, so they are out here rather than out on some runtimes.
+
+	A game that wants one of the refused kinds as a key has the same options either way: key by
+	something primitive that names it — an id, a name, an enum — and put the rest in the value.
+]]
+local MAP_KEYS: { [string]: boolean } = {
+	number = true,
+	string = true,
+	boolean = true,
+	enum = true,
+	instance = true,
+}
+
 function t.map<K, V>(key: Type<K>, value: Type<V>): Type<{ [K]: V }>
 	check(isType(key), "map needs a netweave key type")
 	check(isType(value), "map needs a netweave value type")
+
+	local keyKind = (key :: any).kind
+
+	check(
+		MAP_KEYS[keyKind] == true,
+		`a map key is {tostring(keyKind)}, and a map key has to be something the receiver can look `
+			.. `it up by. Use t.u16, t.string(0, 32), t.boolean, an enum, or t.instance — a `
+			.. `{tostring(keyKind)} decodes to a fresh value on the other side, so two entries the `
+			.. `sender wrote with equal keys arrive as two keys nothing can index. Key by an id or a `
+			.. `name and put the rest in the value.`
+	)
 
 	return descriptor({
 		kind = "map" :: Kind,

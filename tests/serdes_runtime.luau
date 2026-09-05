@@ -1106,6 +1106,156 @@ do
 	Buffer.load(nil)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- A key that is not there, and a repeated thing that costs nothing (M4 report, 2 and 3)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		**The one path where wire data reached a Luau error.**
+
+		`t.map(t.optional(K), V)` used to type-check, lower and encode honestly — a Lua table has no
+		nil index, so the presence bit the optional adds is dead weight only a hostile packet can
+		clear. Clearing it made `readKey` answer nil with no rejection, and `result[nil] = value`
+		raised: G4 broken at the codec, against the header of `Serdes.luau` in as many words.
+
+		`t.map` refuses that key type now, so this builds the descriptor **by hand** — which is not a
+		contrivance. `isType` is a duck check: any table with a string `kind` passes it, and passes
+		`requireType` and `nw.validate` too (M4 report). The reader is not allowed to assume the
+		constructor was used, so the reader is what this section tests.
+	]]
+	local hostile: any = {
+		kind = "map",
+		key = t.optional(t.u8),
+		value = t.u8,
+		min = 0,
+		max = 16,
+	}
+
+	local codec = Serdes.fromSchema(hostile)
+
+	Buffer.take()
+	Buffer.load(nil)
+	codec.write({ [3] = 7 })
+
+	local packed = (Buffer.take())
+
+	--[[ `count` in one byte because the map is bounded at 16, then the key's own scope byte, then
+	     the key and the value. ]]
+	equals("an optional key encodes its presence bit", buffer.len(packed), 4)
+
+	buffer.writeu8(packed, 1, 0)
+	Buffer.beginRead(packed, nil)
+
+	local raised, value, failure = pcall(codec.read)
+
+	check("clearing it does not raise", raised)
+	equals("and decodes to nothing", value, nil)
+	check(`with a reason rather than a Luau error: {tostring(failure)}`, failure == "a map key is missing")
+
+	Buffer.load(nil)
+end
+
+do
+	--[[
+		The declaration side of the same finding, and of the one beside it. Both are refusals rather
+		than round trips, so they are `pcall`ed for the message rather than run through `refuses`,
+		which is about a *value* an encoder rejects.
+	]]
+	local function refusedBy(name: string, build: () -> (), needle: string)
+		local ok, message = pcall(build)
+
+		if ok then
+			fail(`{name}: the declaration was accepted`)
+			return
+		end
+
+		check(
+			`{name}: refused, and the message says why — {tostring(message)}`,
+			string.find(tostring(message), needle, 1, true) ~= nil
+		)
+	end
+
+	refusedBy("an optional map key", function()
+		t.map(t.optional(t.u8), t.u8)
+	end, "look it up by")
+
+	--[[ Through `any`, because a struct key does not type-check either — `{ [K]: V }` with a table
+	     key is not a Luau type. That the analyzer refuses it first is the better outcome; what this
+	     asserts is that the constructor still refuses when the analyzer has been bypassed, which is
+	     the path a schema built at runtime takes. ]]
+	local structKey: any = t.struct({ a = t.u8 })
+
+	refusedBy("a struct map key", function()
+		t.map(structKey, t.u8)
+	end, "fresh value")
+
+	refusedBy("a vector3 map key", function()
+		t.map(t.vector3, t.u8)
+	end, "look it up by")
+
+	--[[
+		**Two bytes for 65,535 entries.** An element that costs no bytes, no flags and no instances
+		makes the honest packet and the flood the same bytes, so nothing on the receive side can tell
+		them apart — measured before the refusal existed: `t.array(t.enum({ x = true }))` claiming
+		65,535 built 65,535 entries in 1.7 ms and 1 MB, and a struct of one such enum cost 6 MB.
+	]]
+	--[[ The refusal is at lowering rather than at `t.array`, because the element's cost is what the
+	     lowering pass computes and re-deriving it in the constructor would be the same walk written
+	     twice. For a game that is still declaration time: `nw.signal({ data = ... })` builds the
+	     codec, and the message lands on that line. ]]
+	local function lowering(descriptor: any): () -> ()
+		return function()
+			Serdes.fromSchema(descriptor)
+		end
+	end
+
+	refusedBy(
+		"an array of a single-variant enum",
+		lowering(t.array(t.enum({ only = true }))),
+		"costs no bytes"
+	)
+	refusedBy("an array of empty strings", lowering(t.array(t.string(0, 0))), "costs no bytes")
+	refusedBy("an array of empty buffers", lowering(t.array(t.buffer(0, 0))), "costs no bytes")
+
+	refusedBy(
+		"an array of a struct that holds only those",
+		lowering(t.array(t.struct({ e = t.enum({ only = true }) }))),
+		"costs no bytes"
+	)
+
+	--[[ Built by hand for the same reason the map above is: `t.map` refuses a key that costs
+	     nothing to *look up by* before the lowering ever sees what it costs to *carry*. ]]
+	refusedBy(
+		"and a map whose entries cost nothing",
+		lowering({
+			kind = "map",
+			key = t.enum({ only = true }),
+			value = t.enum({ nothing = true }),
+			min = 0,
+			max = 16,
+		}),
+		"cost no bytes"
+	)
+end
+
+do
+	--[[ The other side of that line: what stays legal. An exact-length array writes no length for a
+	     peer to claim, and an element that carries one bit is not free. ]]
+	trip("an exact-length array of a zero-byte element", t.array(t.enum({ only = true }), 3, 3), {
+		"only",
+		"only",
+		"only",
+	}, 0)
+
+	--[[ A dynamic array cannot fold its elements' flags into the enclosing scope, so each element
+	     opens one of its own — a length byte and three scope bytes. ]]
+	trip("and one whose element carries a flag", t.array(t.boolean, 0, 8), { true, false, true }, 4)
+
+	local bounded = Serdes.fromSchema(t.array(t.u8, 0, 4))
+	equals("a bounded array of real bytes is untouched", bounded.maxSize, 5)
+end
+
 if failures > 0 then
 	error(`{failures} serdes assertions failed`)
 end

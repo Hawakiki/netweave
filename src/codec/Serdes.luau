@@ -1291,6 +1291,26 @@ local function mapReader(node: Node): Reader
 			local entryKey = readKey(flags)
 			local entryValue = readValue(flags)
 
+			--[[
+				**A nil key is a rejection, not an assignment.**
+
+				`t.map(t.optional(K), V)` type-checks, lowers, and encodes honestly — a Lua table has
+				no nil key, so the presence bit the optional adds is dead weight that only a hostile
+				packet can clear. When it does, `readKey` answers nil with no rejection of its own and
+				`result[nil] = value` **raises**: the one path in this codec where wire data reaches a
+				Luau error rather than `Buffer.reject`, against everything the header of this file
+				says (M4 report, finding 3).
+
+				`t.map` refuses that key type now, so the honest route to here is closed. This stays
+				because `isType` is a duck check — any table with a string `kind` passes it — and
+				because G4 is structural: the reader is not allowed to depend on the constructor
+				having been used.
+			]]
+			if entryKey == nil then
+				reject("a map key is missing")
+				return result
+			end
+
 			--[[ A rejected key is a default, and defaults collide: writing them would fabricate an
 			     entry the sender never sent. ]]
 			if not rejected() then
