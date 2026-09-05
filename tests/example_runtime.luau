@@ -14,6 +14,7 @@
 	example above it is the same code either way.
 ]]
 
+local Baseline = require("../src/replication/Baseline")
 local Budget = require("../src/transport/Budget")
 local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
@@ -21,6 +22,7 @@ local Namespace = require("../src/api/Namespace")
 local Observer = require("../src/api/Observer")
 local Outbound = require("../src/transport/Outbound")
 local Recipients = require("../src/transport/Recipients")
+local Tick = require("../src/replication/Tick")
 local Transport = require("../src/api/Transport")
 local harness = require("./harness")
 local nw = require("../src/netweave")
@@ -86,10 +88,17 @@ local budget = Budget.new(function(): number
 	return at
 end)
 
+--[[ What each end believes the other has. Bounded on the server and not on the client, for the
+     reason `Baseline.new` gives: the server's is memory sized by how many people join, and the
+     client's is what the server already bounded at the other end. ]]
+local serverBaselines = Baseline.new(true)
+local clientBaselines = Baseline.new(false)
+
 local serverIn = Inbound.new({
 	resolve = Namespace.channelById,
 	admit = budget.admit,
 	isServer = true,
+	baselines = serverBaselines,
 })
 
 local clientIn = Inbound.new({
@@ -98,6 +107,16 @@ local clientIn = Inbound.new({
 		return nil
 	end,
 	isServer = false,
+	baselines = clientBaselines,
+})
+
+--[[ The replication loop, which `src/transport/Driver.luau` runs between the dispatch and the
+     flush. Nothing in the example calls it: that is the point of the class. ]]
+local replicate = Tick.new({
+	outbound = serverOut,
+	baselines = serverBaselines,
+	roster = roster,
+	channels = Namespace.replicated,
 })
 
 --[[ Whatever was installed goes back at the end. The benchmark place runs this suite and then the
@@ -146,12 +165,16 @@ local function frame()
 	clientOut.flush()
 	drain(toServer, serverIn, alice)
 
+	replicate()
+
 	serverOut.flush()
 	drain(toClient, clientIn, nil)
+	clientIn.tick()
 end
 
 local refusals: { string } = {}
 local equipped: { number } = {}
+local held: { [number]: any } = {}
 
 Namespace.reset()
 Observer.reset()
@@ -218,7 +241,40 @@ end)
 nw.observe(function(rejection)
 	refusals[#refusals + 1] = `{rejection.channel} at {rejection.stage}: {rejection.reason}`
 end)
+--#endregion
 
+-- ---------------------------------------------------------------------------------------------
+-- The replicated half
+-- ---------------------------------------------------------------------------------------------
+
+--#region replication
+--[[ The server never calls this channel. `store` is the only way in, so there is no `publish` on
+     the server view to be called by mistake — the absence is the guarantee. ]]
+local world: { [number]: { hp: number, gold: number } } = {}
+
+local vault = nw.namespace("vault", {
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ hp = t.u8, gold = t.u16 }),
+		audience = nw.audience.everyone,
+		store = nw.store.of(world),
+	}),
+})
+
+--[[ The subject, then the value. `nil` is that subject leaving this client's audience or ceasing
+     to exist — the one packet shape says both. ]]
+vault.client.inventory:listen(function(subject, value)
+	held[subject] = value
+end)
+
+--[[ The game writes its own state and tells netweave nothing. Once a frame netweave reads the
+     store and sends each client the difference between what it should see and what it has: the
+     first frame is the whole value, and a frame where one field moved is that field. ]]
+world[1] = { hp = 10, gold = 500 }
+
+--[[ Everything is declared before anything is sent, and that is a rule rather than a habit: a
+     namespace declared after the first packet has moved raises, because an id depends on every
+     other channel in the program (`WIRE-FORMAT.md` §3). ]]
 combat.client.equip:send({ slot = 1 })
 combat.client.equip:send({ slot = 7 })
 --#endregion
@@ -258,6 +314,37 @@ equals("the channel declares its own rate", combat.channels.equip.rate, 5)
      tag, which is what keeps the type system from being asked to prove a list is complete. ]]
 equals("and its audience is a subset rather than everyone", loadout.audience.scope, "subset")
 check("so broadcast does not exist on it", (combat.server :: any).loadout.broadcast == nil)
+
+-- ---------------------------------------------------------------------------------------------
+-- And the replicated half
+-- ---------------------------------------------------------------------------------------------
+
+equals("the subject the store held reached the client", held[1].hp, 10)
+equals("all of it", held[1].gold, 500)
+
+--[[ One field, on a store the game mutated in place — which is what ReplicaService's whole API
+     does, and what a baseline holding the store's own table would have made invisible. ]]
+world[1].gold = 501
+frame()
+
+equals("a change reaches it", held[1].gold, 501)
+equals("without disturbing the field beside it", held[1].hp, 10)
+
+suite.failing()
+
+--[[ `nil` is the subject ceasing to exist, and it is the same packet as a change — the patch's
+     root bit says which. Without it a destroyed subject would sit on every client at whatever
+     value it had, forever. ]]
+world[1] = nil
+frame()
+
+equals("and a subject that went away is taken off it", held[1], nil)
+
+--[[ The server never called this channel once. There is nothing on its view to call. ]]
+check("the server view offers no way in", (vault.server :: any).inventory.publish == nil)
+check("nor a broadcast", (vault.server :: any).inventory.broadcast == nil)
+
+suite.passing()
 
 -- ---------------------------------------------------------------------------------------------
 

@@ -298,6 +298,33 @@ local quoted = region(
 	"docs/DESIGN-API.md"
 )
 
+--[[ The second worked example, added in M4 phase 5b. Two regions rather than one longer one: the
+     sixty-line cap is a statement about how much a reader has to hold in their head to understand
+     the declaration surface, and replication is a separate thing to understand. ]]
+local replication = region(
+	fs.readFile("tests/example_runtime.luau"),
+	"--#region replication\n",
+	"--#endregion",
+	"tests/example_runtime.luau"
+)
+
+local quotedReplication = region(
+	fs.readFile("docs/DESIGN-API.md"),
+	"<!-- example: tests/example_runtime.luau replication -->\n```lua\n",
+	"```",
+	"docs/DESIGN-API.md"
+)
+
+if replication == "" then
+	fail("tests/example_runtime.luau has no replication example between its markers")
+elseif quotedReplication == "" then
+	fail("docs/DESIGN-API.md quotes nothing between its replication markers")
+elseif replication ~= quotedReplication then
+	fail("the replication example in DESIGN-API.md is not the one tests/example_runtime.luau runs")
+	print(`  document: {#quotedReplication} characters`)
+	print(`  test:     {#replication} characters`)
+end
+
 local lines = #string.split(example, "\n") - 1
 
 if example == "" then
@@ -356,8 +383,8 @@ if failures > 0 then
 end
 
 print(
-	`OK      messages — {checked} error calls in src/api, worked example {lines} lines, `
-		.. `milestone {milestone}`
+	`OK      messages — {checked} error calls in src/api, worked examples {lines} and `
+		.. `{#string.split(replication, "\n") - 1} lines, milestone {milestone}`
 )
 
 return true

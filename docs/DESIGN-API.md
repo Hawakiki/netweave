@@ -169,14 +169,49 @@ end)
 nw.observe(function(rejection)
 	refusals[#refusals + 1] = `{rejection.channel} at {rejection.stage}: {rejection.reason}`
 end)
+```
 
+What is *not* in it is as much the point. There is no middleware chain, no per-call options
+table, no place to pass a validator at the send site, and nothing that would let a second file
+change what `equip` accepts. The declaration is the whole security model.
+
+### The same file, replicating
+
+The seventh class in the same shape. The server never calls it: `store` is the only way in, so
+the absence of `publish` on the server view is the guarantee rather than a convention.
+
+<!-- example: tests/example_runtime.luau replication -->
+```lua
+--[[ The server never calls this channel. `store` is the only way in, so there is no `publish` on
+     the server view to be called by mistake — the absence is the guarantee. ]]
+local world: { [number]: { hp: number, gold: number } } = {}
+
+local vault = nw.namespace("vault", {
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ hp = t.u8, gold = t.u16 }),
+		audience = nw.audience.everyone,
+		store = nw.store.of(world),
+	}),
+})
+
+--[[ The subject, then the value. `nil` is that subject leaving this client's audience or ceasing
+     to exist — the one packet shape says both. ]]
+vault.client.inventory:listen(function(subject, value)
+	held[subject] = value
+end)
+
+--[[ The game writes its own state and tells netweave nothing. Once a frame netweave reads the
+     store and sends each client the difference between what it should see and what it has: the
+     first frame is the whole value, and a frame where one field moved is that field. ]]
+world[1] = { hp = 10, gold = 500 }
+
+--[[ Everything is declared before anything is sent, and that is a rule rather than a habit: a
+     namespace declared after the first packet has moved raises, because an id depends on every
+     other channel in the program (`WIRE-FORMAT.md` §3). ]]
 combat.client.equip:send({ slot = 1 })
 combat.client.equip:send({ slot = 7 })
 ```
-
-What is *not* in it is as much the point. There is no middleware chain, no per-call options table,
-no place to pass a validator at the send site, and nothing that would let a second file change what
-`equip` accepts. The declaration is the whole security model, and it is nineteen lines.
 
 ## 3. Channel classes
 
