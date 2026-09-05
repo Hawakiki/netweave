@@ -37,6 +37,7 @@ nw.configure({
 		send = "warn",
 		protocol = "error",
 		query = "warn",
+		direction = "error",
 		rateUnbounded = "warn",
 	},
 

@@ -196,6 +196,18 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 		return channel.unreliable == true
 	end
 
+	--[[ The three destinations behind one call, so `flush` can put a `pcall` around the send without
+	     one per branch. ]]
+	local function deliver(destination: any, packed: buffer, instances: { Instance })
+		if destination == EVERYONE then
+			link.sendAll(true, packed, instances)
+		elseif destination == SERVER then
+			link.send(true, nil, packed, instances)
+		else
+			link.send(true, destination, packed, instances)
+		end
+	end
+
 	--[[
 		An unreliable packet is a batch of one, written into a buffer nobody else is using so that
 		taking it cannot disturb a reliable batch mid-accumulation.
@@ -376,17 +388,35 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 
 					local packed, instances = Buffer.take()
 
-					if destination == EVERYONE then
-						link.sendAll(true, packed, instances)
-					elseif destination == SERVER then
-						link.send(true, nil, packed, instances)
-					else
-						link.send(true, destination, packed, instances)
-					end
+					--[[
+						`take` left a fresh empty buffer behind; the record keeps it so the
+						destination does not have to allocate one again next frame — and it happens
+						**before** the send, not after.
 
-					--[[ `take` left a fresh empty buffer behind; the record keeps it so the
-					     destination does not have to allocate one again next frame. ]]
+						After the send it happened only when the send returned. A `link.send` that
+						raised left the record holding the same bytes and the same `used`, so the
+						next frame loaded them, sent them, raised again, and the loop never reached
+						the destinations iterated after it: one bad recipient stopped delivery to a
+						subset of players permanently, with an error every frame. `nw.audience.select`
+						hands back whatever the game returned, so a single non-Player entry was
+						enough (`PLAN-M3` phase 9).
+					]]
 					Buffer.saveInto(record)
+
+					local ok, failure = pcall(deliver, destination, packed, instances)
+
+					if not ok then
+						--[[ Reported rather than raised: this is one frame's traffic to one
+						     destination, and taking the flush down with it would cost every other
+						     player theirs. There is no channel to name — a batch is many. ]]
+						Observer.emit(
+							"?",
+							if destination == EVERYONE or destination == SERVER then nil else destination,
+							"send",
+							`the batch did not go out: {tostring(failure)}`,
+							buffer.len(packed)
+						)
+					end
 				end
 			end
 		end,

@@ -99,6 +99,12 @@ local declared = Namespace.declare("h", {
 		authorize = allows,
 	}),
 	silent = nw.signal({ data = t.struct({ n = t.u8 }), rate = 1000 }),
+	--[[ Server to client, so nothing may arrive on it here — and it declares no rate, which is why
+	     nothing could refuse it before M3 phase 9. ]]
+	broadcast = nw.event({ data = t.struct({ n = t.u8 }), audience = nw.audience.everyone }),
+	--[[ A second listener-less channel, because a queue keeps the depth it was built with and the
+	     one above has already been filled by the case that tests overflow. ]]
+	hushed = nw.signal({ data = t.struct({ n = t.u8 }), rate = 1000 }),
 })
 
 local protocol = Namespace.seal()
@@ -113,6 +119,8 @@ local Trickle = declared.channels.trickle
 local Guarded = declared.channels.guarded
 local Asked = declared.channels.asked
 local Silent = declared.channels.silent
+local Broadcast = declared.channels.broadcast
+local Hushed = declared.channels.hushed
 
 --[[ An id past the last one assigned. Nothing resolves it, which is the one failure the format
      cannot isolate. ]]
@@ -185,7 +193,7 @@ local function handler()
 end
 
 for _, channel in declared.channels do
-	if channel.class ~= "query" and channel.key ~= "silent" then
+	if channel.class ~= "query" and channel.key ~= "silent" and channel.key ~= "hushed" then
 		channel.handler = handler
 	end
 end
@@ -717,6 +725,100 @@ do
 	equals("nothing was delivered", delivered, 0)
 	equals("and the overflow was reported", #reports, 3)
 	equals("at queue", reportedAt("queue"), 3)
+
+	Config.reset()
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		A client sending on a channel only the server sends on.
+
+		`Namespace.channelById` resolves every id, and `nw.state` and `nw.event` declare no `rate` —
+		so `Budget.admit` had nothing to charge and returned nil, and the packet was decoded and
+		queued. Six hundred of them measured `budget=0, queue=344` before M3 phase 9: decode work and
+		retained memory bounded by the client's send rate and nothing the game declared.
+
+		Which also means the reason those classes may not declare a `rate` — "the server is the
+		sender on this class, so there is nobody to budget" — was resting on a check that did not
+		exist. G6 was enforced on the views, at analysis, on the game's own code, and a peer writes
+		its own packets.
+	]]
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+
+	for index = 1, 40 do
+		Batch.writePacket(Broadcast, { n = index })
+	end
+
+	Batch.writePacket(Fixed, { a = 3, b = 4 })
+
+	local survived = feed()
+
+	check("a packet on a server-to-client id does not raise", survived)
+	equals("the packets around them arrived", delivered, 2)
+	equals("and every one of the forty was refused", #reports, 40)
+	equals("at direction", reportedAt("direction"), 40)
+	check("naming the class", string.find(reports[1].reason, "event is sent by the server", 1, true) ~= nil)
+	accounts("a client sending on an outbound class", 42)
+
+	--[[ And none of them was decoded: the refusal is before `codec.read`, at the same point and for
+	     the same reason as the byte ceiling. ]]
+	equals("nothing reached the queue", reportedAt("queue"), 0)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[ The other way round, on the client: a peer claiming to be the server on a `command` id.
+	     Nothing legitimate sends that way, and the client used to decode it and run the handler. ]]
+	local client = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = false,
+	})
+
+	Batch.writePacket(Guarded, { n = 1 })
+
+	local packed, carried = Buffer.take()
+	local survived = pcall(client.receive, packed, carried, nil)
+
+	check("a command arriving at a client does not raise", survived)
+	equals("nothing was delivered", delivered, 0)
+	equals("and it was refused at direction", reportedAt("direction"), 1)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+	Config.configure({ limits = { pendingPerBatch = 4, queueCapacity = 4 } })
+
+	--[[
+		A handler-less channel is bounded by its **queue**, not by the batch ceiling, and that is the
+		examined answer rather than an oversight.
+
+		The two limits answer different questions. `queueCapacity` bounds what is held and drops the
+		*oldest*, which is right for a `:listen` that attached a frame late — the traffic worth
+		keeping is the recent traffic. The batch ceiling drops the newest, so applying it here would
+		lose exactly what the queue exists to keep. What is left is decode work, and on an inbound
+		class that is what `rate` licenses.
+	]]
+	for index = 1, 12 do
+		Batch.writePacket(Hushed, { n = index })
+	end
+
+	local survived = feed()
+
+	check("a flood at an unlistened channel does not raise", survived)
+	equals("the queue reports every drop past its depth", reportedAt("queue"), 8)
+	equals("and the batch ceiling does not fire on it", reportedAt("budget"), 0)
 
 	Config.reset()
 end

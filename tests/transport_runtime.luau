@@ -16,6 +16,7 @@
 
 local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
+local Channel = require("../src/api/Channel")
 local Buffer = require("../src/codec/Buffer")
 local Config = require("../src/api/Config")
 local Context = require("../src/api/Context")
@@ -47,11 +48,19 @@ local check, equals, fail = suite.check, suite.equals, suite.fail
 
 --[[ A channel is a plain record to this layer: an id and a codec. Building them by hand rather
      than through `nw.namespace` keeps these tests about the envelope. ]]
-local function channelOf(id: number, descriptor: any): any
+local function channelOf(id: number, descriptor: any, class: string?): any
+	--[[ The direction flags come from `Channel`, not from a copy of the rule here: the receive path
+	     refuses a packet on a channel this peer sends on (G6 on the wire, `PLAN-M3` phase 9), and a
+	     test that decided the answer for itself would keep passing after the rule moved. ]]
+	local fromClient, fromServer = Channel.directionOf(class or "signal")
+
 	return {
 		id = id,
 		qualified = `test.c{id}`,
+		class = class or "signal",
 		codec = Serdes.fromSchema(descriptor),
+		fromClient = fromClient,
+		fromServer = fromServer,
 	}
 end
 
@@ -628,11 +637,15 @@ local roster: Recipients.Roster = {
 }
 
 local function outboundChannel(id: number, descriptor: any, extra: { [string]: any }?): any
-	local channel = channelOf(id, descriptor)
+	local fields: { [string]: any } = extra or {}
+	local channel = channelOf(id, descriptor, (fields.class :: string?) or "signal")
 
-	for key, value in extra or {} do
+	for key, value in fields do
 		channel[key] = value
 	end
+
+	--[[ Set after the copy, because `class` arrives through it. ]]
+	channel.fromClient, channel.fromServer = Channel.directionOf(channel.class)
 
 	return channel
 end
@@ -969,6 +982,96 @@ do
 
 	equals("two separate batches", #log, 3)
 end
+
+-- ---------------------------------------------------------------------------------------------
+-- One bad recipient does not starve the others (PLAN-M3 phase 9)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		`flush` saved the record only when the send returned, so a `link.send` that raised left the
+		same bytes parked: the next frame loaded them, sent them, raised again, and the loop never
+		reached the destinations iterated after it. One bad recipient stopped delivery to a subset of
+		players permanently, with an error every frame — and `nw.audience.select` hands back whatever
+		the game returned, so one non-Player entry was enough to reach it.
+
+		Measured before the fix: three frames, `bad` retried each time, `good1` and `good2` sent once
+		and then never again.
+	]]
+	local sent: { any } = {}
+	local bad = { name = "bad" }
+	local badBytes: { number } = {}
+	local failing = true
+
+	local link: Link.Link = {
+		send = function(_reliable, destination, packed, _instances)
+			if destination == bad then
+				--[[ Fails once, then works. A recipient that only ever fails cannot tell the two
+				     bugs apart: the `pcall` alone stops the *other* destinations being starved, and
+				     it takes a recipient that recovers to show whether the failed frame's bytes were
+				     still parked waiting to be sent again. ]]
+				if failing then
+					error("FireClient raised for this recipient")
+				end
+
+				table.insert(badBytes, buffer.len(packed))
+			end
+
+			table.insert(sent, destination)
+		end,
+
+		sendAll = function() end,
+		receive = function() end,
+	}
+
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(95, t.struct({ a = t.u8 }), { class = "event" })
+	byId[95] = channel
+
+	local reported: { string } = {}
+
+	Observer.reset()
+	Observer.observe(function(rejection)
+		table.insert(reported, rejection.stage)
+	end)
+
+	for frame = 1, 3 do
+		--[[ The first frame raises for `bad`; every frame after it succeeds. ]]
+		failing = frame == 1
+
+		out.push(channel, bad, { a = 1 })
+		out.push(channel, alice, { a = 2 })
+		out.push(channel, bob, { a = 3 })
+
+		out.flush()
+	end
+
+	local reached: { [any]: number } = {}
+
+	for _, destination in sent do
+		reached[destination] = (reached[destination] or 0) + 1
+	end
+
+	equals("alice got all three frames", reached[alice], 3)
+	equals("and so did bob", reached[bob], 3)
+	equals("the failure was reported once, on the frame it happened", #reported, 1)
+	equals("at the send stage", reported[1], "send")
+
+	--[[ Two frames after the failing one, each carrying exactly one packet. Before the fix the
+	     record still held the raised frame's bytes, so the next flush sent them again — the same
+	     packet delivered twice, and growing every frame the send kept failing. ]]
+	equals("the recovered recipient got the two frames after it", #badBytes, 2)
+	equals("the first carrying one packet and not two", badBytes[1], badBytes[2])
+
+	byId[95] = nil
+	Observer.reset()
+end
+
+suite.passing()
 
 -- ---------------------------------------------------------------------------------------------
 -- Inbound

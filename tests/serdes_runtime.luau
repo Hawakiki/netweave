@@ -451,6 +451,33 @@ refuses("an array of the wrong exact length", t.array(t.u8, 4), { 1, 2, 3 })
 refuses("an array above its bound", t.array(t.u8, 0, 2), { 1, 2, 3 })
 refuses("a string above its bound", t.string(0, 4), "toolong")
 
+--[[
+	Everything below passed the encoder until M3 phase 9, and `nw.validate` decides "this value
+	conforms" by running the encoder — so each of these was a value branded `Trusted<T>` while
+	failing the schema it was checked against.
+
+	The boolean writer tested truthiness, so `"false"` went on the wire as `true`. The instance
+	writer tested only non-nil. The integer writers checked the range and let `buffer.writeu8`
+	truncate the fraction, which with an offset is not even truncation: `-0.4` on
+	`t.i16(-100, 100)` stored as `99` and read back as `-1`.
+]]
+refuses("a string where a boolean was declared", t.boolean, "false")
+refuses("a number where a boolean was declared", t.boolean, 0)
+refuses("nil where a boolean was declared", t.boolean, nil)
+refuses("a number where an instance was declared", t.instance, 12345)
+refuses("a table with no IsA where an instance was declared", t.instance, {})
+refuses("a fraction where a u8 was declared", t.u8, 3.7)
+refuses("a fraction inside an offset range", t.i16(-100, 100), -0.4)
+refuses("a fraction inside a plain range", t.u16(0, 1000), 500.5)
+
+--[[ And the floats still take fractions, which is the whole point of declaring one. ]]
+do
+	local codec = Serdes.fromSchema(t.f32(-90, 90))
+	local packed = encode(codec, 12.5)
+
+	equals("a float takes a fraction", decode(codec, packed), 12.5)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Decode survives a hostile sender
 -- ---------------------------------------------------------------------------------------------

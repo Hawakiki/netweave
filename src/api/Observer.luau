@@ -65,8 +65,22 @@ local Observer = {}
 	server sent back as a code. The refusal itself was already reported on the server at whichever
 	stage made it, so this is not a duplicate: it is the same event seen from the end that was
 	waiting, which is the end that has to decide what to do about it.
+	`direction` is guarantee G6 arriving on the wire. The declaration makes a direction violation an
+	analysis error in the game's own code, which is where it belongs and where it stops nothing a
+	*peer* does — a client can put any id in a packet it writes. Until M3 phase 9 the server decoded
+	and queued those, and could not budget them either, because the classes they name declare no
+	rate.
 ]=]
-export type Stage = "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol" | "query"
+export type Stage =
+	"parse"
+	| "budget"
+	| "authorize"
+	| "handler"
+	| "queue"
+	| "send"
+	| "protocol"
+	| "query"
+	| "direction"
 
 --[=[
 	@interface Rejection

@@ -596,6 +596,26 @@ function Inbound.new(config: Config): Inbound
 				end
 			end
 
+			--[[
+				Direction, on the wire rather than only in the views.
+
+				A packet arriving on a channel this peer is the *sender* of is one nobody can
+				legitimately send: `nw.state` and `nw.event` go server to client, and a client's
+				packet on that id is a confused build or a hostile one. It was decoded and queued
+				until M3 phase 9, and it could not be budgeted because those classes declare no rate —
+				which is the argument for forbidding `rate` on them, resting on a check that was not
+				there.
+
+				Refused here, before decode, so a flood of them costs an id read and a seek. That is
+				the same place and the same reason as the byte ceiling below.
+			]]
+			if not (if isServer then channel.fromClient else channel.fromServer) then
+				return `{channel.class} is sent by the {if isServer then "server" else "client"}, so `
+					.. `nothing may arrive on it here — netweave guarantee G6, which the declaration `
+					.. `enforces at analysis and this enforces on the wire`,
+					"direction"
+			end
+
 			--[[ The injected `admit` is the rate budget, which has one stage; naming it here rather
 			     than defaulting keeps the two callers of `sink.refuse` symmetrical. ]]
 			return admit(channel, sender, bytes), "budget"
@@ -610,6 +630,22 @@ function Inbound.new(config: Config): Inbound
 		end,
 
 		deliver = function(channel: any, value: any, bytes: number, id: number?)
+			--[[
+				A packet with no handler is queued and does **not** count against `pendingPerBatch`,
+				which an external review read as the ceiling being bypassed. Examined in M3 phase 9
+				and left alone, because the two limits answer different questions and moving this one
+				would break the thing the queue is for.
+
+				What the queue holds is bounded by `queueCapacity`, per channel, and it drops the
+				*oldest* — which is the right policy for its case, a `:listen` that attached a frame
+				late. The batch ceiling drops the newest, so applying it here would lose exactly the
+				traffic the queue exists to keep.
+
+				What is left is decode *work*, and on an inbound class that is what `rate` licenses:
+				the packets would have been decoded anyway had a handler been attached. The genuinely
+				unbounded case the finding pointed at was an outbound-class id, which declares no rate
+				and is now refused above, before decode.
+			]]
 			if not channel.handler then
 				--[[
 					A query nobody is answering is refused, not queued.

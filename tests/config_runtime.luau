@@ -427,7 +427,7 @@ do
 
 	local described = Config.describe()
 
-	equals("every rule is listed", #described, 9)
+	equals("every rule is listed", #described, 10)
 	equals("sorted", described[1].rule, "authorize")
 
 	local wire = 0
@@ -441,7 +441,7 @@ do
 		equals(`{row.rule} reports its live severity`, row.severity, Config.severityOf(row.rule))
 	end
 
-	equals("eight of the nine are wire rules", wire, 8)
+	equals("nine of the ten are wire rules", wire, 9)
 end
 
 -- ---------------------------------------------------------------------------------------------

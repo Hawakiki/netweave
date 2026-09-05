@@ -592,6 +592,27 @@ local function rejectForbidden(spec: any, class: string, fields: { string })
 	end
 end
 
+--[=[
+	@within Channel
+	@function directionOf
+	@param class string
+	@return (boolean, boolean) -- may the client send on it, may the server
+	@private
+
+	Which side may send on a class, as the receive path asks it.
+
+	Exported rather than inlined into [make] because `tests/transport_runtime.luau` builds channel
+	records by hand to keep its cases about the envelope, and a second copy of this table in a test
+	is a table that drifts from the one that matters — which `CLAUDE.md` §9 has already been bitten
+	by twice.
+]=]
+function Channel.directionOf(class: string): (boolean, boolean)
+	local inbound = class == "command" or class == "intent" or class == "signal" or class == "query"
+	local outbound = class == "state" or class == "event" or class == "query"
+
+	return inbound, outbound
+end
+
 local function make(
 	class: Class,
 	primitive: Primitive,
@@ -616,6 +637,25 @@ local function make(
 	for field, value in fields do
 		channel[field] = value
 	end
+
+	--[[
+		Which side may **send** on this channel, as two booleans the receive path can read without a
+		string compare.
+
+		G6 says direction is a class rather than a field, and until M3 phase 9 it was enforced only
+		on the views — at analysis time, on the game's own code. The wire had no opinion:
+		`Namespace.channelById` resolved every id, `Budget.admit` returned nil for a class with no
+		`rate` because there was nothing to charge, and a client's packet on a `nw.state` id was
+		decoded and queued on the server. Six hundred of them measured `budget=0, queue=344`.
+
+		Which also means the reason those classes may not declare a `rate` — "the server is the
+		sender on this class, so there is nobody to budget" — rested on a check that did not exist.
+		Now it does.
+
+		`query` is on both lists and is the only class that is: a request goes one way and its reply
+		comes back on the same id (`docs/WIRE-FORMAT.md` §2).
+	]]
+	channel.fromClient, channel.fromServer = Channel.directionOf(class)
 
 	--[[
 		The byte ceiling, derived from the schema and tightened by a declaration if there is one.

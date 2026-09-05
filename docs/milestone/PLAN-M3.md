@@ -644,18 +644,35 @@ refuted one at a time.
 
 #### The five 위험, each with its own probe first
 
-- [ ] Outbound-class ids are resolved, admitted and decoded for packets a client sent. G6 is
-      enforced on the views and not on the wire, and the reason `state` may not declare a `rate` —
-      "the server is the sender on this class" — rests on a check that does not exist.
-- [ ] A bare `t.instance` field delivers a client-chosen non-Instance to the handler, the policy and
-      `nw.validate`'s brand.
-- [ ] `nw.validate` treats "the encoder did not raise" as "conforms". The boolean writer tests
-      truthiness, the instance writer tests non-nil, and the integer writers accept fractions — so
-      the escape hatch that mints `Trusted<T>` brands `{ admin = "false" }` against `t.boolean`.
-- [ ] A throwing `link.send` in `flush` is retried every frame and starves every destination
-      iterated after it.
-- [ ] Handler-less channels bypass `pendingPerBatch`, because `enqueue` returns before the count is
-      taken.
+- [x] **G6 arrives on the wire.** Outbound-class ids were resolved, admitted and decoded for packets
+      a client sent, and could not be budgeted because those classes declare no `rate` — so the
+      reason they may not declare one, "the server is the sender on this class", rested on a check
+      that did not exist. Refused before decode now, at a stage of its own: `direction`, which is
+      `error` by default because nobody sends on a channel they receive on by accident.
+      `Channel.directionOf` is the single source of truth and the test helpers read it rather than
+      keeping a copy.
+- [x] A bare `t.instance` field delivered a client-chosen non-Instance to the handler, the policy
+      and `nw.validate`'s brand. Closed by the same check as the 중대 above: the reader refuses
+      anything that is not an Instance whether or not a class was declared.
+- [x] **The encoder stopped treating "did not raise" as "conforms".** The boolean writer tested
+      truthiness, so `"false"` went on the wire as `true`; the instance writer tested only non-nil;
+      the integer writers checked the range and let `buffer.writeu8` truncate the fraction — with an
+      offset that is not even truncation, `-0.4` on `t.i16(-100, 100)` reading back as `-1`. Eight
+      cases in `serdes_runtime`, all confirmed to pass against the pre-fix writers. Measured cost:
+      **+4%** on both benchmark schemas (`ArrayHeavy` 0.02523 to 0.02626 ms per encode), which is
+      what closing a silent type coercion across the wire is worth.
+- [x] A throwing `link.send` in `flush` no longer parks its bytes for the next frame, and the loop
+      no longer stops at the destination that raised. The probe needed a recipient that *recovers*
+      to bite: one that only ever fails cannot distinguish the two bugs, because the `pcall` alone
+      fixes the starvation and only the save ordering fixes the retry. Against the pre-fix code the
+      recovered recipient's first successful frame carries five bytes where it should carry three.
+- [x] **Handler-less channels bypass `pendingPerBatch`, and that is the examined answer rather than
+      an oversight.** The two limits answer different questions: `queueCapacity` bounds what is held
+      and drops the *oldest*, which is right for a `:listen` that attached a frame late, where the
+      batch ceiling drops the newest and would lose exactly what the queue exists to keep. What was
+      left unbounded is decode work, and on an inbound class that is what `rate` licenses — the
+      genuinely unbounded case the finding pointed at was the outbound-class id above, which has no
+      rate and is now refused before decode. Written into `Inbound` beside the code, and pinned.
 
 #### The documentation that is now wrong
 
