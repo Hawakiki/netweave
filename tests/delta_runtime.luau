@@ -499,6 +499,81 @@ do
 	Buffer.load(nil)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- Everything a node is, carried into the layout derived from it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		**The one hand-kept list nothing was testing.**
+
+		`Ir.patch` derives a second layout from the state one, and everything that is not a struct is
+		copied whole by `cloneNode`. That copy was field by field, so a property added to `Node` and
+		not added there produced a patch layout that reads a *different value* than the state layout
+		wrote — no compile error, no failed round trip on the state side, and a silently wrong number
+		on the client.
+
+		M4 phase 8 added four properties (`step`, `whole`, `utf8`, `pattern`) and the copy carried
+		none of them. A `t.quantized` field inside `nw.replicate` lost its step on the patch side and
+		was read as a raw count of levels: measured, `-0.5` sent and `-1` delivered — the count fell
+		outside the declared range, so the reader refused it and handed back the minimum.
+
+		The copy is `table.clone` now, so a property comes across by default and only the four bit
+		*positions* are dropped. What follows is the assertion that would have caught it — and it
+		checks the layout rather than only the round trip, because a patch that is self-consistently
+		wrong round-trips fine against itself.
+	]]
+	local schema = t.struct({
+		normal = t.quantized(-1, 1, 2 / 254),
+		owner = t.u53,
+		name = t.string(1, 8, { utf8 = true, pattern = "%w+" }),
+	})
+
+	local state = Ir.lower(schema)
+	local patch = Ir.patch(state)
+
+	--[[ Down through the root's own optional, then each field's. ]]
+	local fields = (patch.root.inner :: Ir.Node).fields :: { Ir.Field }
+	local carried: { [string]: Ir.Node } = {}
+
+	for _, field in fields do
+		carried[field.name] = field.node.inner :: Ir.Node
+	end
+
+	equals("a quantised field keeps its step through the derivation", carried.normal.step, 2 / 254)
+	equals("and its offset", carried.normal.offset, -1)
+	check("a u53 keeps its wholeness", carried.owner.whole == true)
+	check("a string keeps its utf8 flag", carried.name.utf8 == true)
+	equals("and its pattern", carried.name.pattern, "%w+")
+
+	--[[ And end to end, because a property that reaches the node and is then not read is the same
+	     defect one layer down. ]]
+	local delta = Delta.build(state)
+
+	Buffer.take()
+	Buffer.load(nil)
+
+	local base = { normal = 0, owner = 1, name = "a" }
+	local next_ = { normal = -0.5, owner = 7594110182, name = "abc" }
+
+	check("the patch was written", delta.write(base, next_))
+
+	local packed = Buffer.take()
+	Buffer.beginRead(packed, nil)
+
+	local merged, refused = delta.apply(base)
+
+	equals("and read back", refused, nil)
+	check(
+		`the quantised field is a value and not a count of levels: {tostring(merged.normal)}`,
+		math.abs(merged.normal - -0.5) <= (2 / 254) / 2
+	)
+	equals("the wide integer survives", merged.owner, 7594110182)
+	equals("and the constrained string", merged.name, "abc")
+
+	Buffer.load(nil)
+end
+
 suite.finish()
 
 return true
