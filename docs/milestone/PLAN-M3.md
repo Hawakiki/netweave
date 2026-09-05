@@ -564,6 +564,18 @@ evidence the claim is not merely unexamined:
       is a coverage gap rather than a convention; a hand-kept list is tested against what it lists;
       nothing on the receive path is silent; errors name the fix, and that is checked rather than
       reviewed.
+- [x] **The Studio run rehearsed before it was spent.** `tests/run.server.luau` requires every suite
+      in one session and the benchmark declares its namespace in that same session; under lune each
+      file is its own process, so everything a suite leaves behind is invisible here and costs a
+      whole Play there. Requiring all fourteen in runner order found two:
+
+      - `tests/example_runtime.luau` installed a loopback transport and did not put the real one
+        back, which would have sent every mode after it into a hole. `api_runtime` already saved and
+        restored; this file did not.
+      - `tests/query_runtime.luau` left eight bytes parked in an `Outbound`'s loaded record, and
+        `serdes_runtime` — which measures `Buffer.used()` after every write — failed on them. The
+        suite that dirties shared state cleans up, and the suite that measures it starts from a
+        state it knows.
 
 ## 7. Acceptance criteria
 

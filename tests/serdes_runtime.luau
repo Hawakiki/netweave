@@ -19,6 +19,13 @@ local Buffer = require("../src/codec/Buffer")
 local Serdes = require("../src/codec/Serdes")
 local t = require("../src/types")
 
+--[[ This file measures `Buffer.used()` after every write, so it starts from a buffer it knows is
+     empty. Under lune each suite is its own process and that is free; in Studio they share one, and
+     a suite that ran earlier can leave bytes parked in an `Outbound` — which is exactly what
+     happened, and cost a run's worth of confusion before phase 8's rehearsal caught it. ]]
+Buffer.take()
+Buffer.load(nil)
+
 local failures = 0
 
 local function fail(message: string)

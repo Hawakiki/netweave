@@ -1070,6 +1070,14 @@ end
 
 -- ---------------------------------------------------------------------------------------------
 
+--[[ The outgoing buffer is global (`src/codec/Buffer.luau`) and an `Outbound` holds a record loaded
+     into it until something flushes. The last call above is still parked in one, so this file would
+     hand the next suite in the same session eight bytes it did not write — which is how
+     `serdes_runtime` came to fail in Studio and nowhere else. ]]
+clientOut.flush()
+Buffer.take()
+Buffer.load(nil)
+
 Config.reset()
 Observer.reset()
 
