@@ -59,6 +59,7 @@ local Namespace = require("./api/Namespace")
 local Protocol = require("./api/Protocol")
 local Observer = require("./api/Observer")
 local Policy = require("./api/Policy")
+local Store = require("./replication/Store")
 local Transport = require("./api/Transport")
 local Trust = require("./api/Trust")
 local Types = require("./types")
@@ -128,6 +129,29 @@ nw.signal = Channel.signal
 nw.query = Channel.query
 nw.state = Channel.state
 nw.event = Channel.event
+
+--[=[
+	@prop replicate (spec) -> Channel
+	@within netweave
+
+	Server-to-client state, sent as **changes** against what each client already has. The seventh
+	class, and the one the server never calls: its `store` is the only way in.
+
+	See `docs/DESIGN-API.md` §3, "Replication is a seventh class, not `state` growing up".
+]=]
+nw.replicate = Channel.replicate
+
+--[=[
+	@prop store Store
+	@within netweave
+
+	Where the game keeps what `nw.replicate` replicates. `nw.store.of` for a plain table,
+	`nw.store.charm` for a Charm atom, `nw.store.replica` for ReplicaService.
+
+	netweave never requires either library — the game passes Charm's own `subscribe` — so a store is
+	a shape rather than a dependency, and anything with `subjects()` and `read(subject)` is one.
+]=]
+nw.store = Store
 
 -- Policies --------------------------------------------------------------------------------------
 

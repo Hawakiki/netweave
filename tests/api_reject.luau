@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 19
+-- netweave:expect 23
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -178,4 +178,49 @@ sanitise({ screen = 1 })
      `nw.validate(policy)`; the implemented shape is `nw.validate(schema, value)` and this is the
      case that keeps the other reading from compiling. ]]
 local _validatedByPolicy = nw.validate(allow, { screen = 1 })
+
+--[[ 20. `nw.replicate` without a `store`. netweave does not own the state it replicates, so there
+     is nothing to send without one — and the store being required at *declaration* rather than at
+     a call site is what makes it the only way in. ]]
+local _storeless = nw.replicate({
+	subject = t.u16,
+	data = t.struct({ hp = t.u8 }),
+	audience = nw.audience.everyone,
+})
+
+--[[ 21. And without a `subject`. It is the one class that names its subjects on the wire, because
+     the client keeps a value per subject and has to know which one arrived. ]]
+local _subjectless = nw.replicate({
+	data = t.struct({ hp = t.u8 }),
+	audience = nw.audience.everyone,
+	store = nw.store.of({}),
+})
+
+--[[ 22. **`unreliable` on a replicated channel**, which is the whole reason this is a class rather
+     than a flag on `nw.state` (`PLAN-M4` D-1). A dropped `state` packet costs one tick; a dropped
+     *change* leaves that client wrong for the session, because every later change is relative to a
+     baseline it does not have. A single class with a flag meaning "fine" or "silently wrong
+     forever" depending on its value is the shape this design exists to make unwritable. ]]
+local _lossy = nw.replicate({
+	subject = t.u16,
+	data = t.struct({ hp = t.u8 }),
+	audience = nw.audience.everyone,
+	store = nw.store.of({}),
+	unreliable = true,
+})
+
+--[[ 23. The server view of a replicated channel has **no `publish`**, and that absence is the
+     class's argument made mechanical: the store is the only way in, so a second one would be a way
+     to be wrong that nothing could detect. ]]
+local world = nw.namespace("world", {
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ hp = t.u8 }),
+		audience = nw.audience.everyone,
+		store = nw.store.of({}),
+	}),
+})
+
+world.server.inventory:publish(1, { hp = 1 })
+
 return nil

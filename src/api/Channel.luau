@@ -36,6 +36,8 @@
 
 local Audience = require("./Audience")
 local Config = require("./Config")
+local Delta = require("../replication/Delta")
+local Ir = require("../codec/Ir")
 local Policy = require("./Policy")
 local Serdes = require("../codec/Serdes")
 local Types = require("../types")
@@ -43,10 +45,10 @@ local Types = require("../types")
 local Channel = {}
 
 --[=[
-	@type Class "command" | "intent" | "signal" | "query" | "state" | "event"
+	@type Class "command" | "intent" | "signal" | "query" | "state" | "event" | "replicate"
 	@within Channel
 ]=]
-export type Class = "command" | "intent" | "signal" | "query" | "state" | "event"
+export type Class = "command" | "intent" | "signal" | "query" | "state" | "event" | "replicate"
 
 --[=[
 	@type Primitive "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
@@ -221,7 +223,13 @@ type function forbid(spec, class, field)
 		data = "A query carries `args` and `returns`, not `data`.",
 		unreliable = "This class must arrive. A command changes authoritative state and a query is "
 			.. "waiting for an answer; delivering either at best effort would make the class name a "
-			.. "promise it does not keep.",
+			.. "promise it does not keep. A replicated channel sends *changes*, and a change that "
+			.. "does not arrive leaves that client permanently and silently wrong — which is why "
+			.. "nw.state exists beside it for the cases where losing one is fine.",
+		store = "Only a replicated channel reads from a store; every other class is handed its "
+			.. "payload at the call site.",
+		subject = "Only a replicated channel names its subjects on the wire. Everywhere else the "
+			.. "audience decides who gets a value and nothing has to say which value it is.",
 	}
 
 	error(`nw.{class:value()} forbids \`{name}\`. {reason[name]}`)
@@ -355,6 +363,52 @@ export type function OutboundPayload(spec, class)
 	forbid(spec, class, types.singleton("timeout"))
 
 	return requireData(spec, class, types.singleton("data"), types.singleton("what the server sends"))
+end
+
+--[=[
+	@type ReplicatePayload<S> S
+	@within Channel
+
+	Checks a `replicate` declaration and projects the payload out of its `data`.
+
+	Everything [OutboundPayload] forbids, plus `unreliable` — which is the difference between this
+	class and `state` made mechanical rather than documented. A delta is only meaningful against the
+	baseline the receiver has, so one that does not arrive leaves that client wrong for the rest of
+	the session (`PLAN-M4` D-2). And two things it requires that no other class has: a `store` to
+	read from, and a `subject` type, because replication is the only class where the wire has to say
+	*which* value this is.
+]=]
+export type function ReplicatePayload(spec)
+	local class = types.singleton("replicate")
+
+	forbid(spec, class, types.singleton("rate"))
+	forbid(spec, class, types.singleton("burst"))
+	forbid(spec, class, types.singleton("maxBytes"))
+	forbid(spec, class, types.singleton("authorize"))
+	forbid(spec, class, types.singleton("args"))
+	forbid(spec, class, types.singleton("returns"))
+	forbid(spec, class, types.singleton("timeout"))
+	forbid(spec, class, types.singleton("unreliable"))
+
+	if not propertyOf(spec, types.singleton("subject")) then
+		error(
+			"nw.replicate needs `subject`, a netweave type naming what each value belongs to — "
+				.. "t.u16 for entity ids, t.string(0, 32) for names. It is the one class that puts "
+				.. "the subject on the wire, because the client keeps a value per subject and has to "
+				.. "know which one arrived."
+		)
+	end
+
+	if not propertyOf(spec, types.singleton("store")) then
+		error(
+			"nw.replicate needs `store`, from nw.store: nw.store.of(table), "
+				.. "nw.store.charm(atom, Charm.subscribe) or nw.store.replica(replicas). netweave does "
+				.. "not own the state it replicates — the game already has somewhere to keep it, and a "
+				.. "library that demands that be torn out to get delta compression will not be used."
+		)
+	end
+
+	return requireData(spec, class, types.singleton("data"), types.singleton("what is replicated"))
 end
 
 --[=[
@@ -549,6 +603,11 @@ local FORBIDDEN_REASON: { [string]: string } = {
 	returns = "Only a query replies.",
 	args = "This class carries `data`, not `args`.",
 	data = "A query carries `args` and `returns`, not `data`.",
+	unreliable = "A replicated channel sends *changes*, and every change is relative to what that "
+		.. "client already has — so one delivered at best effort leaves them permanently and "
+		.. "silently wrong rather than one tick stale. If losing a packet is acceptable for this "
+		.. "data, declare it with nw.state instead, which sends the whole value and can be "
+		.. "unreliable for exactly that reason.",
 }
 
 --[[
@@ -608,7 +667,7 @@ end
 ]=]
 function Channel.directionOf(class: string): (boolean, boolean)
 	local inbound = class == "command" or class == "intent" or class == "signal" or class == "query"
-	local outbound = class == "state" or class == "event" or class == "query"
+	local outbound = class == "state" or class == "event" or class == "query" or class == "replicate"
 
 	return inbound, outbound
 end
@@ -919,6 +978,107 @@ function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundP
 		audience = requireAudience(raw, "state"),
 		unreliable = checkedUnreliable(raw, "state"),
 	})
+end
+
+--[[ A store is a shape rather than a class, so this checks the shape. netweave never requires Charm
+     or Replica — there is no package path for either (`CLAUDE.md` §8) — so anything answering
+     `subjects` and `read` is one, which is also what makes a test's own table a legitimate store
+     rather than a mock. ]]
+local function requireStore(spec: any): any
+	local store = spec.store
+
+	if type(store) ~= "table" or type(store.subjects) ~= "function" or type(store.read) ~= "function" then
+		error(
+			`nw.replicate needs \`store\`, and got {typeof(store)}. Build one with nw.store.of(table), `
+				.. `nw.store.charm(atom, Charm.subscribe) or nw.store.replica(replicas) — or pass anything `
+				.. `with \`subjects()\` and \`read(subject)\`, because a store is a shape and not a `
+				.. `dependency.`,
+			3
+		)
+	end
+
+	if store.changed ~= nil and type(store.changed) ~= "function" then
+		error(
+			`nw.replicate's store has a \`changed\` that is {typeof(store.changed)} rather than a `
+				.. `function. Leave it out if the store cannot say when something moved — netweave polls `
+				.. `once a tick either way — but a broken one would be silently never called.`,
+			3
+		)
+	end
+
+	return store
+end
+
+--[=[
+	@within Channel
+	@function replicate
+	@param spec S -- data, subject, audience, store
+	@return Channel<"replicate", Scope, T, nil>
+
+	Server-to-client replicated state, sent as **changes** against what each client already has.
+
+	```lua
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ slot = t.u8, count = t.u16, item = t.string(0, 24) }),
+		audience = nw.audience.owner,
+		store = nw.store.of(byPlayer),
+	}),
+	```
+
+	The server never calls this channel. `store` is the only way in — netweave reads it once a tick,
+	works out what each client is missing, and sends that. A twelve-field subject where one field
+	moved is three bytes.
+
+	:::caution
+	`unreliable` is **forbidden**, and that is the whole difference between this and [Channel.state].
+	A dropped `state` packet costs one tick of staleness and the next corrects it. A dropped *change*
+	leaves that client permanently and silently wrong, because every later change is relative to a
+	baseline it does not have. If losing one is acceptable, the class you want is `state`.
+	:::
+
+	:::note
+	There is only one packet shape. A client with no baseline is sent a change against **nothing**,
+	which writes every field — the same bytes a snapshot would have cost, because the flags fit in
+	the byte the schema's own flags were already using. So there is no snapshot/patch bit on the
+	wire, and a join, a resync and an audience entry are the same code.
+	:::
+]=]
+function Channel.replicate<S>(spec: S): Channel<"replicate", OutboundScope<S>, ReplicatePayload<S>, nil>
+	local raw: any = spec
+	rejectForbidden(
+		raw,
+		"replicate",
+		{ "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout", "unreliable" }
+	)
+
+	local data = requireType(raw, "data", "replicate")
+	local channel = make("replicate", "Outbound", data, {
+		audience = requireAudience(raw, "replicate"),
+		subject = requireType(raw, "subject", "replicate"),
+		store = requireStore(raw),
+
+		--[[ Not `checkedUnreliable`, because the field is forbidden above and this is the answer
+		     rather than a default that could be overridden. ]]
+		unreliable = false,
+	})
+
+	--[[ Two derived codecs beside the state one `make` built. `subjectCodec` names which value this
+	     is — the only class that needs to, because the client keeps one per subject — and `delta`
+	     is the change itself. ]]
+	channel.subjectCodec = Serdes.fromSchema(channel.subject)
+	channel.delta = Delta.build(Ir.lower(data))
+
+	--[[
+		The wire ceiling is the *patch's*, not the state's, and it is larger: a change carries one
+		bit per field on top of the values. A client refuses against this before decoding, so
+		leaving it at the state's ceiling would have a replicated channel refuse its own honest
+		traffic — which is precisely the defect an external review found in `Ir.ceiling` and
+		`PLAN-M3` phase 9 fixed. The subject's own bytes are on top of both.
+	]]
+	channel.maxBytes = channel.subjectCodec.maxSize + channel.delta.layout.maxSize
+
+	return channel
 end
 
 --[=[
