@@ -202,6 +202,18 @@ do
 	trip("a signed range travels unsigned", t.i16(-100, 100), -100, 1)
 	trip("and reaches its top", t.i16(-100, 100), 100, 1)
 	trip("floats are not narrowed", t.f32(-90, 90), -90, 4)
+
+	--[[ The wire half of the widened float range (M4 report). Both of these were refused at `write`
+	     against a bound the author never declared — `f32` at 2^24 and `f64` at 2^53, which are the
+	     spans in which each encoding holds every *integer* exactly and not the values it can carry.
+	     Both are exactly representable, so a round trip is the right assertion. ]]
+	trip("f32 carries a number past the integer-exact span", t.f32, 1e8, 4)
+	trip("f64 carries one past its own", t.f64, 1e18, 8)
+
+	--[[ And the end that still has to refuse: past the largest finite value the encoding holds, a
+	     float becomes `inf` on the wire. ]]
+	refuses("f32 past its largest finite value", t.f32, 1e39)
+	refuses("f64 past a double's", t.f64, math.huge)
 end
 
 do

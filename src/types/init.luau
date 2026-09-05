@@ -276,6 +276,29 @@ export type Classed = typeof(setmetatable(
 	{} :: { __call: (self: any, className: string) -> Type<Instance> }
 ))
 
+--[[
+	~~`f32` is `-2^24..2^24` and `f64` is `-2^53..2^53`.~~ **Those were the spans in which each
+	encoding represents every *integer* exactly, and using them as the value range refused ordinary
+	numbers** (M4 report): bare `t.f32` refused `1e8`, bare `t.f64` refused `1e18`, and
+	`t.f32(0, 1e9)` was refused at declaration — with a range the author never wrote appearing in the
+	message.
+
+	The cap did no layout work either. A float is never narrowed (`Ir.lowerNumber`: subtracting a
+	lower bound from a float and storing it narrower changes which values are representable), so
+	these two numbers only ever validated, and validated the wrong property. What a float range is
+	for is the author's own claim about the value — `t.f32(-1, 1)` for a normal, `t.f32(-90, 90)` for
+	a pitch — and the encoding's own limit is the largest finite value it can hold.
+
+	So: the largest finite `f32` and the largest finite double. `inf` is outside both, which is the
+	intent — it round-trips, but it is a value no schema means to declare, and NaN was already
+	refused because it fails both comparisons.
+
+	The precision this does *not* promise is now in the docstrings, where the finding says it should
+	have been: `f32` carries about seven significant digits, so a number past 2^24 comes back rounded.
+]]
+local MAX_F32 = 3.4028234663852886e38
+local MAX_F64 = 1.7976931348623157e308
+
 local ENCODING_RANGE: { [string]: { min: number, max: number } } = {
 	u8 = { min = 0, max = 255 },
 	u16 = { min = 0, max = 65535 },
@@ -283,9 +306,13 @@ local ENCODING_RANGE: { [string]: { min: number, max: number } } = {
 	i8 = { min = -128, max = 127 },
 	i16 = { min = -32768, max = 32767 },
 	i32 = { min = -2147483648, max = 2147483647 },
-	f32 = { min = -16777216, max = 16777216 },
-	f64 = { min = -(2 ^ 53), max = 2 ^ 53 },
+	f32 = { min = -MAX_F32, max = MAX_F32 },
+	f64 = { min = -MAX_F64, max = MAX_F64 },
 }
+
+--[[ Which encodings carry a fraction. Everything else — every integer encoding, and the *lengths*
+     `t.string` and `t.buffer` are ranged by — has to be given whole bounds. ]]
+local FRACTIONAL: { [string]: boolean } = { f32 = true, f64 = true }
 
 local MAX_LENGTH = 65535
 
@@ -324,6 +351,20 @@ end
 local function ranged(base: { [string]: any }, label: string): any
 	local self = table.clone(base)
 
+	--[[
+		Whole bounds, unless the encoding itself carries a fraction.
+
+		`t.u8(0.5, 2.5)` type-checked, lowered and encoded — and delivered a different number than
+		was sent, with no rejection anywhere: the offset became 0.5, the writer's whole-number test
+		passed on the *value*, `buffer.writeu8(1 - 0.5)` truncated, and the reader added 0.5 back.
+		Sent 1, got 0.5. That is the failure M3 phase 9 closed for fractional values, re-opened one
+		level up by the bound (M4 report).
+
+		The same applies to `t.string` and `t.buffer`, whose range is a **length**: half a byte is
+		not a length, and a fractional one would reach the length prefix.
+	]]
+	local whole = not FRACTIONAL[base.encoding or ""]
+
 	local callable = setmetatable(
 		self,
 		table.freeze({
@@ -334,6 +375,11 @@ local function ranged(base: { [string]: any }, label: string): any
 				check(
 					min >= base.min and max <= base.max,
 					`{label} range {min}..{max} is outside {base.min}..{base.max}`
+				)
+				check(
+					not whole or (min % 1 == 0 and max % 1 == 0),
+					`{label} range {min}..{max} is not whole, and this one counts in whole numbers. `
+						.. `Round the bounds — or use t.f32 or t.f64 if the value really is fractional`
 				)
 
 				local constrained = table.clone(base)
@@ -404,14 +450,31 @@ t.i32 = number("i32") :: Ranged<number>
 --[=[
 	@prop f32 Ranged<number>
 	@within Types
-	A single-precision float. A range on a float validates but never narrows the storage.
+
+	A single-precision float, four bytes, up to ±3.4028235e38.
+
+	A range on a float validates but never narrows the storage — subtracting a lower bound and
+	storing it smaller would change which values are representable, which is not what the schema
+	said.
+
+	:::caution
+	**About seven significant digits.** Every integer up to 16,777,216 is exact and past that they
+	come back rounded: 16777217 arrives as 16777216, silently, because that is what the encoding is.
+	Use `t.f64` where a large number has to be exact, `t.u32` or `t.i32` where it is an integer, or
+	[Types.quantized] where a bounded range needs fewer bytes than either.
+	:::
 ]=]
 t.f32 = number("f32") :: Ranged<number>
 
 --[=[
 	@prop f64 Ranged<number>
 	@within Types
-	A double-precision float.
+
+	A double-precision float, eight bytes, up to ±1.7976931348623157e308 — every number Luau has,
+	`inf` and NaN excepted.
+
+	Integers are exact to 2^53, which is every `UserId`, every timestamp in milliseconds and every
+	currency balance a game will hold.
 ]=]
 t.f64 = number("f64") :: Ranged<number>
 
@@ -613,6 +676,15 @@ function t.array<T>(element: Type<T>, min: number?, max: number?): Type<{ T }>
 	check(lower >= 0, `array length {lower} is negative`)
 	check(lower <= upper, `array length range has min {lower} above max {upper}`)
 	check(upper <= MAX_LENGTH, `array length {upper} exceeds {MAX_LENGTH}`)
+
+	--[[ A count is not a range through `ranged`, so it needs the same check separately.
+	     `t.array(t.u8, 1.5)` lowered happily and then refused **every** length the game could send:
+	     a channel declared, accepted, and unable to carry anything (M4 report). ]]
+	check(
+		lower % 1 == 0 and upper % 1 == 0,
+		`array length {lower}..{upper} is not whole. A length is a count of elements, and a `
+			.. `fractional one is a channel that refuses every list you can build`
+	)
 
 	return descriptor({
 		kind = "array" :: Kind,
