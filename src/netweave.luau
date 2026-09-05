@@ -137,6 +137,11 @@ nw.event = Channel.event
 	Server-to-client state, sent as **changes** against what each client already has. The seventh
 	class, and the one the server never calls: its `store` is the only way in.
 
+	:::caution
+	The value a handler receives is **frozen**: it is this client's baseline, and the next change is
+	applied to it. `table.clone` it if you need one to write to.
+	:::
+
 	See `docs/DESIGN-API.md` §3, "Replication is a seventh class, not `state` growing up".
 ]=]
 nw.replicate = Channel.replicate

@@ -118,6 +118,43 @@ local function traceback(message: any): string
 end
 
 --[[
+	What a `replicate` handler is given **is** this endpoint's baseline, and until M4 phase 8 it
+	could be written to.
+
+	`Delta`'s merger returns the value and whether it is a new one, so a subtree the patch did not
+	touch comes back by reference — and that sharing is the whole reason a twelve-field subject with
+	one field moved costs three bytes. The consequence nobody wrote down is that the table handed to
+	`:listen` is the same table `store.keep` records. The habit every state library teaches —
+	`Replica.Data.hp = 4`, a client-side prediction, `value.hp -= 1` — writes straight into it, and
+	the next patch carries only the fields the server changed while the rest are read back out of the
+	corrupted base. Measured: `seen.hp = 3`, then a gold-only patch, and the server says hp=10 while
+	the client sees hp=3 — silently, and for ever (M4 report).
+
+	A defensive copy is the other way out and it is the wrong one: it would have to be deep, it would
+	run per subject per patch, and it is precisely the sharing thrown away to protect it. Freezing
+	allocates nothing and turns a silent corruption into a raise on the line that caused it.
+
+	It is also nearly free for the same reason the hazard exists. An untouched subtree is already
+	frozen by the patch that built it, so the walk stops there and visits only what this patch made —
+	`table.clone` hands back an unfrozen copy, which is what lets the merger keep working above.
+
+	`table.freeze` is shallow in Luau, hence the recursion. A `t.buffer` field is carried by
+	reference and cannot be frozen at all, which is the same hole `Tick.snapshot` documents from the
+	sending end.
+]]
+local function harden(value: any)
+	if type(value) ~= "table" or table.isfrozen(value) then
+		return
+	end
+
+	for _, inner in value do
+		harden(inner)
+	end
+
+	table.freeze(value)
+end
+
+--[[
 	A batch is read to completion **before** anything is dispatched, and that is a correctness
 	requirement rather than a tidiness one.
 
@@ -1045,6 +1082,9 @@ function Inbound.new(config: Config): Inbound
 				     raises cannot leave this endpoint believing it still has the subject. ]]
 				store.drop(sender, channel, subject)
 			else
+				--[[ Before it is recorded and before the handler sees it, because those are the same
+				     table. See `harden`. ]]
+				harden(value)
 				store.keep(sender, channel, subject, value)
 			end
 

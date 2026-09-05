@@ -363,6 +363,14 @@ The one thing they do share is the receiving end: `:listen(function(value) end)`
 the whole value, because a client that has to know whether it was sent a snapshot or a patch is a
 client the library has failed.
 
+They do not share what that value *is*. On `replicate` it **is the client's baseline**, frozen —
+a change is folded into what the client already had and every subtree the patch did not touch is
+shared with it, which is why one field of twelve costs three bytes and not a whole subject. Writing
+into it would rewrite the base the next change is applied to, so a prediction written as
+`value.hp -= 1` would leave that field wrong for ever with nothing on either side to say so
+(M4 report, measured). A game that wants one to write to takes `table.clone(value)`; the freeze is
+there so that requirement is a raise on the offending line rather than a bug three patches later.
+
 #### Reliable delivery is the answer to D-2, and netweave's own limits are the hole in it
 
 `PLAN-M4` D-2 offered three shapes — reliable deltas, acknowledged baselines, periodic snapshots —

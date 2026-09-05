@@ -1060,6 +1060,15 @@ end
 	baseline it does not have. If losing one is acceptable, the class you want is `state`.
 	:::
 
+	:::caution
+	**The value a handler receives is frozen, and it is this client's baseline.** A change is folded
+	into what the client already had, and every subtree the patch did not touch is shared with it —
+	that sharing is why one field of twelve costs three bytes. Writing into the value would therefore
+	rewrite the base the *next* patch is applied to, so `value.hp -= 1` for a prediction would leave
+	that field wrong for ever with nothing to say so. Keep your own copy instead:
+	`local mine = table.clone(value)`.
+	:::
+
 	:::note
 	There is only one packet shape. A client with no baseline is sent a change against **nothing**,
 	which writes every field — the same bytes a snapshot would have cost, because the flags fit in

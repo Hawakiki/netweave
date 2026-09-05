@@ -835,6 +835,87 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- The value a handler is given, which is this client's baseline (M4 report)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		`:listen` hands the client the whole value, and until M4 phase 8 nothing said what that value
+		*is*. It is the baseline — `Delta`'s merger folds the patch into what the client already had
+		and returns every untouched subtree by reference, which is why one field of twelve costs
+		three bytes — and `Inbound` records the same table it dispatches.
+
+		So the habit every state library teaches wrote straight into it. Measured before the fix:
+		`seen.hp = 3`, then a patch carrying only `gold`, and the server says hp=10 while the client
+		sees hp=3 — for ever, because every later patch is folded into the corrupted base, and
+		neither end has anything to compare.
+
+		A deep defensive copy per subject per patch is the sharing thrown away to protect it. The
+		value is frozen instead, which allocates nothing and moves the failure to the line that
+		causes it.
+	]]
+	world[900] = { hp = 10, gold = 5, pos = { x = 1, y = 1 }, tag = nil }
+	sees(900, alice)
+	frame()
+
+	local seen = mirrorOf(alice)[900]
+
+	check(
+		"the handler was given this client's own baseline",
+		seen == peers[alice].baselines.of(nil, channel, 900)
+	)
+
+	suite.failing()
+
+	check("which is frozen", table.isfrozen(seen))
+	check("and so is what is nested inside it", table.isfrozen(seen.pos))
+
+	local wrote = pcall(function()
+		seen.hp = 3
+	end)
+
+	check("so the write that used to corrupt it raises", not wrote)
+
+	local nested = pcall(function()
+		seen.pos.x = 3
+	end)
+
+	check("and the one a shallow freeze would have missed raises too", not nested)
+
+	suite.passing()
+
+	--[[ The report's measurement, replayed with the write refused: a patch that carries only `gold`
+	     leaves `hp` at what the server has, rather than at what the game wrote. ]]
+	world[900].gold = 6
+	frame()
+
+	equals("a later patch carries only what moved", mirrorOf(alice)[900].gold, 6)
+	equals("and the field the game tried to write is still the server's", mirrorOf(alice)[900].hp, 10)
+
+	--[[ And netweave still folds into it. `table.clone` hands back an unfrozen copy, which is what
+	     lets the merger keep working over a frozen base — the one property this whole approach rests
+	     on, asserted rather than assumed. ]]
+	world[900].pos.x = 4
+	frame()
+
+	local moved = mirrorOf(alice)[900]
+
+	equals("a nested change folds into a frozen baseline", moved.pos.x, 4)
+	check("and what comes out is frozen as well", table.isfrozen(moved) and table.isfrozen(moved.pos))
+
+	--[[ The sharing, which is both the reason the hazard existed and the reason the fix is cheap: a
+	     subtree the patch did not touch is the *same table*, already frozen, so the walk stops
+	     there. ]]
+	world[900].gold = 7
+	frame()
+
+	local after = mirrorOf(alice)[900]
+
+	check("a subtree the patch did not touch comes back by reference", after.pos == moved.pos)
+	check("so freezing it a second time has nothing to visit", table.isfrozen(after.pos))
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 channel.handler = nil
 shared.handler = nil

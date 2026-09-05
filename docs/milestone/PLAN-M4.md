@@ -700,6 +700,17 @@ they are struck through.
 - [x] `bench/check.luau` said it compiled "every Luau file under `bench/`" and walked three
       subdirectories, so the five files sitting directly in `bench/` — including `tick.luau` — were
       reported as compiling by a check that had never opened them. 54 files became 59.
+- [x] **What a `replicate` handler is given is the client's baseline, and it is frozen now.** The
+      merger returns every untouched subtree by reference — the sharing that makes one field of
+      twelve cost three bytes — so the table handed to `:listen` is the same one `store.keep`
+      records, and `value.hp -= 1` rewrote the base the next patch folds into. Measured: after
+      `seen.hp = 3` and a gold-only patch, the server says hp=10 and the client sees hp=3, for ever.
+      A deep defensive copy per subject per patch is that sharing thrown away to protect it;
+      `table.freeze` allocates nothing and moves the failure to the line that causes it. It is also
+      nearly free for the reason the hazard exists — an untouched subtree is already frozen, so the
+      walk stops there and visits only what this patch built, and `table.clone` hands back an
+      unfrozen copy so the merger keeps working. Confirmed by removing the freeze (7 failures, one of
+      them the report's measurement to the digit) and by making it shallow (4).
 
 ## 7. Acceptance criteria
 
