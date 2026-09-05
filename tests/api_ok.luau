@@ -245,4 +245,31 @@ end
 local configured: { screen: number } = { screen = 3 }
 
 authoritative((configured :: any) :: nw.Trusted<{ screen: number }>)
+
+--[[
+	A replicated channel, declared and listened to.
+
+	`tests/api_reject.luau` cases 20-23 are the four ways to get this wrong, and `CLAUDE.md` §9 says
+	a feature whose only test is a rejection file has no test — `nw.configure` shipped typed so that
+	Luau refused every call and the rejection count counted the bug. So this is the half that has to
+	work: the declaration analyses, the client's handler receives the payload with its fields
+	readable, and the store is an ordinary table.
+]]
+local held: { [number]: { hp: number, gold: number } } = { [1] = { hp = 10, gold = 5 } }
+
+local vault = nw.namespace("vault", {
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ hp = t.u8, gold = t.u16 }),
+		audience = nw.audience.owner,
+		store = nw.store.of(held),
+	}),
+})
+
+vault.client.inventory:listen(function(value)
+	--[[ The whole value, not a patch. A client that had to know which of the two it was sent is a
+	     client the library has failed (`DESIGN-API.md` §3). ]]
+	local _total: number = value.hp + value.gold
+end)
+
 return nil

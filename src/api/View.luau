@@ -167,6 +167,19 @@ type function channelView(channel, side)
 				)
 			)
 		end
+	elseif class == "replicate" then
+		--[[
+			The server view has **nothing on it**, and that absence is the class's argument made
+			mechanical rather than documented. A replicated channel is fed by its `store`; if
+			`publish` existed here there would be two ways in, and the one that skipped the baseline
+			would leave clients wrong in a way nothing could detect.
+
+			The client half is `listen`, the same as `state`, because a client that has to know
+			whether it was sent a change or a whole value is a client the library has failed.
+		]]
+		if not server then
+			listener(payload, false)
+		end
 	else
 		if server then
 			view:setproperty(types.singleton("publish"), returns({ types.unknown, types.unknown, payload }))
@@ -313,6 +326,12 @@ local function serverView(channel: any): any
 				attach(channel, handler, "handle")
 			end,
 		}
+	end
+
+	--[[ Nothing to call. See the type function above: the store is the only way into a replicated
+	     channel, so a second one would be a way to be wrong. ]]
+	if class == "replicate" then
+		return { channel = channel }
 	end
 
 	local view: any = {

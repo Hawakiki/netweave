@@ -410,12 +410,30 @@ the diff, 4 is baselines, 5 is the seam, 6 is the hostile suite. Everything L3 n
 built and nothing declares it. Found by trying to write phase 5's third task, which needs a public
 API to write an example against.
 
-- [ ] `nw.replicate` in `Channel.luau`: required `data`, `audience`, `store`; forbidden `rate`,
-      `burst`, `maxBytes`, `authorize` and — the one that matters — `unreliable` (D-1).
-- [ ] The view: `:listen(value)` on the client, and **no `publish`** on the server, because the
-      store is the only way in. That absence is the class's whole argument made mechanical.
-- [ ] The tick: for each subject the store lists, for each client the audience admits, a snapshot
-      when they have no baseline and a patch when they do. `Outbound` already batches it.
+- [x] `nw.replicate` in `Channel.luau`: required `data`, `audience`, `store` and **`subject`**;
+      forbidden `rate`, `burst`, `maxBytes`, `authorize` and — the one that matters — `unreliable`.
+      All five refusals are type errors first and named runtime errors second.
+
+      `subject` was not in the plan and is not optional. Every other class lets the audience decide
+      *who* gets a value and never has to say *which* value it is; replication keeps one per subject
+      on the client, so the subject goes on the wire. Declaring its type rather than assigning ids
+      means it is bounded and checked like everything else.
+- [x] The view: `:listen(value)` on the client, and **nothing at all** on the server. `publish`
+      would be a second way in, and the one that skipped the baseline would leave clients wrong in a
+      way nothing could detect.
+- [x] **There is only one packet shape, which was not the plan's assumption and is better than it.**
+      A snapshot is a change against *nothing*: `Delta.write(nil, value)` finds every field
+      different and writes all of them. Measured on a four-field struct with a nested struct and an
+      optional: **six bytes either way** — the patch's flag bits fit in the byte the schema's own
+      flags were already using. So there is no snapshot/patch discriminator on the wire, no second
+      codec, and a join, a resync and an audience entry are the same code path rather than three.
+- [x] `tests/api_reject.luau` 20-23 and the positive half in `tests/api_ok.luau`, because §9 says a
+      feature whose only test is a rejection file has no test. The fourth rejection is the one worth
+      naming: **`world.server.inventory:publish(...)` does not compile**, which is the class's
+      argument enforced rather than described.
+- [ ] The tick: for each subject the store lists, for each client the audience admits, a change
+      against whatever that client has — which is `nil` for one that has nothing. `Outbound` already
+      batches it, and the single packet shape above means there is no branch to get wrong.
 - [ ] **Wire the client's own `budget` rejection into `Baseline.desync`** — phase 4's break
       detector, whose whole point is that the receiver already knows when netweave dropped
       something. This is the packet that asks for a resnapshot.
