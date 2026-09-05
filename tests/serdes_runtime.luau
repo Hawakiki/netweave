@@ -437,6 +437,39 @@ do
 	check("the second instance survives", decoded.b == second)
 end
 
+do
+	--[[
+		`check` serialises for real — that is the whole design, so that the encoder stays the only
+		statement of what a value must satisfy — and then throws the result away. What it used to
+		fail to throw away was the sidecar: `Buffer.load` restores the count and leaves the entries
+		the trial write appended past it, so every `nw.validate` of a payload carrying an Instance
+		kept a reference to it until some later write happened to reuse that slot.
+
+		Found by an external review (M3 phase 9). `mark`/`rollback` is the pair that clears them,
+		and it is the one the send path already uses for an encode that raised.
+	]]
+	local codec = Serdes.fromSchema(t.struct({ a = t.instance }))
+	local held = harness.instance("held")
+
+	Buffer.load(nil)
+
+	local before = Buffer.save()
+	equals("nothing is parked to begin with", before.instanceCount, 0)
+
+	equals("the value validates", codec.check({ a = held }), nil)
+
+	local after = Buffer.save()
+
+	equals("and the count is back where it started", after.instanceCount, 0)
+	check("with nothing left in the slot past it", after.instances[1] == nil)
+
+	--[[ And a value that fails halfway leaves no more behind than one that passed. ]]
+	check("a bad value is refused", codec.check({ a = 12345 }) ~= nil)
+	check("and holds nothing either", Buffer.save().instances[1] == nil)
+
+	Buffer.load(nil)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Encode refuses what the schema forbids
 -- ---------------------------------------------------------------------------------------------

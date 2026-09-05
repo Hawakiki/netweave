@@ -418,6 +418,20 @@ sample count before quoting anything. And when a number looks like a regression,
 is what the **control group** did — how far the code that did not change moved in the same run.
 Chasing the difference without asking that would have "fixed" a defect that did not exist.
 
+### Count it instead of weighing it
+
+The rule above makes heap measurements expensive to trust, which is a problem when the claim *is*
+about the heap — "under a flood the rejection path allocates nothing" is a promise `Observer` and
+`Budget` both make in as many words, and `Inbound` was breaking it in four places.
+
+Weighing it needs windows, repeats and a spread. Counting it needs neither: a reason built per
+packet is a reason that **differs** per packet, so a set of the strings a flood produced answers the
+question exactly, in one run, with no dependence on how fast the collector is. Two thousand refusals
+across three stages: 1,994 distinct reasons before the fix, 3 after.
+
+Before reaching for `collectgarbage`, ask what the allocation would make *observably* different.
+Often there is a counter hiding inside the property.
+
 ### A probe that finds nothing is written down
 
 Recording an audit's null results is what separates "checked and fine" from "never looked". `PLAN-M3`

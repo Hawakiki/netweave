@@ -110,6 +110,46 @@ export type Observer = (rejection: Rejection) -> ()
 local observers: { Observer } = {}
 local count = 0
 
+--[[
+	Removal is a tombstone, because `emit` may be walking the list when it happens.
+
+	An observer that stops observing from inside its own call is ordinary code — "warn once, then
+	detach" — and `table.remove` used to shift the observer behind it into the index the loop had
+	already passed, so that one was skipped and the last index read `nil`. `xpcall(nil, ...)` does
+	not raise, so the miss was silent (M3 phase 9).
+
+	The slot is overwritten with `NOOP` instead and the list is compacted the next time nothing is
+	iterating it, which is a bounded amount of work with no allocation and no ordering to get wrong.
+]]
+local function NOOP() end
+
+local emitting = 0
+local tombstones = false
+
+local function compact()
+	if not tombstones or emitting > 0 then
+		return
+	end
+
+	local kept = 0
+
+	for index = 1, count do
+		local observer = observers[index]
+
+		if observer ~= NOOP then
+			kept += 1
+			observers[kept] = observer
+		end
+	end
+
+	for index = kept + 1, count do
+		observers[index] = nil
+	end
+
+	count = kept
+	tombstones = false
+end
+
 --[[ One record, refilled per rejection. See the caution on `Rejection`. ]]
 local record: Rejection = {
 	channel = "",
@@ -251,11 +291,13 @@ function Observer.observe(observer: Observer): () -> ()
 
 		for index = 1, count do
 			if observers[index] == observer then
-				table.remove(observers, index)
-				count -= 1
+				observers[index] = NOOP
+				tombstones = true
 				break
 			end
 		end
+
+		compact()
 	end
 end
 
@@ -280,9 +322,19 @@ function Observer.emit(channel: string, player: Player?, stage: Stage, reason: s
 
 	tally(channel, stage, bytes)
 
+	compact()
+
+	emitting += 1
+
 	for index = 1, count do
-		xpcall(observers[index], report, record)
+		local observer = observers[index]
+
+		if observer ~= NOOP then
+			xpcall(observer, report, record)
+		end
 	end
+
+	emitting -= 1
 
 	announce(channel, stage, reason, player)
 end
@@ -398,6 +450,8 @@ function Observer.reset()
 	table.clear(seen)
 	table.clear(tallies)
 	count = 0
+	emitting = 0
+	tombstones = false
 	total = 0
 	since = os.clock()
 	sink = warn

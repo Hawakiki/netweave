@@ -101,7 +101,24 @@ function Recipients.roblox(): Roster
 				return instance
 			end
 
-			return Players:GetPlayerFromCharacter(instance :: Model)
+			--[[
+				A real narrowing rather than the `:: Model` cast this used to carry.
+
+				`GetPlayerFromCharacter` takes a `Model`, and anything reaching this line is whatever
+				the game passed to `publish` — a `BasePart`, a `Folder`, a `Tool`. An external review
+				flagged that as an unverified raise (M3 phase 9): it would have raised from inside
+				`publish`, in game code, on a path whose whole contract is "or nil".
+
+				Not verified in Studio and it does not need to be, because the check makes the answer
+				the same either way. `within` above takes a `BasePart` and this deliberately does
+				not: a position can be read off any part, and a part is not a character. Pass the
+				character, or the `Player`.
+			]]
+			if not instance:IsA("Model") then
+				return nil
+			end
+
+			return Players:GetPlayerFromCharacter(instance)
 		end,
 
 		within = function(subject: any, studs: number, out: { any }): number

@@ -330,6 +330,48 @@ tests one interleaving of yielding handlers; `serdes_runtime` asserts the encode
 `t.array(t.boolean)` and nothing compares it to `maxSize`. Each fix is small, and each should land with
 its probe run against the pre-fix code first, per `CLAUDE.md` §9.
 
+## Disposition
+
+Added by the netweave session that acted on this report. The report itself is left as it was
+written, at `7f5871c` — it is a dated snapshot and rewriting it would destroy the record of what an
+outside reader could see. What follows is where each finding was answered.
+
+All 26 are closed: **16 by a change to `src/`**, and 10 by a correction to a document that
+overstated what the code did — three of those after examining the behaviour and deliberately
+keeping it (the 16,383-byte frame cap, `pendingPerBatch` on handler-less channels, and the reply to
+a refused request), each with the argument written beside the code rather than only here.
+
+Every code fix landed with its probe run against the pre-fix code first, per `CLAUDE.md` §9, and
+each is pinned by a test that fails without it. The one exception is
+`Recipients.roblox().owner`, whose test is in `tests/roblox_runtime.luau` because that module's
+whole body is Roblox API calls — **it has not been run yet**, and it is on the next Studio pass.
+
+Two of the 26 are corrections to this report rather than to netweave:
+
+- *"A refused query request is answered before decode, outside any budget"* — the cost half is
+  right and is now documented in `Outbound.reply`; ~~the claim that `Batch.read`'s premise
+  "refusing has to stay cheaper than accepting" does not hold for this class~~ **is false, and the
+  finding says itself that it was inferred.** Measured over 300 requests in one batch: refused
+  costs 1,074 bytes out and 0.71 ms, admitted costs 2,274 and 1.60 ms. Refusing is half of
+  accepting in both, and the outbound never exceeds what the peer spent.
+- *"The client's protocol seals on the first inbound packet"* — real, and **not fixable where this
+  looks.** Decoding the packet that sealed the protocol needs the id numbering, and the numbering
+  needs every declaration, so there is no later moment to seal at. What was wrong was the
+  diagnosis, not the code: the docstring said "before the first packet moves" without saying that
+  on a client the first packet is one that *arrives*. Both cautions and the `declare` error say it
+  now.
+
+The full working, finding by finding with the before-and-after numbers, is in
+`docs/milestone/PLAN-M3.md` phase 9. Two of the findings changed what this repository checks rather
+than only what it does:
+
+- `Alloc.measure` reports `low` and `high` beside the median, and `CLAUDE.md` §9 gained "a
+  measurement is not a number until it survives re-running" — because the encode regression this
+  report arrived beside did not exist, and the control group is what proved it.
+- The "allocates nothing under a flood" promise is pinned by **counting distinct reason strings**
+  rather than by weighing the heap: 1,994 before, 3 after. A reason built per packet is a reason
+  that differs per packet, and a set does not care how fast the collector is.
+
 ## Appendix A — probes
 
 Run from the repository root with `lune run <file>`. Paths are written for a file placed in

@@ -1,7 +1,7 @@
 --!strict
 
 --[[
-	The half of the codec lune cannot reach.
+	The half lune cannot reach.
 
 		rojo build test.project.json -o netweave-test.rbxl
 
@@ -10,9 +10,14 @@
 	`tests/serdes_runtime.luau`, which runs faster and needs no Studio.
 
 	Same rule as there: encode raises on a value the schema forbids, decode never raises.
+
+	The last section is not the codec. `Recipients.roblox()` is the one module whose whole body is
+	Roblox API calls, so lune sees an injected roster and never the real one — which is how an
+	unchecked `GetPlayerFromCharacter` argument survived to an external review (M3 phase 9).
 ]]
 
 local Buffer = require("../src/codec/Buffer")
+local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
 local t = require("../src/types")
 
@@ -293,6 +298,42 @@ do
 	equals("and the flags beside it are unaffected", absent.charged, false)
 
 	emitter:Destroy()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The roster, against the real Players service
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local roster = Recipients.roblox()
+
+	--[[
+		`owner` used to hand whatever it was given straight to `GetPlayerFromCharacter` behind a
+		`:: Model` cast, so a `BasePart` or a `Folder` subject — which is what a game publishing
+		from a projectile or a door passes — reached a reflected parameter typed `Model`. Whether
+		Roblox raises on that was never established; the check above makes it not matter, and this
+		is where the answer would show up if it ever did.
+	]]
+	local part = Instance.new("Part")
+	local folder = Instance.new("Folder")
+	local model = Instance.new("Model")
+
+	equals("a part has no owner", roster.owner(part), nil)
+	equals("nor does a folder", roster.owner(folder), nil)
+	equals("nor does a model nobody is playing", roster.owner(model), nil)
+	equals("nor does a value that is not an Instance at all", roster.owner(12345), nil)
+
+	--[[ And the one that does resolve: a player is their own owner, which is the case
+	     `nw.audience.owner` takes on a `command`'s `ctx.player`. ]]
+	local players = roster.all()
+
+	if #players > 0 then
+		equals("a player owns themselves", roster.owner(players[1]), players[1])
+	end
+
+	part:Destroy()
+	folder:Destroy()
+	model:Destroy()
 end
 
 -- ---------------------------------------------------------------------------------------------

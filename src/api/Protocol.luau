@@ -274,7 +274,7 @@ export type Config = {
 }
 
 export type Agreement = {
-	greet: (who: any?, hash: number) -> (),
+	greet: (who: any?, hash: number) -> string?,
 	verdict: (who: any?) -> string?,
 	agreed: (who: any?) -> boolean,
 	forget: (who: any) -> (),
@@ -317,19 +317,41 @@ function Protocol.new(config: Config): Agreement
 	end
 
 	return {
-		greet = function(who: any?, hash: number)
+		greet = function(who: any?, hash: number): string?
 			local mine = ours()
 			local key = keyOf(who)
 
 			if hash == mine then
 				refusals[key] = nil
-				return
+				return nil
 			end
 
-			refusals[key] = `the peer is on protocol {Protocol.hex(hash)} and this peer is on `
+			--[[
+				A peer already known to be wrong is not re-judged, and that bound is the whole answer
+				to a hello flood.
+
+				Control packets are read before `sink.admit`, because resolving id 0 would fail and
+				that failure would be the unrecoverable one — so nothing charges a hello a rate. What
+				made that matter was here: every mismatched hello built a fresh reason string and
+				answered with a hello of this peer's own. Measured before this line, 300 hellos in one
+				2,101-byte batch cost 300 replies and 76 KB of garbage. The second one now costs a
+				table read.
+
+				The verdict cannot change either, because the only thing that lifts a refusal is a
+				hash that **agrees**, and that is the branch above. So a peer that rotates its hash
+				keeps the reason naming the first one it claimed — which is the one a real stale
+				client would have sent every time.
+			]]
+			if refusals[key] ~= nil then
+				return nil
+			end
+
+			local reason = `the peer is on protocol {Protocol.hex(hash)} and this peer is on `
 				.. `{Protocol.hex(mine)}. The two disagree about a channel's name, class or schema, `
 				.. `so every packet between them would decode as something else. Redeploy both `
 				.. `sides from the same declarations; nw.protocol() prints what this one computed.`
+
+			refusals[key] = reason
 
 			--[[ Answered rather than only recorded, and only on a mismatch.
 
@@ -339,6 +361,11 @@ function Protocol.new(config: Config): Agreement
 			if config.isServer then
 				announce(who)
 			end
+
+			--[[ Returned so the caller can report the hello itself. Until M3 phase 9 a mismatched
+			     hello was silent here, and the disagreement first surfaced on a data packet behind
+			     it — which is to say never, for a peer that sent nothing else. ]]
+			return reason
 		end,
 
 		verdict = function(who: any?): string?

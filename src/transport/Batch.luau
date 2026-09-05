@@ -90,8 +90,9 @@ export type Sink = {
 	deliver: (channel: any, value: any, bytes: number, call: number?) -> (),
 	reply: (channel: any, call: number, status: number, value: any?, bytes: number) -> (),
 	--[[ A peer's protocol hash, off a control packet. Once per session per peer, in the first batch
-	     it sends. ]]
-	hello: (hash: number) -> (),
+	     it sends — and `bytes` is what the whole control packet cost, so a mismatch is reported with
+	     the same accounting as any other refusal. ]]
+	hello: (hash: number, bytes: number) -> (),
 	refuse: (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> (),
 }
 
@@ -112,6 +113,10 @@ export type Sink = {
 	against having to bump the batch version to add a control message.
 ]]
 local HELLO = 1
+
+--[[ The repeat of the reason above it, without the kind. Constant, so a batch packed with control
+     kinds this build does not read allocates one string rather than one per packet. ]]
+local ANOTHER_CONTROL_KIND = "another control kind this build does not read, in the same batch"
 
 Batch.HELLO = HELLO
 
@@ -361,6 +366,9 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 	local answers = sink.answers
 	local version = Buffer.readU8()
 
+	--[[ Whether a control kind this build cannot read has already been named in this batch. ]]
+	local unknownKind = false
+
 	if Buffer.rejected() or version ~= Batch.VERSION then
 		sink.refuse(nil, "parse", `batch version {version} is not {Batch.VERSION}`, size)
 		return
@@ -419,10 +427,18 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 				local hash = Buffer.readU32()
 
 				if not Buffer.rejected() then
-					sink.hello(hash)
+					sink.hello(hash, size - packetStart)
 				end
 			else
-				sink.refuse(nil, "parse", `control kind {kind} is not one this build reads`, length)
+				--[[ Named once per batch, counted every time. Every unknown kind is still reported —
+				     `tests/fuzz_runtime.luau`'s invariant is that nothing vanishes — but a batch
+				     packed with them builds one string rather than one per packet (M3 phase 9). ]]
+				if unknownKind then
+					sink.refuse(nil, "parse", ANOTHER_CONTROL_KIND, length)
+				else
+					unknownKind = true
+					sink.refuse(nil, "parse", `control kind {kind} is not one this build reads`, length)
+				end
 			end
 
 			--[[ The same tail every other packet takes, written out rather than jumped over. A

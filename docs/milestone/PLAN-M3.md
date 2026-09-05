@@ -701,9 +701,89 @@ refuted one at a time.
       does not exist.
 - [x] `nw.validate` is documented as being exactly as strict as the encoder, which is now a claim
       worth making.
-- [ ] Acceptance 5 and 10 were corrected in phase 8 and are correct. **Acceptance 1, 2 and 11 say
-      "does not throw", and the two throws they were failing are fixed** — re-state them against the
-      guard rather than against the two paths, once the remaining findings are triaged.
+- [x] Acceptance 5 and 10 were corrected in phase 8 and are correct. **Acceptance 1, 2 and 11 said
+      "does not throw", and the two throws they were failing are fixed** — re-stated against the
+      guard below, now that the remaining findings are triaged. Acceptance 10 gained a fourth
+      refusal, because the mismatched hello is reported now.
+
+#### The nine that were left, one at a time
+
+Twenty-six findings, seventeen answered above. The nine below are the rest, each reproduced or
+refuted against this tree before anything was changed — the report's own probes were not taken on
+trust, and one of them turns out to be wrong.
+
+- [x] **A mismatched hello is judged once per peer, not once per hello.** Id 0 is read before
+      `sink.admit`, because resolving 0 would fail and *that* failure is the unrecoverable one — so
+      nothing charges a hello a rate. Reproduced at 300 mismatched hellos in one 2,101-byte batch:
+      **300 replies, 0 reports, 76 KB of garbage**, and repeating a single hash cost the same as
+      rotating one. `greet` now returns before it rebuilds anything if the peer is already refused,
+      which is the whole bound: the only thing that lifts a refusal is a hash that agrees. Measured
+      after: **1 reply, 1 report**, allocation below the collector's noise floor. Pinned twice — as
+      an `Agreement` property in `protocol_runtime`, and over the wire in `hostile_runtime`.
+- [x] **The mismatched hello is reported.** It was recorded silently and first surfaced on a data
+      packet behind it, so a peer that sent a hello and nothing else disagreed forever with neither
+      console saying so. `greet` hands back the reason it minted and `sink.hello` emits it at
+      `protocol`, with the control packet's own byte count.
+- [x] ~~**A refused query request is answered before decode, outside any budget, and
+      `Batch.read`'s premise that refusing stays cheaper than accepting does not hold for this
+      class.**~~ **The second half is false, and it was inferred rather than measured.** Three
+      hundred requests refused at `budget`, in one batch, against the same three hundred admitted
+      and answered:
+
+      | | bytes in | bytes out | time |
+      |---|---|---|---|
+      | refused | 1,074 | **1,074** | 0.71 ms |
+      | admitted | 1,074 | **2,274** | 1.60 ms |
+
+      Refusing is half of accepting in both, and the outbound never exceeds what the peer spent to
+      provoke it. What the finding correctly names is the *gap in the argument* — `Outbound.reply`
+      justified itself with "one-for-one with an admitted request", which says nothing about a
+      refused one — and that is closed with these numbers written beside it. The reply itself
+      stays: dropping it turns a client one packet over its burst into a caller parked for the
+      whole `timeout`, which is the failure D-12 exists to prevent.
+- [x] **A departing player's queued packets go with them.** `forget` released the budget, the
+      context, the intent and the call slots and left the queues alone, so a `:listen` attached
+      afterwards ran commands for somebody who was gone — and `Context.acquire` built a fresh
+      record for the departed `Player` to run them against, which nothing would forget a second
+      time. The ring is compacted in place, in arrival order, and the drop is reported once per
+      channel. Six packets from two peers interleaved: all six arrived before the fix, three after.
+- [x] **Under a flood the rejection path allocates nothing, which is what `Observer` and `Budget`
+      already promised and `Inbound` did not keep.** Four reasons were built per packet: the
+      queue-full one (`dropped {n} so far`), the two pending-ceiling ones, and — new in this
+      milestone, so it was mine — the `direction` refusal, which is the cheapest one a hostile peer
+      can provoke. All four are constants or per-configuration now.
+
+      Pinned by **counting distinct strings rather than weighing the heap**, because a collector
+      reading is not a number until it survives re-running (§9) and this property does not need
+      one: a reason built per packet is a reason that *differs* per packet. Two thousand refusals
+      across three stages produce **1,994 distinct reasons before the fix and 3 after**. The same
+      shape as the report's 11,744-for-12,000.
+- [x] **An observer that detaches itself no longer skips the one behind it.** `table.remove` inside
+      a walk of `1..count` shifted the next observer into an index already passed, and the last
+      index read `nil` — which `xpcall` accepts without a word. Removal is a tombstone and the list
+      compacts when nothing is iterating it.
+- [x] **`Trust.validate` clears the sidecar it filled.** `check` serialises for real, which is the
+      design — the encoder stays the only statement of what a value must satisfy — and then rewound
+      with `save`/`load`, which restores the instance *count* and leaves the entries past it. Every
+      `nw.validate` of a payload carrying an Instance held a reference to it until some later write
+      reused the slot. `mark`/`rollback` is the pair that clears them, and it is what the send path
+      already uses for an encode that raised. It also stops allocating a record per call.
+- [x] **`Recipients.roblox().owner` narrows instead of casting.** A `BasePart` or `Folder` subject
+      reached `GetPlayerFromCharacter` behind a `:: Model`, on a path whose whole contract is "or
+      nil". The report could not say whether Roblox raises on that; the check makes the answer not
+      matter, and `tests/roblox_runtime.luau` grew its first non-codec section to pin it — that
+      module's whole body is Roblox API calls, so lune sees an injected roster and never the real
+      one, which is how it survived to an external review.
+- [x] ~~**The client's protocol seals on the first inbound packet, so a namespace required later
+      raises.**~~ **Real, reproduced by reading, and not fixable where the report looks.** The
+      client's first `Driver.install` connects `OnClientEvent`, and the first batch to arrive seals
+      — so a client that yields between `require(netweave)` and its namespace modules can be sealed
+      by traffic it did not ask for. Deferring the seal is not available: decoding the packet that
+      sealed it needs the id numbering, and the numbering needs every declaration
+      (`WIRE-FORMAT.md` §3). What was wrong was the *diagnosis*, which said "declare every
+      namespace before the first packet moves" without saying that on a client the first packet is
+      one that **arrives**. The `declare` error and both cautions say it now, because a developer
+      hitting this is staring at that message.
 
 #### The benchmark, which answered acceptance 6 and asked a new question
 
@@ -818,8 +898,9 @@ worked example rather than as another rule.
     has to be. The hello is the first packet of the first batch, so the packets behind it in that
     same batch are the first ones that must not land — and they would not fail to decode, they would
     decode into whatever channel this peer has at that id and reach a handler as a well-formed
-    payload. Pinned in `tests/protocol_runtime.luau`: three packets behind a mismatched hello, three
-    refusals at `"protocol"`, nothing delivered.
+    payload. Pinned in `tests/protocol_runtime.luau`: three packets behind a mismatched hello,
+    ~~three refusals at `"protocol"`~~ **four** — the hello itself is reported now (phase 9), which
+    is what a peer that sends one and nothing else needs — and nothing delivered.
 11. The fuzz suite runs at least 10,000 mutated batches with **zero** raises off the receive path
     and zero unreported losses.
 12. Failure-path assertions outnumber success-path assertions in `transport_runtime`,
@@ -830,10 +911,25 @@ worked example rather than as another rule.
 14. `stylua --check`, `selene`, `lune run analyze`, every `*_runtime`, `lune run bench/check` and
     `lune run bench/envelope` pass.
 
-**Criteria 1, 2 and 11 each say "does not throw", and two receive-path throws are now measured
+~~**Criteria 1, 2 and 11 each say "does not throw", and two receive-path throws are now measured
 (phase 9). They are not met, and the suite passing is the reason to distrust the suite rather than
-the measurement.** Criterion 5 was corrected in phase 8 to describe the byte ceiling that shipped;
-phase 9 finds that ceiling refuses honest traffic, so it is not met either.
+the measurement.**~~ **Met, and re-stated so that passing means something.**
+
+The two throws are fixed, but "the two we found are fixed" is what the suite already believed
+before an external review found them, so the criteria are no longer read as a list of paths.
+**Criteria 1, 2 and 11 are met by the guard**: the read phase and the dispatch phase each run under
+a `pcall` that restores the shared state, returns the pending list and reports the raise, so
+*anything* that raises where nothing should costs one packet and a report rather than the batch.
+`hostile_runtime` tests that as a property — something raises inside each phase, and the batch comes
+back, says so, and leaves a decoder the next honest batch still works through — and `fuzz_runtime`
+runs its 10,000 mutated batches against the same guard.
+
+Criterion 5 was corrected in phase 8 to describe the byte ceiling that shipped; phase 9 found that
+ceiling refusing honest traffic, fixed it, and pinned the property — `codec.maxSize` against what
+the encoder actually writes, over sixteen schemas — so it is met.
+
+Criterion 6 is the one still open, and it is open on the *harness* rather than on netweave: see
+phase 9.
 
 ## 8. Risks
 
