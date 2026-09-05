@@ -163,14 +163,25 @@ function Inbound.new(config: Config): Inbound
 	local queues: { [any]: Queue } = {}
 
 	--[[
-		Pending lists, indexed by re-entrancy depth.
+		Pending lists, held by whoever is walking one.
 
-		At depth one — every ordinary frame — this is the same four arrays reused forever and costs
-		nothing. A deeper entry is allocated only when a handler actually yields and another batch
-		arrives inside it, which is the case that would otherwise have corrupted both.
+		~~Indexed by re-entrancy depth.~~ **That assumed claims and releases nest, and they do not.**
+		Roblox resumes remote callbacks in whatever order their waits complete, not in nesting order,
+		so a batch that yielded second and finished first put the depth back while another loop was
+		still walking the list at that depth — and the next batch to arrive claimed that list out
+		from under it, reset its count, and overwrote the entries it had not reached. Silent loss,
+		then `attempt to index nil with 'handler'` on the receive path from ordinary traffic
+		(`PLAN-M3` phase 9; found by an external review, reproduced in `transport_runtime`).
+
+		A free list has no order to get wrong. A list is taken by a `receive`, `drain` or `tick` that
+		is going to walk it, and given back when that walk ends; two overlapping walks hold different
+		lists because neither has returned its own. The high-water mark is the number of dispatches
+		in flight at once, which is what the depth counter was reaching for and could not express.
+
+		At one batch a frame — every ordinary frame — this is still the same six arrays reused
+		forever and still costs nothing.
 	]]
-	local pool: { Pending } = { emptyPending() }
-	local depth = 0
+	local free: { Pending } = { emptyPending() }
 
 	--[[
 		At most one `intent` per player per tick reaches the handler. Stale input has no value, so an
@@ -372,14 +383,8 @@ function Inbound.new(config: Config): Inbound
 		reused for the next frame.
 	]]
 	local function claim(): Pending
-		depth += 1
-
-		local list = pool[depth]
-
-		if not list then
-			list = emptyPending()
-			pool[depth] = list
-		end
+		local taken: Pending? = table.remove(free)
+		local list = taken or emptyPending()
 
 		list.count = 0
 		return list
@@ -421,15 +426,18 @@ function Inbound.new(config: Config): Inbound
 		end
 
 		--[[
-			The depth is released **after** the loop, not before it.
+			The list goes back **after** the loop, not before it.
 
-			Releasing it first looks harmless — the list has already been drained into locals — and is
-			not: a handler that yields lets the next batch in, and that batch would then `claim` this
-			very list and overwrite the entries this loop has not reached yet. The failure is silent
-			and size-dependent, which is why it survived a first test: the interleaved batch only
-			corrupts the outer one when it is at least as long.
+			Returning it first looks harmless — the entries have already been read into locals — and
+			is not: a handler that yields lets the next batch in, and that batch would then `claim`
+			this very list and overwrite the entries this loop has not reached yet. The failure is
+			silent and size-dependent, which is why it survived a first test: the interleaved batch
+			only corrupts the outer one when it is at least as long.
+
+			A raise inside the loop leaks one list rather than corrupting one, which is the trade the
+			free list buys over the counter it replaced.
 		]]
-		depth -= 1
+		table.insert(free, list)
 	end
 
 	--[[
@@ -479,7 +487,7 @@ function Inbound.new(config: Config): Inbound
 
 	--[[ The list the read phase is filling. Set for the duration of one `Batch.read`, which cannot
 	     yield, for the same reason `sender` is safe. ]]
-	local filling: Pending = pool[1]
+	local filling: Pending = emptyPending()
 
 	--[[ Set when the pending set fills, cleared when a batch starts. Not a field on `Pending`
 	     because a batch that arrives inside another batch's dispatch has its own, and the outer

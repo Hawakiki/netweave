@@ -98,7 +98,9 @@ local Carried = declared.channels.carried
 local Guarded = declared.channels.guarded
 local Asked = declared.channels.asked
 
-local part: any = { Name = "part" }
+--[[ A stand-in that answers `:IsA`, which is the only thing the instance reader asks of one and
+     therefore the only thing a stand-in has to be (`tests/harness.luau`). ]]
+local part: any = harness.instance("part")
 
 --[[ A packet of each shape, and the value that produced it, so a delivery can be checked against
      the schema that is supposed to bound it. ]]

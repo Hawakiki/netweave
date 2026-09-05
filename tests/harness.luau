@@ -150,4 +150,30 @@ function Harness.suite(name: string, floor: number?): Suite
 	return self
 end
 
+--[=[
+	@within Harness
+	@function instance
+	@param name string
+	@param class string? -- what `:IsA` will answer to, and to nothing else
+	@return any
+
+	A stand-in for an Instance, for the suites that run under lune where there are none.
+
+	The codec's instance reader asks exactly one thing of the value it is handed — `value:IsA(class)`
+	— and refuses anything that cannot answer (`src/codec/Serdes.luau`). A stand-in that answers is
+	therefore indistinguishable from the real thing to the code under test, and a plain `{}` is
+	refused here as it is in Studio. That check did not exist until M3 phase 9, and until then a
+	hostile sidecar entry raised out of the read phase; every stand-in in the suite was a bare table
+	and none of them noticed.
+]=]
+function Harness.instance(name: string, class: string?): any
+	return {
+		Name = name,
+
+		IsA = function(_self: any, wanted: string): boolean
+			return class ~= nil and wanted == class
+		end,
+	}
+end
+
 return Harness

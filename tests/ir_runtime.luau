@@ -10,7 +10,9 @@
 	happens to compute.
 ]]
 
+local Buffer = require("../src/codec/Buffer")
 local Ir = require("../src/codec/Ir")
+local Serdes = require("../src/codec/Serdes")
 local t = require("../src/types")
 
 local failures = 0
@@ -280,6 +282,127 @@ do
 
 	equals("both fields are lowered", #fields, 2)
 	check("their slots differ", fields[1].node.mask ~= fields[2].node.mask)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The ceiling against the encoder that has to fit under it
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`maxSize` is the only thing standing between a schema and an unbounded claim, and every channel
+	is refused against it before a byte is decoded (`PLAN-M3` D-5). Nothing compared it to what the
+	encoder actually writes until an external review did, and it was **below** the encoder for every
+	schema whose array or map element carries a flag: `t.array(t.boolean, 0, 10)` derived one byte
+	where ten elements cost eleven, so an honest three-element packet was refused at stage `budget`
+	against its own sender.
+
+	A table of examples is what phase 3's audit did, and it picked ten schemas that all happened to
+	work. What follows is the property instead — encode a maximal value, assert it fits — over a
+	list that deliberately includes every place a scope can open.
+]]
+do
+	local function maximal(descriptor: any, depth: number): any
+		local kind = descriptor.kind
+
+		if kind == "boolean" then
+			return true
+		elseif kind == "number" then
+			return descriptor.max or 1
+		elseif kind == "string" then
+			return string.rep("x", descriptor.max or 0)
+		elseif kind == "buffer" then
+			return buffer.create(descriptor.max or 0)
+		elseif kind == "enum" then
+			--[[ `variants` is already the sorted name list; the last one has the highest tag. ]]
+			return descriptor.variants[#descriptor.variants]
+		elseif kind == "optional" then
+			--[[ Present, because presence is the expensive branch. ]]
+			return maximal(descriptor.inner, depth)
+		elseif kind == "vector2" or kind == "vector3" or kind == "cframe" or kind == "color3" then
+			return nil
+		elseif kind == "array" then
+			local out = {}
+
+			for index = 1, descriptor.max do
+				out[index] = maximal(descriptor.element, depth + 1)
+			end
+
+			return out
+		elseif kind == "map" then
+			--[[ `t.map` has no declared bound, so its ceiling is the 65,535 the length prefix can
+			     express. Filling that many entries would measure the harness rather than the layout,
+			     so this fills a handful — the property is "fits under", and a smaller value that
+			     still exceeds the ceiling proves the same thing. ]]
+			local out = {}
+
+			for index = 1, 6 do
+				out[string.format("%04d", index)] = maximal(descriptor.value, depth + 1)
+			end
+
+			return out
+		elseif kind == "struct" then
+			local out = {}
+
+			for name, field in descriptor.fields do
+				out[name] = maximal(field, depth + 1)
+			end
+
+			return out
+		end
+
+		return nil
+	end
+
+	local schemas: { { name: string, schema: any } } = {
+		{ name = "a bare number", schema = t.u8 },
+		{ name = "a struct of scalars", schema = t.struct({ a = t.u8, b = t.u16 }) },
+		{ name = "flags at the root", schema = t.struct({ a = t.boolean, b = t.boolean, n = t.u8 }) },
+		{ name = "an optional at the root", schema = t.struct({ n = t.optional(t.u8) }) },
+		{ name = "a string", schema = t.string(0, 200) },
+		{ name = "an array of scalars", schema = t.array(t.u8, 0, 10) },
+		{ name = "a fixed array of scalars", schema = t.array(t.u8, 10, 10) },
+
+		--[[ Every one of these opens a scope per element, which is the case the ceiling missed. ]]
+		{ name = "an array of booleans", schema = t.array(t.boolean, 0, 10) },
+		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 0, 10) },
+		{
+			name = "an array of structs carrying a flag",
+			schema = t.array(t.struct({ f = t.boolean, x = t.u8 }), 0, 10),
+		},
+		{
+			name = "an array of structs carrying an enum",
+			schema = t.array(t.struct({ e = t.enum({ a = true, b = true, c = true }), x = t.u8 }), 0, 8),
+		},
+		{ name = "an array of arrays of booleans", schema = t.array(t.array(t.boolean, 0, 4), 0, 4) },
+		{ name = "a map to booleans", schema = t.map(t.string(0, 4), t.boolean) },
+		{
+			name = "a map to structs carrying a flag",
+			--[[ Through `any`, because a map whose value is a struct infers a payload the analyser
+			     will not unify with the key type's parameter here. The schema is the same one either
+			     way; what is lost is a type the test does not use. ]]
+			schema = (t.map :: any)(t.string(0, 4), t.struct({ f = t.boolean, x = t.u8 })),
+		},
+		{
+			name = "a struct holding an array of flagged elements",
+			schema = t.struct({ n = t.u8, list = t.array(t.boolean, 0, 12) }),
+		},
+
+		--[[ A fixed-length array unrolls its positions into the enclosing scope rather than opening
+		     one each, so this is the control that must not move. ]]
+		{ name = "a fixed array of booleans", schema = t.array(t.boolean, 8, 8) },
+	}
+
+	for _, case in schemas do
+		local codec = Serdes.fromSchema(case.schema)
+
+		Buffer.take()
+		Buffer.load(nil)
+		codec.write(maximal(case.schema, 0))
+
+		local actual = buffer.len((Buffer.take()))
+
+		check(`{case.name}: {actual} bytes fits under a ceiling of {codec.maxSize}`, actual <= codec.maxSize)
+	end
 end
 
 -- ---------------------------------------------------------------------------------------------

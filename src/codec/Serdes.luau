@@ -128,6 +128,30 @@ local writeBuffer = Buffer.writeBuffer
 local readBuffer = Buffer.readBuffer
 local writeInstance = Buffer.writeInstance
 local readInstance = Buffer.readInstance
+
+--[[
+	Is this sidecar entry an Instance, asked in a way that works in both places this code runs.
+
+	Inside Roblox the question is exact: `typeof` separates an Instance from a table, and a table is
+	precisely what a hostile `FireServer(buffer, { {} })` puts in the slot. Under lune there are no
+	Instances at all and the suite stands them in with tables (`CLAUDE.md` §6 on why
+	`roblox_runtime` exists), so the strict question would refuse every test that carries one.
+
+	The lune half asks the only thing this reader ever asks of an Instance: **does it answer
+	`:IsA`.** That is not an approximation chosen for convenience — it is the exact precondition the
+	line below needs, so a stand-in that satisfies it is a stand-in the reader cannot tell from the
+	real thing, and a hostile bare table fails it in both places rather than only in Studio.
+	`tests/harness.luau` builds the stand-ins so the suite cannot drift from that contract.
+]]
+local ROBLOX = typeof(game) == "Instance"
+
+local function isInstance(value: any): boolean
+	if ROBLOX then
+		return typeof(value) == "Instance"
+	end
+
+	return type(value) == "table" and type((value :: any).IsA) == "function"
+end
 local putU8 = Buffer.putU8
 local putF32 = Buffer.putF32
 local putString = Buffer.putString
@@ -907,13 +931,27 @@ function buildReader(node: Node): Reader
 			local value = readInstance()
 
 			--[[
-				Two failures, not one. A nil means the sidecar ran out, which is a framing problem.
+				Three failures, not one. A nil means the sidecar ran out, which is a framing problem.
 				A wrong class means the sender picked an instance the schema does not admit, which
 				is the whole reason `t.instance("Sound")` exists — a client can reference anything
 				it can see, so the class is checked here or it is not checked at all.
+
+				And the entry has to **be** an Instance before either of those questions can be
+				asked. `FireServer(buffer, { {} })` puts a table in the slot, and `value:IsA(class)`
+				on a table raises — on the receive path, out of the read phase, which is guarantee
+				G4 broken by the one piece of wire data that does not travel in the buffer. The
+				sidecar is a client argument like any other and had no check at all until M3 phase 9.
+
+				A bare `t.instance` was worse: with no class to test, whatever the client sent was
+				handed to the handler as an Instance. `12345` reached game code with no report.
 			]]
 			if value == nil then
 				reject("missing instance")
+				return nil
+			end
+
+			if not isInstance(value) then
+				reject(`the sidecar holds a {typeof(value)} where an instance was declared`)
 				return nil
 			end
 

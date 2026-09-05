@@ -43,7 +43,7 @@ local t = require("../src/types")
 	is not the 0.95 `budget_runtime` declares.
 ]]
 local suite = harness.suite("transport_runtime", 0.5)
-local check, equals = suite.check, suite.equals
+local check, equals, fail = suite.check, suite.equals, suite.fail
 
 --[[ A channel is a plain record to this layer: an id and a codec. Building them by hand rather
      than through `nw.namespace` keeps these tests about the envelope. ]]
@@ -416,8 +416,8 @@ do
 
 	equals("a fixed instance count is known", WithInstance.codec.instances, 1)
 
-	local first = { name = "first" }
-	local second = { name = "second" }
+	local first = harness.instance("first")
+	local second = harness.instance("second")
 
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
@@ -439,8 +439,8 @@ do
 	local WithInstance = channelOf(7, t.struct({ who = t.instance, n = t.u8(0, 200) }))
 	byId[7] = WithInstance
 
-	local first = { name = "first" }
-	local second = { name = "second" }
+	local first = harness.instance("first")
+	local second = harness.instance("second")
 
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
@@ -474,7 +474,7 @@ do
 
 	equals("a variable instance count is not fixed", Maybe.codec.instances, nil)
 
-	local present = { name = "present" }
+	local present = harness.instance("present")
 
 	Batch.writePacket(Maybe, { who = present :: any, n = 1 })
 	Batch.writePacket(Maybe, { who = nil, n = 2 })
@@ -508,8 +508,8 @@ do
 	local Maybe = channelOf(9, t.struct({ who = t.optional(t.instance), n = t.u8 }))
 	byId[9] = Maybe
 
-	local mine = { name = "mine" }
-	local yours = { name = "yours" }
+	local mine = harness.instance("mine")
+	local yours = harness.instance("yours")
 
 	Batch.writePacket(Maybe, { who = mine :: any, n = 1 })
 	Batch.writePacket(Maybe, { who = yours :: any, n = 2 })
@@ -1129,6 +1129,108 @@ do
 
 	channel.handler = nil
 	byId[43] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Yielding handlers resume in whatever order their waits finish (PLAN-M3 phase 9)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		The pending lists were indexed by a re-entrancy **depth**, which assumes claims and releases
+		nest. Roblox resumes remote callbacks in whatever order their waits complete, not in nesting
+		order — so a batch that yields second and finishes first put `depth` back while another loop
+		was still walking the list at that depth, and the next batch claimed it out from under them.
+
+		Measured before the fix: bob loses two packets with no report, and his resumed loop raises
+		`attempt to index nil with 'handler'` — an `error()` on the receive path, from ordinary
+		traffic, on any channel whose handler yields with two players online.
+
+		`transport_runtime` already covered two batches resumed in nesting order, which is the one
+		interleaving that worked.
+	]]
+	local channel = outboundChannel(90, t.struct({ n = t.u8 }), { class = "signal" })
+	byId[90] = channel
+
+	local delivered: { string } = {}
+	local parked: { thread } = {}
+	local yielding = true
+
+	channel.handler = function(ctx: any, value: any)
+		table.insert(delivered, `{tostring(ctx.player.name)}:{value.n}`)
+
+		if yielding then
+			table.insert(parked, coroutine.running())
+			coroutine.yield()
+		end
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ Roblox runs each remote callback on its own coroutine; this is what that looks like. ]]
+	local function arrive(from: any, first: number)
+		reset()
+
+		for index = first, first + 2 do
+			Batch.writePacket(channel, { n = index })
+		end
+
+		local packed = Buffer.take()
+		local thread = coroutine.create(function()
+			inbound.receive(packed, nil, from)
+		end)
+
+		local ok, err = coroutine.resume(thread)
+		check(`the batch from {tostring(from.name)} did not raise on arrival`, ok)
+
+		if not ok then
+			fail(`  {tostring(err)}`)
+		end
+	end
+
+	arrive(alice, 1)
+	arrive(bob, 4)
+
+	equals("both batches are parked in their first handler", #parked, 2)
+
+	--[[ alice finishes first — the order the depth index did not allow for. ]]
+	yielding = false
+
+	local ok1 = coroutine.resume(parked[1])
+	check("alice's batch resumes and finishes", ok1)
+
+	--[[ A third batch arrives while bob is still parked. Under the depth index this claimed the
+	     very list bob's loop had not finished walking. ]]
+	arrive(carol, 7)
+
+	local ok2, err2 = coroutine.resume(parked[2])
+	check("bob's batch resumes without raising", ok2)
+
+	if not ok2 then
+		fail(`  {tostring(err2)}`)
+	end
+
+	equals("every packet from every batch arrived", #delivered, 9)
+	equals("and nothing was reported lost", #reported, 0)
+
+	local once: { [string]: boolean } = {}
+
+	for _, entry in delivered do
+		check(`{entry} was delivered exactly once`, not once[entry])
+		once[entry] = true
+	end
+
+	for _, expected in { "alice:1", "alice:2", "alice:3", "bob:4", "bob:5", "bob:6" } do
+		check(`{expected} arrived`, once[expected] == true)
+	end
+
+	channel.handler = nil
+	byId[90] = nil
 	Observer.reset()
 end
 

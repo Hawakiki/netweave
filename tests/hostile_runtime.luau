@@ -81,7 +81,10 @@ local declared = Namespace.declare("h", {
 		rate = 1000,
 	}),
 	listed = nw.signal({ data = t.array(t.u8), rate = 1000, maxBytes = 32 }),
-	carried = nw.signal({ data = t.struct({ who = t.instance, n = t.u8 }), rate = 1000 }),
+	carried = nw.signal({ data = t.struct({ who = t.instance("Part"), n = t.u8 }), rate = 1000 }),
+	--[[ The same field with no class declared, which is the worse half of the sidecar defect: with
+	     nothing to test against there was nothing to fail on. ]]
+	bare = nw.signal({ data = t.struct({ who = t.instance, n = t.u8 }), rate = 1000 }),
 	trickle = nw.signal({ data = t.struct({ n = t.u8 }), rate = 2, burst = 2 }),
 	guarded = nw.command({
 		data = t.struct({ n = t.u8 }),
@@ -347,7 +350,7 @@ end
 
 do
 	reset()
-	Batch.writePacket(Carried, { who = { Name = "a" } :: any, n = 1 })
+	Batch.writePacket(Carried, { who = harness.instance("a", "Part"), n = 1 })
 
 	local afterGood = Buffer.used()
 
@@ -364,13 +367,73 @@ do
 	Buffer.writeU8(2)
 
 	local size = Buffer.used()
-	local survived = feed({ { Name = "a" } :: any })
+	local survived = feed({ harness.instance("a", "Part") })
 
 	check("an overstated instance count does not raise", survived)
 	equals("the packet in front of it arrived", delivered, 1)
 	equals("and the batch stops there", #reports, 1)
 	check("naming the sidecar", string.find(reports[1].reason, "sidecar", 1, true) ~= nil)
 	equals("measuring what was discarded", reports[1].bytes, size - afterGood)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		The sidecar's **contents**, which nothing checked until M3 phase 9.
+
+		Every mutation this file and `tests/fuzz_runtime.luau` perform on the sidecar changes its
+		*length* — overstated, understated, padded. Its entries were always real. A client sends
+		`FireServer(buffer, { 12345 })` and the reader called `value:IsA(class)` on the number, which
+		raises: on the receive path, out of the read phase, with `depth`, `filling` and `sender`
+		unwound and the pooled list at that depth leaked with every value decoded so far still in it.
+
+		That is guarantee G4 broken by the one piece of wire data that does not travel in the buffer,
+		and it was found by an external review rather than by ten thousand fuzzed batches — because
+		the fuzzer mutated the count and never the contents.
+	]]
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+	Batch.writePacket(Carried, { who = harness.instance("real", "Part"), n = 1 })
+	Batch.writePacket(Fixed, { a = 3, b = 4 })
+
+	local packed, instances = Buffer.take()
+
+	--[[ The bytes are honest and the count is honest. Only the entry is not. ]]
+	instances[1] = 12345 :: any
+
+	local survived = pcall(inbound.receive, packed, instances, mallory)
+
+	check("a number in the sidecar does not raise", survived)
+	equals("the packets around it arrived", delivered, 2)
+	equals("and it alone was refused", #reports, 1)
+	equals("at parse", reports[1].stage, "parse")
+	check("naming what was there instead", string.find(reports[1].reason, "sidecar holds", 1, true) ~= nil)
+	accounts("a non-instance in the sidecar", 3)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[ The same on a channel that declares no class. With nothing to test against, whatever the
+	     client sent used to be handed to the handler *as an Instance* — `12345` reached game code
+	     with no report at all, which is worse than the raise above because nothing announces it. ]]
+	local bare = declared.channels.bare
+
+	Batch.writePacket(bare, { who = harness.instance("real"), n = 1 })
+
+	local packed, instances = Buffer.take()
+	instances[1] = "not an instance" :: any
+
+	local survived = pcall(inbound.receive, packed, instances, mallory)
+
+	check("a string on a class-less instance field does not raise", survived)
+	equals("nothing was delivered", delivered, 0)
+	equals("and it was refused", #reports, 1)
+	check("naming the type", string.find(reports[1].reason, "string", 1, true) ~= nil)
 end
 
 -- ---------------------------------------------------------------------------------------------

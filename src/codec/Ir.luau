@@ -685,10 +685,31 @@ end
 local function ceiling(node: Node): number
 	local kind = node.kind
 
-	--[[ Flags live in the enclosing scope's bytes, not here, so `bits` never adds to a node's own
-	     ceiling. The layout adds the scope once at the top. ]]
+	--[[
+		A node that opens a **scope of its own** pays for it here.
+
+		~~Flags live in the enclosing scope's bytes, not here, so `bits` never adds to a node's own
+		ceiling. The layout adds the scope once at the top.~~ **True of the root scope and false of
+		every other one, and it made the ceiling smaller than the encoder** — corrected in M3 phase 9
+		after an external review measured it.
+
+		Three places open a nested scope, all for the same reason: a count that is not known until
+		runtime cannot fold its elements' flags into the enclosing bitfield, so each element carries
+		its own (`lowerArray`, `lowerMap` above). `t.array(t.boolean, 0, 10)` therefore costs a byte
+		per element, and derived **one** byte for ten of them — so `Batch.read` refused an honest
+		three-element packet at stage `budget`, against its own sender, on any channel whose element
+		type contained a boolean, an enum or an optional.
+
+		A fixed-length array is not affected and is the control: its positions unroll into the
+		enclosing scope, so they have no scope of their own to add.
+
+		The root's scope is on the `Layout` rather than on `root`, so adding it here cannot
+		double-count it.
+	]]
+	local flags = if node.scope then (node.scope :: Scope).bytes else 0
 	local prefix = if node.lengthStorage then ENCODING_SIZE[node.lengthStorage] else 0
 	local max = node.max
+	local body: number
 
 	if kind == "array" then
 		local element = node.element
@@ -702,13 +723,13 @@ local function ceiling(node: Node): number
 				total += ceiling(positioned)
 			end
 
-			return total
+			body = total
+		else
+			body = prefix + (max :: number) * ceiling(element :: Node)
 		end
-
-		return prefix + (max :: number) * ceiling(element :: Node)
 	elseif kind == "map" then
 		local entry = ceiling(node.key :: Node) + ceiling(node.value :: Node)
-		return prefix + (max :: number) * entry
+		body = prefix + (max :: number) * entry
 	elseif kind == "struct" then
 		local total = 0
 
@@ -716,16 +737,18 @@ local function ceiling(node: Node): number
 			total += ceiling(field.node)
 		end
 
-		return total
+		body = total
 	elseif kind == "optional" then
 		--[[ Presence is a bit in the enclosing scope; the inner value costs its own ceiling only
 		     when it is there, and the ceiling is the worst case. ]]
-		return ceiling(node.inner :: Node)
+		body = ceiling(node.inner :: Node)
 	elseif kind == "string" or kind == "buffer" then
-		return prefix + (max :: number)
+		body = prefix + (max :: number)
+	else
+		body = node.fixedSize or 0
 	end
 
-	return node.fixedSize or 0
+	return flags + body
 end
 --[=[
 	@within Ir
