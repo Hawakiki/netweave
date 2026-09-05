@@ -1078,6 +1078,26 @@ function Channel.replicate<S>(spec: S): Channel<"replicate", OutboundScope<S>, R
 	]]
 	channel.maxBytes = channel.subjectCodec.maxSize + channel.delta.layout.maxSize
 
+	--[[
+		How a change is framed, which is neither codec's answer alone.
+
+		**Always `counted`.** The same channel emits a removal — the flag bytes and nothing behind
+		them — and a change carrying values, so a reader cannot know from the schema where a refused
+		one ends, and stepping over a refused packet is guarantee G5. That is the length prefix
+		earning its byte rather than spending one.
+
+		The instance count is written only when something on this channel can carry an Instance,
+		which for most replicated state is nothing at all.
+	]]
+	local carriesInstances = not (channel.subjectCodec.instances == 0 and channel.delta.layout.instances == 0)
+
+	channel.changeInstances = carriesInstances
+	channel.changeFraming = table.freeze({
+		framing = "counted",
+		instances = if carriesInstances then nil else 0,
+		fixedSize = nil,
+	})
+
 	return channel
 end
 

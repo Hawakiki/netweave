@@ -46,6 +46,8 @@ local attemptPacket: (...any) -> ...any = Batch.writePacket
 local attemptRequest: (...any) -> ...any = Batch.writeRequest
 local attemptReply: (...any) -> ...any = Batch.writeReply
 local attemptHello: (...any) -> ...any = Batch.writeHello
+local attemptChange: (...any) -> ...any = Batch.writeChange
+local attemptResync: (...any) -> ...any = Batch.writeResync
 
 local Outbound = {}
 
@@ -94,6 +96,11 @@ Outbound.SERVER = SERVER
 export type Outbound = {
 	push: (channel: any, destination: any, value: any) -> (),
 	publish: (channel: any, subject: any, value: any) -> (),
+	--[[ One replicated subject's change, for one recipient. Answers whether anything was written,
+	     because a recipient that is already up to date costs nothing and has to be distinguishable
+	     from one that was sent something. ]]
+	change: (channel: any, destination: any, subject: any, old: any, new: any) -> boolean,
+	resync: (channel: any) -> (),
 	broadcast: (channel: any, value: any) -> (),
 	request: (channel: any, call: number, value: any) -> (),
 	reply: (channel: any, destination: any, call: number, status: number, value: any?) -> (),
@@ -264,6 +271,41 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 
 			switchTo(destination)
 			guarded(attemptPacket, channel, value)
+		end,
+
+		--[[
+			One replicated subject's change, for one recipient.
+
+			**A raise here is reported rather than re-raised**, which is the opposite of `push`, and
+			the difference is whose call stack it is on. `push` runs inside the game's own
+			`:send` or `:publish`, so a value the schema forbids belongs back at that call site.
+			This runs on netweave's tick, over a store the game filled at some other time, and
+			re-raising would take down every other channel in that tick to report one bad subject.
+
+			The subject is skipped and the recipient keeps the baseline it had, so the next tick
+			tries again — which is right, because the store may have been mid-update.
+		]]
+		change = function(channel: any, destination: any, subject: any, old: any, new: any): boolean
+			switchTo(destination)
+
+			local used, instances = Buffer.mark()
+			local ok, result = pcall(attemptChange, channel, subject, old, new)
+
+			if not ok then
+				Buffer.rollback(used, instances)
+				Observer.emit(channel.qualified, destination, "replicate", tostring(result), 0)
+				return false
+			end
+
+			return result
+		end,
+
+		--[[ This endpoint has lost track of a replicated channel and is asking for all of it again.
+		     Rides the outgoing batch like anything else, on the reserved control id, so it costs a
+		     packet rather than a round trip of its own. ]]
+		resync = function(channel: any)
+			switchTo(SERVER)
+			guarded(attemptResync, channel.id)
 		end,
 
 		--[[ A publish resolves its audience and fans out. `everyone` takes the one-call path;

@@ -137,6 +137,59 @@ field and sometimes the player; it is written for the game that owns the server.
 would publish the authorization model to the machine that model exists to distrust, one denied
 request at a time. The reason goes to the observer on the server; the client gets the code.
 
+### A replicated change
+
+A `replicate` channel is `S→C`, and its packet says *which* subject it is about — the only class
+that has to, because the client keeps one value per subject and has to know which one arrived.
+Everywhere else the audience decides who gets a value and nothing has to say what the value is.
+
+```
+change := id:varint  length:varint  [ instances:varint ]  subject  flags  [ fields that moved ]
+```
+
+**There is one packet shape, not three.** A client with no baseline is sent a change against
+*nothing*, which writes every field and costs what a whole value would have — the change's flag bits
+fit in the byte the schema's own flags were already using. And the patch's root carries **one bit**
+saying whether the subject is still there: set, and the bits below say what moved; clear, and there
+is no body at all, because the subject has left that client's audience or stopped existing.
+
+So a join, a resync, an audience entry, a change and a removal are five things a game can do and one
+thing on the wire. There is no discriminator byte, because there is nothing to discriminate.
+
+**The subject is inside the frame.** A length that did not cover it could be stepped over into the
+middle of one, and stepping over a refused packet is the guarantee the length prefix is paid for.
+
+**A change is always `counted`**, even where the patch layout is statically sized. The same channel
+emits a removal — flags and nothing behind them — and a change carrying values, so where a refused
+one ends cannot be known from the schema alone.
+
+### Asking for it all again
+
+A change is only meaningful against the value it was computed from, so a change that did not arrive
+makes every change after it unreadable. Nothing recovers from that by itself and nothing notices
+later: the values would simply be wrong.
+
+The peer that *refused* the packet is the one that knows, so it says so, on the reserved control id:
+
+```
+resync := 0  kind:u8 = 2  length:varint  channel:varint
+```
+
+The server's answer is to forget what it believed that peer had. The next tick then finds no
+baseline and writes a change against nothing, which is everything — there is no separate snapshot
+path to invoke, because there is no separate snapshot.
+
+**There is no sequence number**, which is what a break detector usually needs. Roblox delivers a
+reliable `RemoteEvent` reliably and in order, so a change netweave hands to the engine arrives; the
+only thing that drops one is netweave's own `pendingPerBatch`, and that reports it at the moment it
+happens. A number on the wire would pay every change to rediscover something the receiver was
+already told — on a three-byte change, a varint would have been a third of it.
+
+It is the only packet a client sends that makes the server do work it did not choose. What bounds it
+is that clearing a baseline already cleared costs a table lookup, and however many arrive in a tick
+provoke one resend in the tick that follows — so the most a peer can extract is a whole state per
+tick, which is what `nw.state` sends unconditionally.
+
 ## 3. Channel ids
 
 Ids are assigned from the declared string keys, never from table iteration order. ByteNet derives
@@ -151,7 +204,9 @@ qualified := namespace .. "." .. key          -- "combat.fireWeapon"
 All qualified names in the program are sorted with `table.sort`'s default string ordering and
 assigned `1..n`. Both peers compute the same list from the same declarations, in any order.
 
-**Id 0 is reserved** for control traffic — the handshake in §4, and anything v2 needs.
+**Id 0 is reserved** for control traffic — the handshake in §4, the resync above, and anything v2
+needs. `RESYNC` is what that reservation was for: a kind was added in M4 without touching the batch
+version, because the length in front of a control body is what makes an unknown kind steppable.
 
 ### Encoding
 

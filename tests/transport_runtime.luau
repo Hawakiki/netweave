@@ -97,6 +97,16 @@ local sink: Batch.Sink = {
 	     direction has its own file: `tests/query_runtime.luau`. ]]
 	answers = true,
 
+	--[[ Never reached: the envelope cases here declare no replicated channel, which has its own
+	     file in `tests/replication_runtime.luau`. A stub that raises says so. ]]
+	change = function()
+		error("this sink handles no replicated channel")
+	end,
+
+	resync = function()
+		error("this sink handles no replicated channel")
+	end,
+
 	admit = function(channel: any, _bytes: number): (string?, string?)
 		return denyOn[channel.qualified], "budget"
 	end,
