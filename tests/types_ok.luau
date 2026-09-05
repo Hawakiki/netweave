@@ -134,9 +134,11 @@ local _concreteIsDescriptor: t.Descriptor = t.u8
 	netweave type". A local instantiation in the module fixes it, and this is the half that proves
 	the fix — a `_reject` file cannot, because the failure *removed* diagnostics.
 ]]
-local Shot = t.struct({ origin = t.vector3, seq = t.u16 })
+--[[ Underscored for the reason `tests/types_reject.luau` gives beside its own: `typeof` in a type
+     position is a use selene cannot see. ]]
+local _Shot = t.struct({ origin = t.vector3, seq = t.u16 })
 
-type ShotPayload = t.PayloadOf<typeof(Shot)>
+type ShotPayload = t.PayloadOf<typeof(_Shot)>
 
 local _shot: ShotPayload = { origin = Vector3.new(1, 2, 3), seq = 4 }
 

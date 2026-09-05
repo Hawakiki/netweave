@@ -57,9 +57,12 @@ local _notAType = t.struct({ id = 5 })
 	9 is a payload that does not match the schema. 10 is the message the docstring promises for
 	something that is not a netweave type at all.
 ]]
-local shot = t.struct({ seq = t.u16 })
+--[[ Underscored because `typeof` in a type position is a use selene does not scan, and a warning
+     there fails `selene src tests`. It is declared for the analyzer, which is what the prefix means
+     everywhere else in this file. ]]
+local _shot = t.struct({ seq = t.u16 })
 
-local _mistypedPayload: t.PayloadOf<typeof(shot)> = { seq = "not a number" }
+local _mistypedPayload: t.PayloadOf<typeof(_shot)> = { seq = "not a number" }
 type _notASchema = t.PayloadOf<number>
 
 return nil
