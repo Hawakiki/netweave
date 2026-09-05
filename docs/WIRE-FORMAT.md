@@ -193,10 +193,29 @@ only thing that drops one is netweave's own `pendingPerBatch`, and that reports 
 happens. A number on the wire would pay every change to rediscover something the receiver was
 already told — on a three-byte change, a varint would have been a third of it.
 
-It is the only packet a client sends that makes the server do work it did not choose. What bounds it
-is that clearing a baseline already cleared costs a table lookup, and however many arrive in a tick
-provoke one resend in the tick that follows — so the most a peer can extract is a whole state per
-tick, which is what `nw.state` sends unconditionally.
+It is the only packet a client sends that makes the server do work it did not choose.
+
+~~What bounds it is that clearing a baseline already cleared costs a table lookup, and however many
+arrive in a tick provoke one resend in the tick that follows — so the most a peer can extract is a
+whole state per tick, which is what `nw.state` sends unconditionally.~~
+
+**That was the wrong bound, and it was measured in M4 phase 8.** Repeats *within a tick* were never
+the attack: one resync per frame is one per tick by definition, and the tick in between repopulates
+the baselines, so every one lands on a fresh set. A hundred subjects went from a steady state of
+zero bytes a frame to **601 bytes a frame**, bought with five bytes a frame, outside every budget —
+a replicated channel declares no `rate`, so there is nothing for the token bucket to charge, and a
+control packet is read before the budget is consulted at all.
+
+The bound is now a **coalesce over frames**: an ask is honoured at once if the peer has not had one
+in the last thirty ticks, and remembered and honoured by the tick if it has. Nothing is ever
+dropped, which matters more than it sounds — a client asks once, at the moment it gave up on the
+channel, and nothing retries, so a refusal would leave it holding nothing while the server believed
+it held everything. An attacker gets one full resend per window however fast they ask; a client that
+lost a change gets its resend on the next frame.
+
+A peer whose hello disagreed is refused here too. Control packets are read before the budget, so the
+protocol verdict is the only thing between a peer on another build and a full state re-encode; only
+`hello` is exempt, because it is how a disagreement is discovered and cleared.
 
 ## 3. Channel ids
 

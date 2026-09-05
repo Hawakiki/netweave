@@ -1285,6 +1285,118 @@ do
 	equals("both are refused", reportedAt("replicate"), 2)
 end
 
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		**One resync a frame is one full state a frame, and that was the largest amplifier here.**
+
+		The clear is a table drop. What it costs is the *tick after it*, which finds no baseline and
+		writes every subject that peer can see — measured with the real tick at a hundred subjects:
+		a steady state of 0 bytes a frame became **601 bytes a frame**, bought with five bytes a
+		frame, outside every budget netweave has. A replicated channel declares no `rate`, so
+		`Budget.admit` has nothing to charge, and control packets are read before `admit` anyway
+		(M4 report, first danger).
+
+		The section above asserts the clear is idempotent *within one batch*. That was never the
+		attack: the attacker sends one per frame and the tick repopulates in between, so every one of
+		them lands on a fresh set of baselines.
+
+		The bound is a coalesce rather than a refusal, and this asserts the difference. A refused
+		resync would strand an honest client — it asks once, at the moment it gave up, and nothing
+		retries — so the ask is always honoured, at most once per window, and `tick` honours what
+		arrived inside one.
+	]]
+	local held = Baseline.new(true)
+
+	local replicated = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+	})
+
+	local function ask()
+		Batch.writeResync(Replicated.id)
+		replicated.receive((Buffer.take()), nil, mallory)
+	end
+
+	local function repopulate()
+		held.keep(mallory, Replicated, 1, { n = 1 })
+		held.keep(mallory, Replicated, 2, { n = 2 })
+	end
+
+	--[[ The first ask is honoured immediately: a client that just lost a change waits for nothing. ]]
+	repopulate()
+	ask()
+	equals("the first ask clears at once", held.held(mallory), 0)
+
+	--[[ Then the window is shut. Sixty more asks, each on a freshly repopulated set, the way a tick
+	     would leave it — and none of them lands. ]]
+	local cleared = 0
+
+	for _ = 1, 60 do
+		repopulate()
+		ask()
+
+		if held.held(mallory) == 0 then
+			cleared += 1
+		end
+	end
+
+	equals("and sixty more inside the window buy nothing", cleared, 0)
+
+	--[[ Nothing is dropped, though. The window passes and the ask that arrived inside it is
+	     honoured by the tick, without the peer asking again. ]]
+	repopulate()
+
+	for _ = 1, 30 do
+		replicated.tick()
+	end
+
+	equals("what was asked for inside the window is honoured after it", held.held(mallory), 0)
+
+	--[[ And a peer already refused at `protocol` gets nothing at all, which is the other half:
+	     control packets are read before `admit`, so the verdict is the only thing standing between a
+	     peer whose declarations disagree and a full state re-encode. ]]
+	reset()
+
+	local refused = Protocol.new({
+		hash = function(): number
+			return protocol.hash + 1
+		end,
+
+		announce = function() end,
+		isServer = true,
+	})
+
+	local guarded = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+		agreement = refused,
+	})
+
+	refused.greet(mallory, protocol.hash)
+	repopulate()
+
+	Batch.writeHello(protocol.hash)
+	Batch.writeResync(Replicated.id)
+
+	local ignored = pcall(guarded.receive, (Buffer.take()), nil, mallory)
+
+	check("a resync from a peer on another protocol does not raise", ignored)
+	equals("and does not clear a thing", held.held(mallory), 2)
+	check("while saying so", reportedAt("protocol") > 0)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- One valid packet, so the rig is proved to be capable of delivering anything at all
 -- ---------------------------------------------------------------------------------------------

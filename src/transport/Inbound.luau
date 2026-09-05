@@ -624,6 +624,24 @@ function Inbound.new(config: Config): Inbound
 	     one's state is restored around it the way `sender` and `filling` are. ]]
 	local full = false
 
+	--[[
+		How long a peer waits between resyncs that are acted on, in `tick` calls — frames, where the
+		driver runs it. Half a second at 60 Hz, which is the trade written out: an honest client's
+		*first* ask is always honoured immediately, so this is only ever the gap before a *second*
+		one, and a second one inside half a second is either a peer with a very bad connection or a
+		peer trying to make the server work. The first gets its state a frame or two later; the
+		second gets a sixtieth of what it asked for.
+	]]
+	local RESYNC_TICKS = 30
+
+	local ticks = 0
+
+	--[[ Per sender, the tick each channel's resync was last acted on; and per channel, the senders
+	     who asked again too soon. Two shapes because they are walked from opposite ends: the first
+	     by a packet that names a sender, the second by `tick`, which walks everything owed. ]]
+	local resyncs: { [any]: { [any]: number } } = {}
+	local owed: { [any]: { [any]: boolean } } = {}
+
 	--[[ What the game configured, and what this endpoint enforces — the same number on a server and
 	     no ceiling at all on a client. `refreshCeiling` below says why. Both are kept because the
 	     reason strings quote the configured one, and a client that reports nothing still has to be
@@ -833,6 +851,25 @@ function Inbound.new(config: Config): Inbound
 			walk its channel table on demand.
 		]]
 		resync = function(id: number, bytes: number)
+			--[[
+				**A peer whose declarations disagree does not get to make this endpoint work.**
+
+				Control packets are read before `sink.admit` because resolving id 0 would fail, and
+				until M4 the verdict was consulted for `HELLO` and for data packets and not here — so
+				a peer already refused at `protocol`, whose every data packet costs an id read and a
+				seek, could still spend five bytes and buy a full state re-encode. `HELLO` stays
+				exempt because it is how a disagreement is discovered and how it is cleared; nothing
+				else is.
+			]]
+			if agreement then
+				local disagreement = agreement.verdict(sender)
+
+				if disagreement then
+					report(nil, sender, "protocol", disagreement, bytes)
+					return
+				end
+			end
+
 			local channel = resolve(id)
 
 			if not channel or channel.class ~= "replicate" then
@@ -842,9 +879,49 @@ function Inbound.new(config: Config): Inbound
 
 			local store = baselines
 
-			if store then
-				store.desync(sender, channel)
+			if not store then
+				return
 			end
+
+			--[[
+				**Coalesced, not refused**, and the difference is the whole design.
+
+				What a resync costs is not the clear — that is a table drop — it is the tick after it,
+				which finds no baseline and writes every subject that peer can see. One five-byte
+				packet a frame therefore bought a full state re-encode a frame, measured at 601 bytes
+				a frame downstream for a hundred subjects against a steady state of zero, outside
+				every budget netweave has: a replicated channel declares no `rate`, so `Budget.admit`
+				has nothing to charge (M4 report).
+
+				Refusing the extra ones would be worse than it sounds. A client asks once, at the
+				moment it gave up on the channel, and **nothing retries** — it has already cleared its
+				own baselines, so a refused resync leaves it holding nothing while the server believes
+				it holds everything, wrong for the rest of the session. A bound that can strand an
+				honest client is not a bound, it is a second defect.
+
+				So the ask is never dropped: it is honoured now if the window is open, and remembered
+				and honoured by `tick` if it is not. An attacker gets one full resend per window
+				however fast they send; a client that lost a change gets its resend on the next frame,
+				because the window starts open.
+			]]
+			local seen = resyncs[sender]
+
+			if not seen then
+				seen = {}
+				resyncs[sender] = seen
+			end
+
+			local honoured = seen[channel]
+
+			if honoured and ticks - honoured < RESYNC_TICKS then
+				seen[channel] = honoured
+				owed[channel] = owed[channel] or {}
+				owed[channel][sender] = true
+				return
+			end
+
+			seen[channel] = ticks
+			store.desync(sender, channel)
 		end,
 
 		deliver = function(channel: any, value: any, bytes: number, id: number?)
@@ -1095,6 +1172,32 @@ function Inbound.new(config: Config): Inbound
 		--[[ Once a frame. Every intent that arrived since the last one is delivered, at most one
 		     per player per channel. ]]
 		tick = function()
+			ticks += 1
+
+			--[[ The resyncs that arrived inside a window, honoured now that one has passed. Walked
+			     rather than scheduled: the table holds only peers who asked twice in half a second,
+			     which in a healthy server is nobody and the loop is one `next` that finds nothing. ]]
+			local store = baselines
+
+			if store then
+				for channel, senders in owed do
+					for who in senders do
+						local seen = resyncs[who]
+						local honoured = seen and seen[channel]
+
+						if not honoured or ticks - honoured >= RESYNC_TICKS then
+							senders[who] = nil
+
+							if seen then
+								seen[channel] = ticks
+							end
+
+							store.desync(who, channel)
+						end
+					end
+				end
+			end
+
 			local list = claim()
 
 			for channel, byPlayer in coalescedValue do
@@ -1123,6 +1226,14 @@ function Inbound.new(config: Config): Inbound
 		--[[ A player who left. Their pending intent is input nobody is waiting for, and their
 		     context record would otherwise outlive them. ]]
 		forget = function(who: any)
+			--[[ A departed peer's resync bookkeeping, which would otherwise hold their record for
+			     the life of the server — the same leak `PLAN-M3` D-6 is about, one table over. ]]
+			resyncs[who] = nil
+
+			for _, senders in owed do
+				senders[who] = nil
+			end
+
 			for _, byPlayer in coalescedValue do
 				byPlayer[who] = nil
 			end
