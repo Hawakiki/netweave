@@ -164,6 +164,7 @@ export type Node = {
 	.root Node
 	.scope Scope? -- the payload's own bitfield, if it has any flags
 	.fixedSize number? -- total payload bytes, or nil when it varies
+	.maxSize number -- the most bytes a payload can ever occupy; always known
 	.framing "static" | "counted"
 
 	Everything a channel needs to encode and decode one payload.
@@ -172,6 +173,7 @@ export type Layout = {
 	root: Node,
 	scope: Scope?,
 	fixedSize: number?,
+	maxSize: number,
 	instances: number?,
 	framing: "static" | "counted",
 }
@@ -663,6 +665,93 @@ end
 
 --[=[
 	@within Ir
+	@function ceiling
+	@param node Node
+	@return number
+	@private
+
+	The most bytes this node can ever consume, derived from the schema rather than declared.
+
+	Every netweave type is bounded — a number by its encoding, a string and an array by the range
+	their author gave, an unbounded array by the 65535 its length prefix can express — so a
+	ceiling always exists and is often tight. `t.struct({ origin = t.vector3, seq = t.u16 })` can
+	never be more than fourteen bytes, and a packet claiming more on that channel is refusable
+	before a byte of it is decoded, with the game having declared nothing.
+
+	That is the point. `RESEARCH §3.7-F` records that no surveyed library checks a payload size at
+	all, and the reason is that they would have to ask the author for the number. Here the schema
+	already knows it.
+]=]
+local function ceiling(node: Node): number
+	local kind = node.kind
+
+	--[[
+		A node that opens a **scope of its own** pays for it here.
+
+		~~Flags live in the enclosing scope's bytes, not here, so `bits` never adds to a node's own
+		ceiling. The layout adds the scope once at the top.~~ **True of the root scope and false of
+		every other one, and it made the ceiling smaller than the encoder** — corrected in M3 phase 9
+		after an external review measured it.
+
+		Three places open a nested scope, all for the same reason: a count that is not known until
+		runtime cannot fold its elements' flags into the enclosing bitfield, so each element carries
+		its own (`lowerArray`, `lowerMap` above). `t.array(t.boolean, 0, 10)` therefore costs a byte
+		per element, and derived **one** byte for ten of them — so `Batch.read` refused an honest
+		three-element packet at stage `budget`, against its own sender, on any channel whose element
+		type contained a boolean, an enum or an optional.
+
+		A fixed-length array is not affected and is the control: its positions unroll into the
+		enclosing scope, so they have no scope of their own to add.
+
+		The root's scope is on the `Layout` rather than on `root`, so adding it here cannot
+		double-count it.
+	]]
+	local flags = if node.scope then (node.scope :: Scope).bytes else 0
+	local prefix = if node.lengthStorage then ENCODING_SIZE[node.lengthStorage] else 0
+	local max = node.max
+	local body: number
+
+	if kind == "array" then
+		local element = node.element
+
+		--[[ A fixed-length array with per-position flags lowers one node per position, so the
+		     element list is the authority when it exists. ]]
+		if node.elements then
+			local total = 0
+
+			for _, positioned in node.elements :: { Node } do
+				total += ceiling(positioned)
+			end
+
+			body = total
+		else
+			body = prefix + (max :: number) * ceiling(element :: Node)
+		end
+	elseif kind == "map" then
+		local entry = ceiling(node.key :: Node) + ceiling(node.value :: Node)
+		body = prefix + (max :: number) * entry
+	elseif kind == "struct" then
+		local total = 0
+
+		for _, field in node.fields :: { Field } do
+			total += ceiling(field.node)
+		end
+
+		body = total
+	elseif kind == "optional" then
+		--[[ Presence is a bit in the enclosing scope; the inner value costs its own ceiling only
+		     when it is there, and the ceiling is the worst case. ]]
+		body = ceiling(node.inner :: Node)
+	elseif kind == "string" or kind == "buffer" then
+		body = prefix + (max :: number)
+	else
+		body = node.fixedSize or 0
+	end
+
+	return flags + body
+end
+--[=[
+	@within Ir
 	@function lower
 	@param descriptor Descriptor -- a type from `netweave.types`
 	@return Layout
@@ -690,12 +779,21 @@ function Ir.lower(descriptor: Descriptor): Layout
 
 	assignNestedScopes(root)
 
-	local fixedSize = addSize(if scope then scope.bytes else 0, root.fixedSize)
+	local flagBytes = if scope then scope.bytes else 0
+	local fixedSize = addSize(flagBytes, root.fixedSize)
 
 	return {
 		root = root,
 		scope = scope,
 		fixedSize = fixedSize,
+
+		--[[
+			The most bytes a payload on this schema can ever occupy. Unlike `fixedSize` it is never
+			nil, because every netweave type is bounded — so every channel has a byte ceiling whether
+			or not its author thought to ask for one, and an oversized packet is refusable before it
+			is decoded (`PLAN-M3` D-5).
+		]]
+		maxSize = flagBytes + ceiling(root),
 
 		--[[
 			How many instances the payload always consumes, or nil when it depends on the data. The

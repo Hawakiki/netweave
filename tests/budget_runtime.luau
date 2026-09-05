@@ -17,25 +17,18 @@
 ]]
 
 local Budget = require("../src/transport/Budget")
+local harness = require("./harness")
 
-local failures = 0
+--[[
+	Every section below is failure-path, and that is not a labelling convenience — it is what this
+	module is. A rate limiter's job is refusal, and an assertion that the twentieth packet was
+	admitted is the near side of the boundary the twenty-first is refused at; the two are counted by
+	the same loop and cannot be separated without pretending. `PLAN-M3` D-10.
+]]
+local suite = harness.suite("budget_runtime", 0.95)
+local check, equals, fail = suite.check, suite.equals, suite.fail
 
-local function fail(message: string)
-	failures += 1
-	print(`FAIL  {message}`)
-end
-
-local function check(name: string, condition: boolean)
-	if not condition then
-		fail(name)
-	end
-end
-
-local function equals(name: string, actual: any, expected: any)
-	if actual ~= expected then
-		fail(`{name}: expected {tostring(expected)}, got {tostring(actual)}`)
-	end
-end
+suite.failing()
 
 local clock = 0
 
@@ -149,15 +142,18 @@ do
 	budget.admit(channel, alice, 1)
 	check("the window is exhausted", budget.admit(channel, alice, 1) ~= nil)
 
-	--[[ Still inside the window. ]]
-	clock = 0.9
-	check("and still exhausted just before it closes", budget.admit(channel, alice, 1) ~= nil)
+	--[[ ~~Still inside the window.~~ **Corrected in M3 phase 0.** There is no window to be inside
+	     any more: a bucket refills continuously, so a rate-2 channel has earned 0.8 of a packet at
+	     0.4s and a whole one at 0.5s. Recovery is gradual rather than at a boundary, which is the
+	     point — a boundary is the thing that admitted 39 packets per declared 20. ]]
+	clock = 0.4
+	check("four tenths of a second is not yet a whole packet", budget.admit(channel, alice, 1) ~= nil)
 
-	--[[ Past it, with nothing else having happened in between: no send, no flush, no tick. ]]
-	clock = 1.0
-	equals("the window reopens on its own", budget.admit(channel, alice, 1), nil)
-	equals("and again", budget.admit(channel, alice, 1), nil)
-	check("up to the same limit", budget.admit(channel, alice, 1) ~= nil)
+	--[[ Past a whole token, with nothing else having happened in between: no send, no flush, no
+	     tick. This is the Warp property, and it survives the change to a bucket. ]]
+	clock = 0.5
+	equals("half a second at rate 2 is one packet, and it is admitted", budget.admit(channel, alice, 1), nil)
+	check("but only the one that was earned", budget.admit(channel, alice, 1) ~= nil)
 end
 
 do
@@ -265,9 +261,15 @@ end
 
 do
 	--[[
-		A clock that goes backwards reopens the window rather than closing it forever. `os.clock` is
-		monotonic so the default cannot do this, but the failure it would cause is Warp's exact
-		failure by another route — a player refused for the rest of the session, silently.
+		~~A clock that goes backwards reopens the window rather than closing it forever.~~
+		**Corrected in M3 phase 0.** Reopening was right for a window and is wrong for a bucket: it
+		would let an injected or corrected clock *mint* tokens, and a limiter that can be talked out
+		of limiting is not one.
+
+		What has to hold is the Warp property, and it still does by another route. A backwards clock
+		refills nothing, but it does move `refilled` back — so the moment time goes forward again the
+		elapsed span is large and the bucket fills, capped at `burst`. Nobody is refused for the rest
+		of the session, and nobody is paid for the trip backwards.
 	]]
 	clock = 100
 
@@ -279,16 +281,190 @@ do
 
 	clock = 5
 
-	equals("a backwards clock reopens it", budget.admit(channel, alice, 1), nil)
-	equals("and usage reads against the new window", (budget.usage(alice, channel)), 1)
+	check("a backwards clock mints nothing", budget.admit(channel, alice, 1) ~= nil)
+
+	clock = 6
+	equals("and the sender recovers as soon as time moves forward", budget.admit(channel, alice, 1), nil)
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A fixed window admits twice the declared rate, and a bucket does not (PLAN-M3 D-3)
+-- ---------------------------------------------------------------------------------------------
 
-if failures > 0 then
-	error(`{failures} budget assertions failed`)
+do
+	--[[
+		Warp's bug was the reset path (`RESEARCH §3.7-K`), which M2 made unreachable. This is the
+		other one, which M2 kept: a window that resets on a boundary admits a full allowance on each
+		side of it, so a channel declared `rate = 20` passes 40 across a span of milliseconds.
+
+		The game declared 20 and got 40, with no way to find out. Against the pre-fix code the
+		figure below is 40.
+	]]
+	local budget = Budget.new(now)
+	local channel = channelOf("game.fixedWindow", 20)
+
+	local admitted = 0
+
+	local function offer(count: number)
+		for _ = 1, count do
+			if budget.admit(channel, alice, 4) == nil then
+				admitted += 1
+			end
+		end
+	end
+
+	--[[ The window has to be *open* before the boundary is interesting, so one packet at zero puts
+	     it there. Counting starts afterwards: everything below happens inside a span of 0.01s. ]]
+	clock = 0
+	offer(1)
+	admitted = 0
+
+	clock = 0.99
+	offer(19)
+
+	clock = 1.0
+	offer(20)
+
+	equals("a sliding hundredth of a second admits no more than the rate", admitted, 20)
 end
 
-print("OK      budget_runtime")
+do
+	--[[ The steady state the bucket is for: at the declared rate, forever, nothing is refused. A
+	     limiter that throttles a conforming sender is a limiter nobody will declare honestly. ]]
+	local budget = Budget.new(now)
+	local channel = channelOf("game.steady", 20)
+
+	clock = 0
+
+	local refused = 0
+
+	for step = 1, 200 do
+		clock = step / 20
+
+		if budget.admit(channel, alice, 4) ~= nil then
+			refused += 1
+		end
+	end
+
+	equals("a sender exactly at its rate is never refused", refused, 0)
+end
+
+do
+	--[[ Burst is what a bucket buys that a window cannot: a client that has been quiet may spend
+	     what it did not use, up to the declared depth and no further. Default depth is `rate`. ]]
+	local budget = Budget.new(now)
+	local channel = channelOf("game.burst", 10)
+	channel.burst = 30
+
+	clock = 0
+	equals("the first packet is admitted", budget.admit(channel, alice, 4), nil)
+
+	--[[ Ten seconds of silence is a hundred tokens of entitlement and a bucket thirty deep. ]]
+	clock = 10
+
+	local admitted = 0
+
+	for _ = 1, 50 do
+		if budget.admit(channel, alice, 4) == nil then
+			admitted += 1
+		end
+	end
+
+	equals("silence banks up to the declared depth", admitted, 30)
+end
+
+do
+	--[[ Without a declared burst the depth is the rate, so the same silence buys one second's
+	     worth rather than ten. ]]
+	local budget = Budget.new(now)
+	local channel = channelOf("game.noBurst", 10)
+
+	clock = 0
+	budget.admit(channel, alice, 4)
+
+	clock = 10
+
+	local admitted = 0
+
+	for _ = 1, 50 do
+		if budget.admit(channel, alice, 4) == nil then
+			admitted += 1
+		end
+	end
+
+	equals("burst defaults to rate", admitted, 10)
+end
+
+do
+	--[[ A clock that goes backwards must not mint tokens. `os.clock` is monotonic so this cannot
+	     happen with the default, but an injected one can — and the failure it would cause is the
+	     limiter silently ceasing to limit. ]]
+	local budget = Budget.new(now)
+	local channel = channelOf("game.backwards", 5)
+
+	clock = 100
+
+	for _ = 1, 5 do
+		budget.admit(channel, alice, 4)
+	end
+
+	check("the bucket is empty", budget.admit(channel, alice, 4) ~= nil)
+
+	clock = 50
+
+	check("and a clock that went backwards does not refill it", budget.admit(channel, alice, 4) ~= nil)
+end
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		A rate below one packet per second is legal — `checkedRate` asks for positive and finite, and
+		"one purchase every two seconds" is a rate a game writes on purpose.
+
+		The bucket's depth defaults to the rate, and a depth of 0.5 can never hold a whole token: the
+		refill is capped at 0.5, the admission test wants 1, and the channel is refused forever after
+		its first packet. That is Warp's exact failure (`RESEARCH §3.7-K`) — a player blackholed with
+		nothing saying so — reintroduced by the fix that was supposed to make it unreachable, and
+		found by auditing the phase rather than by a test that already existed.
+
+		The depth is at least one token now. Against the pre-fix code every line below refuses.
+	]]
+	local budget = Budget.new(now)
+	local channel = channelOf("shop.purchase", 0.5)
+
+	clock = 0
+	equals("the first packet is admitted", budget.admit(channel, alice, 4), nil)
+
+	clock = 1
+	check("a second later is too soon at half a packet per second", budget.admit(channel, alice, 4) ~= nil)
+
+	clock = 2
+	equals("two seconds is one packet, and it arrives", budget.admit(channel, alice, 4), nil)
+
+	clock = 3600
+	equals("and an hour later the channel is still alive", budget.admit(channel, alice, 4), nil)
+end
+
+do
+	--[[ The depth floor is a floor, not an override: a declared burst above it still stands, and a
+	     rate above one still gets a depth of `rate`. ]]
+	local budget = Budget.new(now)
+	local channel = channelOf("shop.slowBurst", 0.25)
+	channel.burst = 3
+
+	clock = 0
+
+	local admitted = 0
+
+	for _ = 1, 10 do
+		if budget.admit(channel, alice, 4) == nil then
+			admitted += 1
+		end
+	end
+
+	equals("a declared burst outranks the floor", admitted, 3)
+end
+
+suite.finish()
 
 return true

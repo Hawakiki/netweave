@@ -35,6 +35,7 @@
 ]]
 
 local Audience = require("./Audience")
+local Config = require("./Config")
 local Policy = require("./Policy")
 local Serdes = require("../codec/Serdes")
 local Types = require("../types")
@@ -69,6 +70,8 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	.class Class
 	.primitive Primitive
 	.rate number? -- packets per second the sender may send. nil on outbound classes
+	.burst number? -- bucket depth; nil means one second at `rate`
+	.maxBytes number -- the most bytes a payload may claim; derived from the schema, tightened by declaration
 	.timeout number? -- `query` only, seconds
 	.authorize Check<T>? -- resolved from the declared policy at load
 	.audience Audience? -- outbound classes only
@@ -91,6 +94,8 @@ export type Channel<C, A, T, R> = {
 	class: Class,
 	primitive: Primitive,
 	rate: number?,
+	burst: number?,
+	maxBytes: number?,
 	timeout: number?,
 	authorize: Policy.Check<T>?,
 	audience: Audience.Audience<A>?,
@@ -132,14 +137,27 @@ type function payloadOf(descriptor, field)
 	local schema = types.copy(descriptor)
 	local name = field:value()
 
+	--[[ The same sentence twice, because the two failures are the same mistake seen from either
+	     side: something that is not a netweave type, and something that is a table but not one. A
+	     reader who hits either has written the same wrong thing. ]]
+	--[[ Concatenated rather than interpolated: the advice has to show `t.struct({ ... })`, and a
+	     brace inside an interpolated string is an interpolation. ]]
+	--[[ `:value()` on a type object is `unknown` to the analyser, and concatenating an unknown is an
+	     error inside netweave's own source — the one place a user cannot act on it. ]]
+	local advice = "`"
+		.. tostring(name)
+		.. "` must be a netweave type. Build one with the type library: local t = nw.types, then "
+		.. "t.struct({ ... }), t.u8, t.string(0, 32) or t.array(t.u16). A plain Luau table is not a "
+		.. "schema — there is nothing in it to serialise from."
+
 	if not schema:is("table") then
-		error(`\`{name}\` must be a netweave type, built with nw.types`)
+		error(advice)
 	end
 
 	local payload = schema:readproperty(types.singleton("__payload"))
 
 	if not payload then
-		error(`\`{name}\` must be a netweave type, built with nw.types`)
+		error(advice)
 	end
 
 	return payload
@@ -149,7 +167,11 @@ type function propertyOf(spec, field)
 	local declaration = types.copy(spec)
 
 	if not declaration:is("table") then
-		error("a channel is declared with a table of fields")
+		error(
+			"a channel is declared with a table of fields, written inline. Use "
+				.. "nw.signal({ data = ..., rate = 20 }) rather than a value built elsewhere and "
+				.. "passed in: the fields have to be visible here for the analyzer to read them."
+		)
 	end
 
 	return declaration:readproperty(types.singleton(field:value()))
@@ -166,7 +188,11 @@ type function requireRate(spec, class)
 	end
 
 	if not rate:is("number") then
-		error("`rate` is a number of packets per second")
+		error(
+			"`rate` is a number of packets per second per player, written as a literal: "
+				.. "nw.signal({ data = ..., rate = 20 }). There is no unlimited and no default — "
+				.. "netweave guarantee G2."
+		)
 	end
 
 	return rate
@@ -184,6 +210,9 @@ type function forbid(spec, class, field)
 			.. "carry no authority by definition, and letting them approve requests would make "
 			.. "the class name a lie. If you need to approve it, it is a command.",
 		rate = "The server is the sender on this class, so there is nobody to budget.",
+		burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth of.",
+		maxBytes = "This class is sent by the server, which is not a peer whose payload size needs "
+			.. "policing. The schema still gives it a ceiling.",
 		audience = "Only state and event have an audience; an inbound channel has exactly one "
 			.. "recipient, which is the server.",
 		timeout = "Only a query waits for a reply.",
@@ -318,6 +347,8 @@ end
 ]=]
 export type function OutboundPayload(spec, class)
 	forbid(spec, class, types.singleton("rate"))
+	forbid(spec, class, types.singleton("burst"))
+	forbid(spec, class, types.singleton("maxBytes"))
 	forbid(spec, class, types.singleton("authorize"))
 	forbid(spec, class, types.singleton("args"))
 	forbid(spec, class, types.singleton("returns"))
@@ -348,7 +379,12 @@ export type function OutboundScope(spec)
 	local scope = types.copy(audience):readproperty(types.singleton("scope"))
 
 	if not scope then
-		error("`audience` must come from nw.audience")
+		error(
+			"`audience` must come from nw.audience: use nw.audience.everyone, nw.audience.owner, "
+				.. "nw.audience.nearby(studs) or nw.audience.select(fn). A plain table will not do, "
+				.. "because the scope has to be a singleton in the type for `broadcast` to exist only "
+				.. "where it is safe (guarantee G3)."
+		)
 	end
 
 	return scope
@@ -372,6 +408,44 @@ end
 	`rate` is checked at declaration rather than trusted, because G2 says there is no unlimited and
 	a `rate` of `math.huge` would be exactly that with the type system none the wiser.
 ]]
+
+--[[
+	A rate above this is documentation, not a limit. One client at 60 fps sending 166 packets a
+	frame is already an order of magnitude past any shipped game, so a declaration above it admits
+	everything the platform can physically deliver — which is what G2 exists to stop being written
+	by accident.
+
+	It is a lint rather than a rejection because the number is legitimate in a benchmark, where the
+	point is to measure the library and not the budget. `bench/src/shared/Modes/netweave.luau`
+	declares 1e6 and turns this rule off, in that order, which is the intended shape: a considered
+	exception, written down.
+]]
+local BINDING_RATE = 10000
+
+local function lintRate(rate: number, class: string)
+	if rate <= BINDING_RATE then
+		return
+	end
+
+	local level = Config.severityOf("rateUnbounded")
+
+	if level == "off" then
+		return
+	end
+
+	local message = `nw.{class} declares rate = {rate}, which no client can reach — the channel is `
+		.. `effectively unlimited (netweave guarantee G2). Declare the rate the game actually needs, `
+		.. `or set rules.rateUnbounded = "off" if this is deliberate.`
+
+	--[[ This one fires on the game's own declaration rather than on wire data, which is why it is
+	     allowed to raise at all. G4 covers the receive path; a declaration is programmer error and
+	     `CLAUDE.md` §4 says that is what raising is for. ]]
+	if Config.raises("rateUnbounded") then
+		error(message, 4)
+	end
+
+	warn(`[netweave] {message}`)
+end
 local function checkedRate(spec: any, class: string): number
 	local rate = spec.rate
 
@@ -383,7 +457,62 @@ local function checkedRate(spec: any, class: string): number
 		)
 	end
 
+	lintRate(rate, class)
+
 	return rate
+end
+
+--[[
+	The depth of the bucket, and optional: omitting it means one second.s worth, which is the safe
+	reading of silence. Declaring it is how a game says "this channel is bursty" — an input the codec
+	sends in a flurry on a key press and then not at all — without also raising the sustained rate,
+	which is what a game would otherwise have to do and is the thing `rate` exists to bound.
+
+	Below `rate` is refused rather than clamped. A depth under the rate cannot be honoured: tokens
+	accrue at `rate` per second and the cap would throw the difference away every second, so the
+	channel would run at the depth and the declared rate would be fiction.
+]]
+local function checkedBurst(spec: any, class: string, rate: number): number?
+	local burst = spec.burst
+
+	if burst == nil then
+		return nil
+	end
+
+	if type(burst) ~= "number" or burst ~= burst or burst == math.huge or burst % 1 ~= 0 then
+		error(`nw.{class} takes burst as a whole number of packets, got {tostring(burst)}`, 3)
+	end
+
+	if burst < rate then
+		error(
+			`nw.{class} declares burst = {burst} below rate = {rate}. The bucket refills at the rate, `
+				.. `so a depth under it would be discarded every second and the rate would never be `
+				.. `reached. Raise the burst, or lower the rate.`,
+			3
+		)
+	end
+
+	return burst
+end
+
+--[[
+	Optional, and only ever a tightening. The schema already gives every channel a ceiling, so this
+	exists for the case the schema cannot express: a channel whose type allows a megabyte because an
+	array is unbounded, but whose game never sends more than a few hundred bytes. Declaring the
+	smaller number turns a theoretical bound into a real one.
+]]
+local function checkedMaxBytes(spec: any, class: string): number?
+	local maxBytes = spec.maxBytes
+
+	if maxBytes == nil then
+		return nil
+	end
+
+	if type(maxBytes) ~= "number" or maxBytes ~= maxBytes or maxBytes < 1 or maxBytes % 1 ~= 0 then
+		error(`nw.{class} takes maxBytes as a whole number of bytes, at least 1, got {tostring(maxBytes)}`, 3)
+	end
+
+	return maxBytes
 end
 
 local function requirePolicy(spec: any, class: string): any
@@ -411,6 +540,9 @@ local FORBIDDEN_REASON: { [string]: string } = {
 		.. "no authority by definition, and letting them approve requests would make the class "
 		.. "name a lie.",
 	rate = "The server is the sender on this class, so there is nobody to budget.",
+	burst = "Burst is the depth of the rate budget, and this class has no rate to be the depth of.",
+	maxBytes = "This class is sent by the server, which is not a peer whose payload size needs "
+		.. "policing. The schema still gives it a ceiling.",
 	audience = "Only state and event have an audience; an inbound channel has one recipient, "
 		.. "which is the server.",
 	timeout = "Only a query waits for a reply.",
@@ -460,6 +592,27 @@ local function rejectForbidden(spec: any, class: string, fields: { string })
 	end
 end
 
+--[=[
+	@within Channel
+	@function directionOf
+	@param class string
+	@return (boolean, boolean) -- may the client send on it, may the server
+	@private
+
+	Which side may send on a class, as the receive path asks it.
+
+	Exported rather than inlined into [make] because `tests/transport_runtime.luau` builds channel
+	records by hand to keep its cases about the envelope, and a second copy of this table in a test
+	is a table that drifts from the one that matters — which `CLAUDE.md` §9 has already been bitten
+	by twice.
+]=]
+function Channel.directionOf(class: string): (boolean, boolean)
+	local inbound = class == "command" or class == "intent" or class == "signal" or class == "query"
+	local outbound = class == "state" or class == "event" or class == "query"
+
+	return inbound, outbound
+end
+
 local function make(
 	class: Class,
 	primitive: Primitive,
@@ -484,6 +637,61 @@ local function make(
 	for field, value in fields do
 		channel[field] = value
 	end
+
+	--[[
+		Which side may **send** on this channel, as two booleans the receive path can read without a
+		string compare.
+
+		G6 says direction is a class rather than a field, and until M3 phase 9 it was enforced only
+		on the views — at analysis time, on the game's own code. The wire had no opinion:
+		`Namespace.channelById` resolved every id, `Budget.admit` returned nil for a class with no
+		`rate` because there was nothing to charge, and a client's packet on a `nw.state` id was
+		decoded and queued on the server. Six hundred of them measured `budget=0, queue=344`.
+
+		Which also means the reason those classes may not declare a `rate` — "the server is the
+		sender on this class, so there is nobody to budget" — rested on a check that did not exist.
+		Now it does.
+
+		`query` is on both lists and is the only class that is: a request goes one way and its reply
+		comes back on the same id (`docs/WIRE-FORMAT.md` §2).
+	]]
+	channel.fromClient, channel.fromServer = Channel.directionOf(class)
+
+	--[[
+		The byte ceiling, derived from the schema and tightened by a declaration if there is one.
+
+		Deriving it is what makes it universal: a game that declares nothing still gets a bound,
+		because every netweave type is bounded and the layout can add them up. A declared `maxBytes`
+		can only lower it — asking for more than the schema can produce is a number that could never
+		be reached, and accepting it would let an author believe they had set a limit.
+
+		The same disease has a second form, and it was live until an audit found it: a declaration on a
+		**statically framed** channel is inert. A static payload carries no length prefix — the reader
+		already knows where it ends — so there is no claim to check and the ceiling is never consulted.
+		`maxBytes = 4` on a schema fixed at fourteen bytes was accepted, stored, and did nothing.
+	]]
+	local derived = channel.codec.maxSize
+	local declared = channel.maxBytes
+
+	if declared and channel.codec.framing == "static" then
+		error(
+			`nw.{class} declares maxBytes = {declared}, and this schema is a fixed {derived} bytes every `
+				.. `time. A static payload carries no length to police — the size is guaranteed by the `
+				.. `framing rather than by a check, so the declaration would do nothing. Remove it.`,
+			3
+		)
+	end
+
+	if declared and declared > derived then
+		error(
+			`nw.{class} declares maxBytes = {declared}, but this schema can never produce more than `
+				.. `{derived} bytes. A ceiling above what the schema can reach is not a limit — remove it, `
+				.. `or lower it to the size this channel should actually accept.`,
+			3
+		)
+	end
+
+	channel.maxBytes = declared or derived
 
 	return channel
 end
@@ -510,8 +718,14 @@ function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<
 	local raw: any = spec
 	rejectForbidden(raw, "command", { "audience", "args", "returns", "timeout", "unreliable" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "command")
+
 	return make("command", "AuthorizedInbound", requireType(raw, "data", "command"), {
-		rate = checkedRate(raw, "command"),
+		rate = rate,
+		burst = checkedBurst(raw, "command", rate),
+		maxBytes = checkedMaxBytes(raw, "command"),
 		authorize = requirePolicy(raw, "command"),
 	})
 end
@@ -543,8 +757,14 @@ function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>,
 	local raw: any = spec
 	rejectForbidden(raw, "intent", { "authorize", "audience", "args", "returns", "timeout" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "intent")
+
 	return make("intent", "AuthorizedInbound", requireType(raw, "data", "intent"), {
-		rate = checkedRate(raw, "intent"),
+		rate = rate,
+		burst = checkedBurst(raw, "intent", rate),
+		maxBytes = checkedMaxBytes(raw, "intent"),
 		unreliable = checkedUnreliable(raw, "intent"),
 	})
 end
@@ -577,8 +797,14 @@ function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>,
 	local raw: any = spec
 	rejectForbidden(raw, "signal", { "authorize", "audience", "args", "returns", "timeout" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "signal")
+
 	return make("signal", "UntrustedInbound", requireType(raw, "data", "signal"), {
-		rate = checkedRate(raw, "signal"),
+		rate = rate,
+		burst = checkedBurst(raw, "signal", rate),
+		maxBytes = checkedMaxBytes(raw, "signal"),
 		unreliable = checkedUnreliable(raw, "signal"),
 	})
 end
@@ -606,6 +832,10 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 	local raw: any = spec
 	rejectForbidden(raw, "query", { "data", "audience", "unreliable" })
 
+	--[[ Once: `checkedRate` also runs the `rateUnbounded` lint, and a channel that warns twice for
+	     one declaration is a channel whose warning gets ignored. ]]
+	local rate = checkedRate(raw, "query")
+
 	local timeout = raw.timeout
 
 	if type(timeout) ~= "number" or timeout ~= timeout or timeout <= 0 or timeout == math.huge then
@@ -618,13 +848,46 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 
 	local returns = requireType(raw, "returns", "query")
 
+	--[[
+		`invoke` reports failure as `nil`, so an answer that can legitimately *be* nil would make the
+		two indistinguishable: a handler returning nothing and a server that never replied would
+		reach the caller as the same value, and the caller's `if answer then` would be right about
+		one of them by accident.
+
+		Refused at the declaration rather than papered over at the call site, because the fix is a
+		line the author writes once — wrap it in a struct, and "no loadout" becomes a field that says
+		so (`DESIGN-API.md` §7).
+	]]
+	if returns.kind == "optional" then
+		error(
+			"nw.query cannot return an optional at the top level. invoke() reports failure by "
+				.. "returning nil, so an answer that may itself be nil cannot be told apart from a "
+				.. "call that never came back. Wrap it, and the absence becomes a field that says "
+				.. "so: returns = t.struct({ found = t.boolean, value = t.optional(...) }).",
+			2
+		)
+	end
+
 	local channel = make("query", "AuthorizedInbound", requireType(raw, "args", "query"), {
-		rate = checkedRate(raw, "query"),
+		rate = rate,
+		burst = checkedBurst(raw, "query", rate),
+		maxBytes = checkedMaxBytes(raw, "query"),
 		authorize = requirePolicy(raw, "query"),
 		timeout = timeout,
 		returns = returns,
 		responseCodec = Serdes.fromSchema(returns),
 	})
+
+	--[[
+		The reply gets a ceiling of its own, derived the same way `make` derives the request's.
+
+		Not declarable, and that asymmetry is the point: `maxBytes` exists to police a *peer*, and
+		the peer on a query is the client asking the question. The answer is this server's own bytes,
+		so the number here is a check on netweave and on the game's handler rather than on anyone
+		else — which is exactly what a derived bound is good at and what a declared one would only
+		make configurable.
+	]]
+	channel.replyMaxBytes = channel.responseCodec.maxSize
 
 	return channel
 end
@@ -650,7 +913,7 @@ end
 ]=]
 function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "state", { "rate", "authorize", "args", "returns", "timeout" })
+	rejectForbidden(raw, "state", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
 	return make("state", "Outbound", requireType(raw, "data", "state"), {
 		audience = requireAudience(raw, "state"),
@@ -678,7 +941,7 @@ end
 ]=]
 function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil>
 	local raw: any = spec
-	rejectForbidden(raw, "event", { "rate", "authorize", "args", "returns", "timeout" })
+	rejectForbidden(raw, "event", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
 	return make("event", "Outbound", requireType(raw, "data", "event"), {
 		audience = requireAudience(raw, "event"),

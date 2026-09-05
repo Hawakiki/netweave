@@ -113,8 +113,13 @@ local function guard(record: Record): Ctx
 				return (live :: any)[key]
 			end,
 
-			__newindex = function()
-				error("a ctx is read-only", 2)
+			__newindex = function(_, key: any)
+				error(
+					`a ctx is read-only, so ctx.{tostring(key)} = ... is not a place to keep anything: `
+						.. `the record is reused for this player's next packet and the write would leak `
+						.. `into it. Keep per-request state in your own table, keyed by ctx.player.`,
+					2
+				)
 			end,
 
 			__metatable = "netweave.Ctx",
@@ -194,6 +199,46 @@ function Context.release(player: any)
 	if record then
 		record.generation += 1
 	end
+end
+
+--[=[
+	@within Context
+	@function detached
+	@param player Player
+	@param channel string -- the qualified channel name
+	@return Ctx
+	@private
+
+	A context of its own, for a handler that is allowed to yield.
+
+	`nw.query` is the only class where that is true, and it is true by design: a query exists to
+	fetch something, and fetching means a datastore, a `WaitForChild`, an HTTP call. So a query's
+	handler gets a record nobody else will touch, frozen, valid for as long as it holds it.
+]=]
+--[[
+	One allocation per call, and it is the right trade here rather than an exception to the rule.
+
+	The shared per-player record exists because `ctx` reaches every policy and every handler on
+	every packet, and a table per packet would have broken the zero-allocation criterion on the
+	first one. A query is not that: it has already cost a coroutine, a round trip and a reply
+	packet, and the alternative to allocating is a record whose `channel`, `now` and `character`
+	are refreshed out from under a handler that yielded — which in Studio raises through the guard
+	above, and in production hands back another packet's context. The optimisation and the class
+	are incompatible, so the class pays.
+
+	Frozen, so the one thing a detached context and a live one still have in common is that neither
+	can be written to.
+]]
+function Context.detached(player: any, channel: string): Ctx
+	local character = (player :: any).Character
+
+	return table.freeze({
+		player = player,
+		channel = channel,
+		character = character,
+		humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil,
+		now = os.clock(),
+	}) :: any
 end
 
 --[=[

@@ -179,11 +179,23 @@ local function callable<T>(check: Check<T>, factory: Factory<T>?): Policy<T>
 		setmetatable(self, {
 			__call = function(_, config: any): Policy<T>
 				if not factory then
-					error("this policy takes no configuration", 2)
+					error(
+						"this policy takes no configuration, so calling it with a table does nothing "
+							.. "but build another one. Attach it directly — authorize = policy.alive — "
+							.. "without the parentheses. A policy that should take options declares "
+							.. "them in its factory: nw.policy(function(config) ... end).",
+						2
+					)
 				end
 
 				if config ~= nil and type(config) ~= "table" then
-					error(`a policy is configured with a table, got {type(config)}`, 2)
+					error(
+						"a policy is configured with a table of options, got "
+							.. type(config)
+							.. ". Write it as policy.originNearCharacter({ maxStuds = 12 }) — the "
+							.. "table reaches the factory's `config` parameter.",
+						2
+					)
 				end
 
 				return callable(factory(config or {}), factory)
@@ -221,13 +233,24 @@ end
 ]=]
 function Policy.policy<T>(factory: Factory<T>): Policy<T>
 	if type(factory) ~= "function" then
-		error("nw.policy needs a function", 2)
+		error(
+			`nw.policy takes a factory that returns the per-request check, got {typeof(factory)}. `
+				.. `Write it as: nw.policy(function(config) return function(ctx, value) return `
+				.. `nw.allow() end end). The outer function runs once at load; the inner one runs per `
+				.. `request.`,
+			2
+		)
 	end
 
 	local check = factory({})
 
 	if type(check) ~= "function" then
-		error("a policy factory must return the per-request function", 2)
+		error(
+			`a policy factory returns the per-request function, and this one returned {typeof(check)}. `
+				.. `The two stages are the point: nw.policy(function(config) --[[ once ]] return `
+				.. `function(ctx, value) --[[ per request ]] return nw.allow() end end).`,
+			2
+		)
 	end
 
 	return callable(check, factory)
@@ -258,7 +281,12 @@ function Policy.all<T>(...: Policy<T>): Policy<T>
 	local count = select("#", ...)
 
 	if count == 0 then
-		error("nw.all needs at least one policy", 2)
+		error(
+			"nw.all composes policies and was given none. Pass the ones this channel needs — "
+				.. "nw.all(policy.alive, policy.ownsSlot) — or attach the single policy directly "
+				.. "rather than wrapping it.",
+			2
+		)
 	end
 
 	--[[ Flattened once, at declaration time: the per-request path walks an array, never a varargs
@@ -271,7 +299,12 @@ function Policy.all<T>(...: Policy<T>): Policy<T>
 		local member = select(index, ...) :: any
 
 		if type(member) ~= "table" or type(member.__nwCheck) ~= "function" then
-			error(`nw.all takes policies; argument {index} is a {type(member)}`, 2)
+			error(
+				`nw.all takes policies; argument {index} is a {type(member)}. Every argument has to come `
+					.. `from nw.policy — a bare function is not one, because a policy carries the check `
+					.. `netweave calls and the shape nw.all composes.`,
+				2
+			)
 		end
 
 		checks[index] = member.__nwCheck

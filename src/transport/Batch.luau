@@ -7,9 +7,12 @@
 	The envelope from `docs/WIRE-FORMAT.md`, and the only place that knows it.
 
 	```
-	batch  := version:u8  packet*
-	packet := id:varint  frame  payload
-	frame  := [length:varint if counted]  [instances:varint if variable]
+	batch       := version:u8  packet*
+	packet      := id:varint  [correlation if query]  frame  payload
+	frame       := [length:varint if counted]  [instances:varint if variable]
+
+	correlation := call:varint                -- a request, read by the side that answers
+	             | call:varint  status:u8     -- a reply, read by the side that called
 	```
 
 	One version byte per batch rather than per packet: at 200 packets a batch it costs 0.005 bytes
@@ -60,9 +63,12 @@ local TWO_BYTE_MAX = 16383
 	@interface Sink
 	@within Batch
 	.resolve (id: number) -> any -- the channel with that wire id, or nil
-	.admit (channel: any, bytes: number) -> string? -- nil to decode it, or a reason to refuse
-	.deliver (channel: any, value: any, bytes: number) -> ()
-	.refuse (channel: any?, stage: string, reason: string, bytes: number) -> ()
+	.answers boolean -- true where a query packet is a request: the server
+	.admit (channel: any, bytes: number) -> (string?, string?) -- nil to decode it, or a reason and its stage
+	.deliver (channel: any, value: any, bytes: number, call: number?) -> ()
+	.reply (channel: any, call: number, status: number, value: any?, bytes: number) -> ()
+	.hello (hash: number) -> () -- a peer's protocol hash, off a control packet
+	.refuse (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> ()
 
 	What [Batch.read] calls as it walks a batch. Every member is resolved once by the caller and
 	held, so nothing here allocates per packet.
@@ -73,10 +79,78 @@ local TWO_BYTE_MAX = 16383
 ]=]
 export type Sink = {
 	resolve: (id: number) -> any,
-	admit: (channel: any, bytes: number) -> string?,
-	deliver: (channel: any, value: any, bytes: number) -> (),
-	refuse: (channel: any?, stage: string, reason: string, bytes: number) -> (),
+	--[[ Whether a query packet arriving here is a **request**. True on the server, false on the
+	     client, and a property of the endpoint rather than of the packet — which is what lets one
+	     wire id carry both directions of a query without a byte to say which. ]]
+	answers: boolean,
+	--[[ nil to decode the packet, or a reason and the stage to report it at. The stage is the
+	     sink's to choose because the same refusal point serves two of them: over the rate is
+	     `budget`, and a peer on a protocol this one does not share is `protocol`. ]]
+	admit: (channel: any, bytes: number) -> (string?, string?),
+	deliver: (channel: any, value: any, bytes: number, call: number?) -> (),
+	reply: (channel: any, call: number, status: number, value: any?, bytes: number) -> (),
+	--[[ A peer's protocol hash, off a control packet. Once per session per peer, in the first batch
+	     it sends — and `bytes` is what the whole control packet cost, so a mismatch is reported with
+	     the same accounting as any other refusal. ]]
+	hello: (hash: number, bytes: number) -> (),
+	refuse: (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> (),
 }
+
+--[=[
+	@prop HELLO number
+	@within Batch
+
+	The control kinds carried on channel id 0, which is reserved (`WIRE-FORMAT.md` §3).
+
+	`HELLO` is a peer announcing the hash of its own declarations, once, in its first batch.
+]=]
+--[[
+	A control packet carries its body length, and an unknown kind is skipped rather than fatal.
+
+	Id 0 is reserved "for the handshake, and anything v2 needs", and a reserved slot that cannot be
+	extended without breaking every v1 reader is not reserved for anything. The length is what makes
+	a kind this build has never heard of steppable — three bytes of overhead, once per session,
+	against having to bump the batch version to add a control message.
+]]
+local HELLO = 1
+
+--[[ The repeat of the reason above it, without the kind. Constant, so a batch packed with control
+     kinds this build does not read allocates one string rather than one per packet. ]]
+local ANOTHER_CONTROL_KIND = "another control kind this build does not read, in the same batch"
+
+Batch.HELLO = HELLO
+
+--[=[
+	@prop OK number
+	@within Batch
+
+	The reply statuses. `OK` carries an answer behind it; every other code ends the packet at the
+	status byte.
+
+	| Code | Meaning | What the caller can do |
+	|---|---|---|
+	| `OK` | the answer follows | use it |
+	| `REFUSED` | a policy said no, or the rate budget did | do not retry with the same input |
+	| `FAILED` | the handler raised, or the answer did not encode | report a bug |
+	| `UNHANDLED` | nothing is attached to answer this channel | wire up `:handle` |
+	| `BUSY` | this player already holds every call slot the server will | back off and retry |
+]=]
+--[[
+	Codes, not the server's reason string.
+
+	A refusal's reason is written for the game that owns the server: it names the policy, the field,
+	sometimes the player. Sending it to the client would publish the authorization model to the
+	machine that model exists to distrust, one denied request at a time. The caller learns *that* it
+	was refused and which class of thing went wrong, which is all it can act on; the reason itself
+	goes to the observer on the server, where the game can read it (`PLAN-M3` D-12).
+]]
+local OK = 0
+
+Batch.OK = OK
+Batch.REFUSED = 1
+Batch.FAILED = 2
+Batch.UNHANDLED = 3
+Batch.BUSY = 4
 
 -- ---------------------------------------------------------------------------------------------
 -- Writing
@@ -133,17 +207,14 @@ end
 	into each recipient, and a version byte in the scratch would have to be stripped on the way in —
 	an offset to get wrong on every broadcast for no gain.
 ]=]
-function Batch.writeBody(channel: any, value: any)
-	--[[
-		A packet boundary is where a block left open by a raising encode gets cleaned up. Without
-		this, the length byte reserved below would be taken from that block's stale cursor — and
-		`Buffer.reserve` is block-aware precisely so that a bitfield inside a block works, so the one
-		that leaks is the one that matters.
-	]]
-	Buffer.discardBlock()
-	Buffer.writeVarint(channel.id)
+--[[
+	The frame and the payload, for whichever codec the direction calls for.
 
-	local codec = channel.codec
+	A query writes its `args` codec one way and its `returns` codec the other, and everything from
+	the frame down is identical between them — so it is written once here rather than twice, which
+	is also what stops the two from drifting apart.
+]]
+local function writeFramed(codec: any, value: any)
 	local counted = codec.framing == "counted"
 	local variable = codec.instances == nil
 
@@ -168,6 +239,68 @@ function Batch.writeBody(channel: any, value: any)
 	end
 end
 
+function Batch.writeBody(channel: any, value: any)
+	--[[
+		A packet boundary is where a block left open by a raising encode gets cleaned up. Without
+		this, the length byte reserved below would be taken from that block's stale cursor — and
+		`Buffer.reserve` is block-aware precisely so that a bitfield inside a block works, so the one
+		that leaks is the one that matters.
+	]]
+	Buffer.discardBlock()
+	Buffer.writeVarint(channel.id)
+	writeFramed(channel.codec, value)
+end
+
+--[=[
+	@within Batch
+	@function writeRequest
+	@param channel Channel
+	@param call number -- the caller's id for this call, echoed back in the reply
+	@param value any
+
+	A query going out from the side that called. The same packet as any other but for the call id,
+	which sits between the channel id and the frame.
+
+	The id is framing rather than payload on purpose. A `counted` channel's length prefix counts the
+	bytes the schema produced, so the derived byte ceiling stays a statement about the schema and
+	does not have to be adjusted by however many bytes this particular call id took to write.
+]=]
+function Batch.writeRequest(channel: any, call: number, value: any)
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(channel.id)
+	Buffer.writeVarint(call)
+	writeFramed(channel.codec, value)
+end
+
+--[=[
+	@within Batch
+	@function writeReply
+	@param channel Channel
+	@param call number -- the id the caller sent
+	@param status number -- `Batch.OK`, and the answer follows; anything else ends the packet
+	@param value any? -- the answer, when the status is `Batch.OK`
+
+	The answer going back. A non-`OK` status ends the packet at the status byte: no frame, no
+	payload.
+
+	The alternative was a zero-length payload, which a `counted` schema can express and a `static`
+	one cannot — a refused reply on a schema fixed at forty bytes would have had to carry forty
+	bytes of nothing. Ending the packet is uniform across both framings and stays resynchronisable,
+	because by then the reader has already read everything it needs to know where the packet ends.
+]=]
+function Batch.writeReply(channel: any, call: number, status: number, value: any?)
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(channel.id)
+	Buffer.writeVarint(call)
+	Buffer.writeU8(status)
+
+	if status == Batch.OK then
+		writeFramed(channel.responseCodec, value)
+	end
+end
+
 --[=[
 	@within Batch
 	@function writePacket
@@ -182,6 +315,26 @@ end
 function Batch.writePacket(channel: any, value: any)
 	Batch.begin()
 	Batch.writeBody(channel, value)
+end
+
+--[=[
+	@within Batch
+	@function writeHello
+	@param hash number -- this peer's protocol hash
+
+	The handshake packet, on reserved channel id 0.
+
+	Written once per session, as the first packet this peer sends, so the peer on the other end
+	learns whether it is talking to a build it agrees with before it has read anything else in the
+	batch (`WIRE-FORMAT.md` §4).
+]=]
+function Batch.writeHello(hash: number)
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(0)
+	Buffer.writeU8(HELLO)
+	Buffer.writeVarint(4)
+	Buffer.writeU32(hash)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -210,7 +363,11 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 	Buffer.beginRead(packed, instances)
 
 	local sidecar = if instances then #instances else 0
+	local answers = sink.answers
 	local version = Buffer.readU8()
+
+	--[[ Whether a control kind this build cannot read has already been named in this batch. ]]
+	local unknownKind = false
 
 	if Buffer.rejected() or version ~= Batch.VERSION then
 		sink.refuse(nil, "parse", `batch version {version} is not {Batch.VERSION}`, size)
@@ -228,6 +385,72 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 			return
 		end
 
+		--[[
+			Id 0 is control traffic and has no channel behind it (`WIRE-FORMAT.md` §3).
+
+			It is read before `resolve` because resolving 0 would fail, and the failure would be the
+			unrecoverable one: the batch would stop on the very packet that exists to explain why the
+			two peers disagree.
+		]]
+		if id == 0 then
+			local kind = Buffer.readU8()
+			local length = if Buffer.rejected() then 0 else Buffer.readVarint()
+
+			if Buffer.rejected() then
+				sink.refuse(nil, "parse", "truncated control packet", size - packetStart)
+				return
+			end
+
+			local bodyStart = Buffer.cursor()
+			local bodyEnd = bodyStart + length
+
+			if bodyEnd > size then
+				sink.refuse(nil, "parse", "control body runs past the batch", size - packetStart)
+				return
+			end
+
+			--[[
+				Only the kinds this build knows are read. Anything else is stepped over — that is what
+				the length is for — and **said out loud**, which is a separate decision.
+
+				The forward-compatibility argument says stay quiet: a v1 reader meeting a v2 control
+				message should carry on, not complain. The argument that wins is this milestone's:
+				nothing on the receive path is silent, because a peer sending bytes this build cannot
+				act on is exactly the skew a future deploy will need to diagnose, and the repeat
+				suppression already caps what it costs at three lines per stage. Found by
+				`tests/fuzz_runtime.luau`, whose "nothing vanishes" invariant this was the only
+				exception to.
+			]]
+			if kind == HELLO and length >= 4 then
+				Buffer.setLimit(bodyEnd)
+
+				local hash = Buffer.readU32()
+
+				if not Buffer.rejected() then
+					sink.hello(hash, size - packetStart)
+				end
+			else
+				--[[ Named once per batch, counted every time. Every unknown kind is still reported —
+				     `tests/fuzz_runtime.luau`'s invariant is that nothing vanishes — but a batch
+				     packed with them builds one string rather than one per packet (M3 phase 9). ]]
+				if unknownKind then
+					sink.refuse(nil, "parse", ANOTHER_CONTROL_KIND, length)
+				else
+					unknownKind = true
+					sink.refuse(nil, "parse", `control kind {kind} is not one this build reads`, length)
+				end
+			end
+
+			--[[ The same tail every other packet takes, written out rather than jumped over. A
+			     control packet carries no instances, so the sidecar cursor stands still — which is
+			     a claim, not an omission, and is why the seek is here at all. ]]
+			Buffer.setLimit(size)
+			Buffer.seek(bodyEnd)
+			Buffer.seekInstances(Buffer.instanceCursor())
+			Buffer.clearRejection()
+			continue
+		end
+
 		local channel = sink.resolve(id)
 
 		if not channel then
@@ -237,11 +460,55 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 			return
 		end
 
+		--[[
+			Which half of a query this is comes from the endpoint, not from the packet. The server
+			only ever receives requests on a query id and the client only ever receives replies, so
+			one wire id carries both directions and neither peer has to be told which it is holding.
+
+			A malicious client cannot exploit that by "sending a reply": the server reads what it is
+			given as a request, and it decodes against the args schema or it is refused like anything
+			else.
+		]]
+		local query = channel.class == "query"
 		local codec = channel.codec
+		local ceiling = channel.maxBytes
+		local call: number? = nil
+		local status = OK
+
+		if query then
+			call = Buffer.readVarint()
+
+			if Buffer.rejected() then
+				--[[ Unrecoverable for the same reason a truncated id is: the varint ran off the end
+				     of the batch, so there is nothing behind it to resynchronise on. ]]
+				sink.refuse(channel, "parse", "truncated call id", size - packetStart)
+				return
+			end
+
+			if not answers then
+				--[[ The reply is framed by the `returns` schema, and it has a ceiling of its own —
+				     using the request's would police an answer against the size of the question. ]]
+				codec = channel.responseCodec
+				ceiling = channel.replyMaxBytes
+				status = Buffer.readU8()
+
+				if Buffer.rejected() then
+					sink.refuse(channel, "parse", "truncated reply status", size - packetStart)
+					return
+				end
+			end
+		end
+
 		local instanceCount = codec.instances
 		local payloadLength
 
-		if codec.framing == "counted" then
+		if status ~= OK then
+			--[[ A refused reply is the status byte and nothing behind it (`Batch.writeReply`), so
+			     the packet ends at the cursor and the loop's tail steps over zero bytes. Both of
+			     these are read by that tail, which is why they are set rather than skipped. ]]
+			payloadLength = 0
+			instanceCount = 0
+		elseif codec.framing == "counted" then
 			payloadLength = Buffer.readVarint()
 
 			if Buffer.rejected() then
@@ -292,21 +559,59 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 		end
 		local bytes = payloadEnd - packetStart
 
-		--[[ Everything from here is recoverable: the packet's end is known, so whatever happens
-		     the loop can step over it and carry on. ]]
-		local denial = sink.admit(channel, bytes)
+		if status ~= OK then
+			--[[
+				A reply the answering side already refused. There is nothing here to decode and
+				nothing to admit: the caller is sitting on a yielded thread and this *is* the answer,
+				arriving now rather than after the timeout — which is the whole reason the status
+				byte exists instead of a silence the caller has to wait out.
 
-		if denial then
-			sink.refuse(channel, "budget", denial, bytes)
+				It falls through to the same tail as every other packet. An earlier version skipped
+				the tail with `continue` on the grounds that a status-only packet has nothing to step
+				over; the same shortcut in this loop once skipped the sidecar cursor and reattributed
+				instances, so there is exactly one exit from a packet here and this is not an
+				exception to it.
+			]]
+			sink.reply(channel, call :: number, status, nil, bytes)
 		else
-			Buffer.setLimit(payloadEnd)
+			--[[ Everything from here is recoverable: the packet's end is known, so whatever happens
+			     the loop can step over it and carry on. ]]
+			local denial, stage = sink.admit(channel, bytes)
 
-			local value, failure = codec.read()
+			--[[
+				The declared length against the channel's ceiling, before a byte of the payload is
+				decoded.
 
-			if failure then
-				sink.refuse(channel, "parse", failure, bytes)
+				The ceiling comes from the schema rather than from the game: every netweave type is
+				bounded, so `t.struct({ origin = t.vector3, seq = t.u16 })` can never be more than
+				fourteen bytes and a packet claiming more is provably a lie. `RESEARCH §3.7-F` records
+				that no surveyed library checks a payload size at all, and the reason is that they
+				would have to ask the author for the number — here the schema already knows it
+				(`PLAN-M3` D-5).
+
+				After `admit`, not before. An oversized packet still crossed the wire and still cost
+				the server a read, so it spends the sender's budget like any other; checking first
+				would let a flood of provably invalid packets run free of the limiter built to stop
+				floods.
+			]]
+			if not denial and ceiling and payloadLength > ceiling then
+				denial = `payload claims {payloadLength} bytes, over the {ceiling} this channel can hold`
+			end
+
+			if denial then
+				sink.refuse(channel, stage or "budget", denial, bytes, call)
 			else
-				sink.deliver(channel, value, bytes)
+				Buffer.setLimit(payloadEnd)
+
+				local value, failure = codec.read()
+
+				if failure then
+					sink.refuse(channel, "parse", failure, bytes, call)
+				elseif query and not answers then
+					sink.reply(channel, call :: number, OK, value, bytes)
+				else
+					sink.deliver(channel, value, bytes, call)
+				end
 			end
 		end
 

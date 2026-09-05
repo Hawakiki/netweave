@@ -33,6 +33,7 @@
 local Batch = require("./Batch")
 local Buffer = require("../codec/Buffer")
 local Link = require("./Link")
+local Config = require("../api/Config")
 local Observer = require("../api/Observer")
 local Recipients = require("./Recipients")
 
@@ -42,6 +43,9 @@ local Recipients = require("./Recipients")
 ]]
 local attempt: (...any) -> ...any = Batch.writeBody
 local attemptPacket: (...any) -> ...any = Batch.writePacket
+local attemptRequest: (...any) -> ...any = Batch.writeRequest
+local attemptReply: (...any) -> ...any = Batch.writeReply
+local attemptHello: (...any) -> ...any = Batch.writeHello
 
 local Outbound = {}
 
@@ -55,7 +59,10 @@ local Outbound = {}
 	packet that passes it can still be dropped if it carries many instances, and that is stated
 	rather than papered over.
 ]]
-local UNRELIABLE_LIMIT = 908
+--[[ Roblox refuses an unreliable payload over 908 bytes, so this is a ceiling rather than a
+     preference: `nw.configure` can only lower it. `RESEARCH §3.7-F` records that none of the four
+     surveyed libraries checks it at all. ]]
+local UNRELIABLE_CEILING = 908
 
 --[=[
 	@prop EVERYONE any
@@ -88,6 +95,9 @@ export type Outbound = {
 	push: (channel: any, destination: any, value: any) -> (),
 	publish: (channel: any, subject: any, value: any) -> (),
 	broadcast: (channel: any, value: any) -> (),
+	request: (channel: any, call: number, value: any) -> (),
+	reply: (channel: any, destination: any, call: number, status: number, value: any?) -> (),
+	hello: (destination: any, hash: number) -> (),
 	flush: () -> (),
 	forget: (destination: any) -> (),
 }
@@ -168,9 +178,9 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 
 		The rewind is two numbers rather than a saved record, so the guard costs no allocation.
 	]]
-	local function guarded(channel: any, value: any)
+	local function guarded(writer: (...any) -> ...any, ...: any)
 		local used, instances = Buffer.mark()
-		local ok, failure = pcall(attemptPacket, channel, value)
+		local ok, failure = pcall(writer, ...)
 
 		if not ok then
 			Buffer.rollback(used, instances)
@@ -184,6 +194,18 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 
 	local function isUnreliable(channel: any): boolean
 		return channel.unreliable == true
+	end
+
+	--[[ The three destinations behind one call, so `flush` can put a `pcall` around the send without
+	     one per branch. ]]
+	local function deliver(destination: any, packed: buffer, instances: { Instance })
+		if destination == EVERYONE then
+			link.sendAll(true, packed, instances)
+		elseif destination == SERVER then
+			link.send(true, nil, packed, instances)
+		else
+			link.send(true, destination, packed, instances)
+		end
 	end
 
 	--[[
@@ -204,7 +226,9 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 		local packed, instances = Buffer.take()
 		local size = buffer.len(packed)
 
-		if size > UNRELIABLE_LIMIT then
+		local ceiling = math.min(Config.limitOf("unreliableBytes") or UNRELIABLE_CEILING, UNRELIABLE_CEILING)
+
+		if size > ceiling then
 			--[[ Refused here rather than dropped by Roblox there. A payload over the limit
 			     disappears silently on the wire, and none of the three surveyed libraries checks
 			     for it (`RESEARCH §3.7-F`). ]]
@@ -212,7 +236,7 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 				channel.qualified,
 				if all or destination == SERVER then nil else destination,
 				"send",
-				`unreliable payload is {size} bytes, over the {UNRELIABLE_LIMIT} byte limit`,
+				`unreliable payload is {size} bytes, over the {ceiling} byte limit`,
 				size
 			)
 			return
@@ -239,7 +263,7 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			end
 
 			switchTo(destination)
-			guarded(channel, value)
+			guarded(attemptPacket, channel, value)
 		end,
 
 		--[[ A publish resolves its audience and fans out. `everyone` takes the one-call path;
@@ -314,7 +338,55 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			end
 
 			switchTo(EVERYONE)
-			guarded(channel, value)
+			guarded(attemptPacket, channel, value)
+		end,
+
+		--[[
+			A query going out from the client. There is one destination and it is not addressable, so
+			this is `push` with a call id — batched with the frame's other traffic rather than sent
+			alone, because a request that leaves early still waits a frame for the answer.
+		]]
+		request = function(channel: any, call: number, value: any)
+			switchTo(SERVER)
+			guarded(attemptRequest, channel, call, value)
+		end,
+
+		--[[
+			The answer, back to the one player who asked.
+
+			It is not budgeted, and that is an argument rather than an omission: a reply is
+			one-for-one with a request, and the request already spent that player's rate budget on
+			the way in. A second budget here would police the server's own answers to questions it
+			had already agreed to answer, and the only way to overrun it would be to have accepted
+			too many requests — which is what `rate` is for.
+
+			**A request the server *refused* is answered too**, and that half the argument above does
+			not cover was found by an external review (M3 phase 9). It is deliberate and it is
+			measured. Three hundred requests a rate budget refused, in one batch:
+
+			  * refused: 1,074 bytes in, **1,074 bytes out**, 0.71 ms
+			  * the same batch admitted and answered: 1,074 in, **2,274 out**, 1.60 ms
+
+			So `Batch.read`'s premise — refusing has to stay cheaper than accepting — holds for this
+			class as well, by a factor of two in both bytes and time, and the outbound never exceeds
+			what the peer spent to provoke it. What the alternative buys is worse than what it costs:
+			dropping the refusal turns a client one packet over its burst into a caller parked for
+			the full `timeout`, which is the failure `D-12` and `Query.abandon` exist to prevent.
+		]]
+		reply = function(channel: any, destination: any, call: number, status: number, value: any?)
+			switchTo(destination)
+			guarded(attemptReply, channel, call, status, value)
+		end,
+
+		--[[
+			The handshake, on reserved id 0. Parked like any other packet rather than sent alone, so
+			it rides out in front of whatever provoked it — which is what makes the peer's *first*
+			batch carry the hash, and what lets the packets behind it in that same batch be refused
+			if the hash does not match.
+		]]
+		hello = function(destination: any, hash: number)
+			switchTo(destination)
+			guarded(attemptHello, hash)
 		end,
 
 		--[[ Once a frame. Everything accumulated goes out as one call per destination, which is the
@@ -329,17 +401,35 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 
 					local packed, instances = Buffer.take()
 
-					if destination == EVERYONE then
-						link.sendAll(true, packed, instances)
-					elseif destination == SERVER then
-						link.send(true, nil, packed, instances)
-					else
-						link.send(true, destination, packed, instances)
-					end
+					--[[
+						`take` left a fresh empty buffer behind; the record keeps it so the
+						destination does not have to allocate one again next frame — and it happens
+						**before** the send, not after.
 
-					--[[ `take` left a fresh empty buffer behind; the record keeps it so the
-					     destination does not have to allocate one again next frame. ]]
+						After the send it happened only when the send returned. A `link.send` that
+						raised left the record holding the same bytes and the same `used`, so the
+						next frame loaded them, sent them, raised again, and the loop never reached
+						the destinations iterated after it: one bad recipient stopped delivery to a
+						subset of players permanently, with an error every frame. `nw.audience.select`
+						hands back whatever the game returned, so a single non-Player entry was
+						enough (`PLAN-M3` phase 9).
+					]]
 					Buffer.saveInto(record)
+
+					local ok, failure = pcall(deliver, destination, packed, instances)
+
+					if not ok then
+						--[[ Reported rather than raised: this is one frame's traffic to one
+						     destination, and taking the flush down with it would cost every other
+						     player theirs. There is no channel to name — a batch is many. ]]
+						Observer.emit(
+							"?",
+							if destination == EVERYONE or destination == SERVER then nil else destination,
+							"send",
+							`the batch did not go out: {tostring(failure)}`,
+							buffer.len(packed)
+						)
+					end
 				end
 			end
 		end,

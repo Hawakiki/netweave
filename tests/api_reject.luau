@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 13
+-- netweave:expect 19
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -130,4 +130,52 @@ combat.server.openedMenu:listen(function(_ctx, opened)
 	giveItem(opened)
 end)
 
+--[[ 14. `maxBytes` on a class the server sends. The server is not a peer whose payload size needs
+     policing, and the schema gives every channel a ceiling regardless — so the field would be
+     configuring a check that does not apply to it. ]]
+local _oversizedEvent = nw.event({
+	data = t.struct({ seq = t.u16 }),
+	audience = nw.audience.everyone,
+	maxBytes = 4,
+})
+
+--[[ 15. And `burst`, for the same reason `rate` is forbidden here: the depth of a budget that
+     does not exist. ]]
+local _burstyEvent = nw.event({
+	data = t.struct({ seq = t.u16 }),
+	audience = nw.audience.everyone,
+	burst = 30,
+})
+
+--[[ 16. A bare table literal claiming to be trusted.
+
+     This is the case that made §6's central claim false until M3 phase 3. The tag used to be
+     `{ __nwTrusted: true? }` — *optional* — and a table literal checked against an optional
+     property is inferred to satisfy it, so any literal of the right shape was `Trusted<T>` and
+     "only three things produce it" was not true. The tag is required now. ]]
+giveItem({ screen = 1 })
+
+--[[ 17. The same laundering one step less obvious, and the one a programmer actually writes:
+     take an untrusted payload apart and put it back together. The brand is on the container, so
+     a new container is a new brand — which is exactly why the container's tag has to be
+     something a literal cannot supply by accident. ]]
+combat.server.openedMenu:listen(function(_ctx, opened)
+	giveItem({ screen = opened.screen })
+end)
+
+--[[ 18. Pins the `Untrusted` brand specifically.
+
+     Case 13 above would still fail if `Untrusted` became `any` tomorrow, because what it really
+     tests is the *absence* of `__nwTrusted`. This one fails only because `__nwUntrusted` is
+     present and required, so it is the case that notices if that half turns into decoration —
+     the failure `spike/declare/README.md` Q5 documents and that dropped M1's count from 13 to 8
+     without anything announcing it. ]]
+local function sanitise(_wire: nw.Untrusted<{ screen: number }>) end
+
+sanitise({ screen = 1 })
+
+--[[ 19. `nw.validate` takes a schema, and a policy is not one. The shared M3 plan proposed
+     `nw.validate(policy)`; the implemented shape is `nw.validate(schema, value)` and this is the
+     case that keeps the other reading from compiling. ]]
+local _validatedByPolicy = nw.validate(allow, { screen = 1 })
 return nil

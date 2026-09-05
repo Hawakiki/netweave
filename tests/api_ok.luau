@@ -213,4 +213,36 @@ local protocol: nw.Protocol = nw.protocol()
 local _count: number = protocol.count
 local _first: string = protocol.names[1]
 
+-- ---------------------------------------------------------------------------------------------
+-- Trust: what still has to compile
+-- ---------------------------------------------------------------------------------------------
+
+local function authoritative(_request: nw.Trusted<{ screen: number }>) end
+
+--[[ The three producers, each of which must keep working. `tests/api_reject.luau` cases 16 to 19
+     are the other half: nothing else may produce one. ]]
+server.openedMenu:listen(function(_ctx, opened)
+	--[[ Reading through the brand is the whole reason it is an intersection rather than a wrapper.
+	     Logging, arithmetic and UI have to work without ceremony or the brand gets cast away on
+	     the first line of every handler. ]]
+	local _screen: number = opened.screen
+	local _doubled: number = opened.screen * 2
+end)
+
+local validated = nw.validate(t.struct({ screen = t.u8 }), { screen = 1 })
+
+if validated then
+	authoritative(validated)
+end
+
+--[[ The escape hatch, and it is deliberately a cast rather than a function.
+
+     Server-authored data that never came off a wire has nothing to validate against and no reason
+     to pay for a serialisation, so there has to be a way to say "I am taking responsibility for
+     this". A cast is that way: explicit, greppable, and impossible to write by accident — which
+     an `nw.trust(value)` helper would not be. §6's "there is no `nw.untrust`" is the same
+     argument from the other side. ]]
+local configured: { screen: number } = { screen = 3 }
+
+authoritative((configured :: any) :: nw.Trusted<{ screen: number }>)
 return nil

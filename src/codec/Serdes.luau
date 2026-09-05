@@ -118,6 +118,7 @@ local READ_CHUNK: { [number]: () -> number } = {
 
 local reserve = Buffer.reserve
 local reject = Buffer.reject
+local remaining = Buffer.remaining
 local rejected = Buffer.rejected
 local openBlock = Buffer.openBlock
 local closeBlock = Buffer.closeBlock
@@ -127,6 +128,30 @@ local writeBuffer = Buffer.writeBuffer
 local readBuffer = Buffer.readBuffer
 local writeInstance = Buffer.writeInstance
 local readInstance = Buffer.readInstance
+
+--[[
+	Is this sidecar entry an Instance, asked in a way that works in both places this code runs.
+
+	Inside Roblox the question is exact: `typeof` separates an Instance from a table, and a table is
+	precisely what a hostile `FireServer(buffer, { {} })` puts in the slot. Under lune there are no
+	Instances at all and the suite stands them in with tables (`CLAUDE.md` §6 on why
+	`roblox_runtime` exists), so the strict question would refuse every test that carries one.
+
+	The lune half asks the only thing this reader ever asks of an Instance: **does it answer
+	`:IsA`.** That is not an approximation chosen for convenience — it is the exact precondition the
+	line below needs, so a stand-in that satisfies it is a stand-in the reader cannot tell from the
+	real thing, and a hostile bare table fails it in both places rather than only in Studio.
+	`tests/harness.luau` builds the stand-ins so the suite cannot drift from that contract.
+]]
+local ROBLOX = typeof(game) == "Instance"
+
+local function isInstance(value: any): boolean
+	if ROBLOX then
+		return typeof(value) == "Instance"
+	end
+
+	return type(value) == "table" and type((value :: any).IsA) == "function"
+end
 local putU8 = Buffer.putU8
 local putF32 = Buffer.putF32
 local putString = Buffer.putString
@@ -297,17 +322,38 @@ end
 -- Writers
 -- -------------------------------------------------------------------------------------------------
 
+--[[
+	Which encodings cannot hold a fraction.
+
+	`buffer.writeu8(3.7)` truncates, and with an offset it is not even truncation: `-0.4` on
+	`t.i16(-100, 100)` becomes `99.6`, stores as `99` and reads back as `-1`. The range check passed
+	both, so a game that sent a float where it meant an integer got a different number on the far
+	side and no report — under a module header that promises the alternative to raising is "silent
+	wraparound", which is exactly what it was doing (`PLAN-M3` phase 9).
+
+	The test is captured per node rather than branched per value: a `f32` field pays one upvalue
+	read, an integer field pays a modulo, and neither pays a `type()` call.
+]]
+local FRACTIONAL: { [string]: boolean } = { f32 = true, f64 = true }
+table.freeze(FRACTIONAL)
+
 local function numberWriter(node: Node): Writer
 	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
-	local write = family[node.storage :: Encoding]
+	local storage = node.storage :: Encoding
+	local write = family[storage]
 	local offset = node.offset :: number
 	local min = node.min :: number
 	local max = node.max :: number
+	local integral = not FRACTIONAL[storage]
 
 	if offset == 0 then
 		return function(value: any, _flags: Flags)
 			if not (value >= min and value <= max) then
 				error(`[netweave] {value} is outside the declared range {min}..{max}`)
+			end
+
+			if integral and value % 1 ~= 0 then
+				error(`[netweave] {value} is not a whole number, and this field is stored as {storage}`)
 			end
 
 			write(value)
@@ -317,6 +363,10 @@ local function numberWriter(node: Node): Writer
 	return function(value: any, _flags: Flags)
 		if not (value >= min and value <= max) then
 			error(`[netweave] {value} is outside the declared range {min}..{max}`)
+		end
+
+		if integral and value % 1 ~= 0 then
+			error(`[netweave] {value} is not a whole number, and this field is stored as {storage}`)
 		end
 
 		write(value - offset)
@@ -462,9 +512,23 @@ function buildWriter(node: Node): Writer
 		local chunk = node.chunkIndex :: number
 		local mask = node.mask :: number
 
+		--[[
+			A boolean field takes a boolean, and this used to take anything.
+
+			`if value then` is truthiness, so `t.boolean` accepted `0`, `""` and `"false"` and put
+			`true` on the wire for two of them. That is a silent type coercion across a wire whose
+			whole purpose is that the type on the far side is the type that was declared — and
+			`nw.validate` decides "conforms" by running this writer, so a DataStore row reading
+			`{ admin = "false" }` came back branded `Trusted<T>` and truthy (`PLAN-M3` phase 9).
+
+			Written as two comparisons rather than a `type()` call: the common path is one, `false`
+			is two, and nothing else reaches the wire.
+		]]
 		return function(value: any, flags: Flags)
-			if value then
+			if value == true then
 				flags[chunk] = bor(flags[chunk], mask)
+			elseif value ~= false then
+				error(`[netweave] a boolean field was given {typeof(value)}`)
 			end
 		end
 	elseif kind == "number" then
@@ -530,6 +594,13 @@ function buildWriter(node: Node): Writer
 		return function(value: any, _flags: Flags)
 			if value == nil then
 				error("[netweave] a non-optional instance field is nil")
+			end
+
+			--[[ Anything non-nil used to go into the sidecar, so `nw.validate` said a number
+			     conformed to `t.instance("Player")` and branded it. The reader refuses the same
+			     shape on the way in; this is the send side of that check. ]]
+			if not isInstance(value) then
+				error(`[netweave] an instance field was given {typeof(value)}`)
 			end
 
 			writeInstance(value)
@@ -687,7 +758,14 @@ local function arrayReader(node: Node): Reader
 		end
 	end
 
-	local readElement = readerFor(node.element :: Node)
+	local element = node.element :: Node
+	local readElement = readerFor(element)
+
+	--[[
+		The smallest number of bytes one element can occupy, when that is known at build time. A
+		static element has an exact size; a dynamic one does not, and answers nil.
+	]]
+	local perElement = element.fixedSize
 
 	return function(flags: Flags): any
 		local count = readLength()
@@ -696,11 +774,40 @@ local function arrayReader(node: Node): Reader
 			return {}
 		end
 
-		local result = sized(count)
+		--[[
+			A claim is not paid for until the bytes behind it exist.
+
+			~~The length was already bounded, so this is a cost question, not a safety one.~~
+			**Struck through in M3 phase 0.** A cost an attacker controls and does not pay for is an
+			amplification: a two-byte packet claiming 65535 elements bought a 65535-slot table, at
+			839x the cost of an honest packet, and *was then correctly rejected*. The rejection was
+			free. The allocation was not (`PLAN-M3` D-4).
+
+			Bounding the claim against the bytes that remain costs one comparison on the honest path
+			and turns the hostile one into a refusal before anything is allocated. Zap has the same
+			shape without the recovery — `_refsrc/zap/zap/src/irgen/des.rs:298` allocates from the
+			claimed length too, and its generated `read` does no bounds checking at all, so the
+			equivalent packet raises and takes the batch.
+		]]
+		local available = remaining()
+
+		if perElement and perElement > 0 and count * perElement > available then
+			reject(
+				`array claims {count} elements, needing {count * perElement} bytes, and {available} remain`
+			)
+			return {}
+		end
+
+		--[[
+			For a dynamic element there is no size to multiply by, so the *allocation* is capped at
+			the bytes available instead. An element cannot be conjured from no bytes, so this never
+			shortens an honest decode — and it bounds the hostile one to the packet's own length,
+			which is what the amplification was.
+		]]
+		local result = sized(if count < available then count else available)
 
 		for index = 1, count do
-			--[[ Bail on the first rejection rather than reading `max` elements of garbage. The
-			     length was already bounded, so this is a cost question, not a safety one. ]]
+			--[[ Bail on the first rejection rather than reading `max` elements of garbage. ]]
 			if rejected() then
 				return result
 			end
@@ -714,13 +821,27 @@ end
 
 local function mapReader(node: Node): Reader
 	local readLength = lengthReader(node)
-	local readKey = readerFor(node.key :: Node)
-	local readValue = readerFor(node.value :: Node)
+	local key = node.key :: Node
+	local value = node.value :: Node
+	local readKey = readerFor(key)
+	local readValue = readerFor(value)
+
+	--[[ A map never had the allocation bug an array had — it starts from `{}` and grows — but the
+	     same bound gives the same refusal, so a claim past the packet is reported the same way
+	     whichever container it arrived in (`PLAN-M3` D-4). ]]
+	local perEntry = if key.fixedSize and value.fixedSize then key.fixedSize + value.fixedSize else nil
 
 	return function(flags: Flags): any
 		local count = readLength()
 
 		if count < 0 then
+			return {}
+		end
+
+		local available = remaining()
+
+		if perEntry and perEntry > 0 and count * perEntry > available then
+			reject(`map claims {count} entries, needing {count * perEntry} bytes, and {available} remain`)
 			return {}
 		end
 
@@ -731,13 +852,13 @@ local function mapReader(node: Node): Reader
 				return result
 			end
 
-			local key = readKey(flags)
-			local value = readValue(flags)
+			local entryKey = readKey(flags)
+			local entryValue = readValue(flags)
 
 			--[[ A rejected key is a default, and defaults collide: writing them would fabricate an
 			     entry the sender never sent. ]]
 			if not rejected() then
-				result[key] = value
+				result[entryKey] = entryValue
 			end
 		end
 
@@ -856,13 +977,27 @@ function buildReader(node: Node): Reader
 			local value = readInstance()
 
 			--[[
-				Two failures, not one. A nil means the sidecar ran out, which is a framing problem.
+				Three failures, not one. A nil means the sidecar ran out, which is a framing problem.
 				A wrong class means the sender picked an instance the schema does not admit, which
 				is the whole reason `t.instance("Sound")` exists — a client can reference anything
 				it can see, so the class is checked here or it is not checked at all.
+
+				And the entry has to **be** an Instance before either of those questions can be
+				asked. `FireServer(buffer, { {} })` puts a table in the slot, and `value:IsA(class)`
+				on a table raises — on the receive path, out of the read phase, which is guarantee
+				G4 broken by the one piece of wire data that does not travel in the buffer. The
+				sidecar is a client argument like any other and had no check at all until M3 phase 9.
+
+				A bare `t.instance` was worse: with no class to test, whatever the client sent was
+				handed to the handler as an Instance. `12345` reached game code with no report.
 			]]
 			if value == nil then
 				reject("missing instance")
+				return nil
+			end
+
+			if not isInstance(value) then
+				reject(`the sidecar holds a {typeof(value)} where an instance was declared`)
 				return nil
 			end
 
@@ -913,7 +1048,12 @@ end
 export type Codec = {
 	framing: "static" | "counted",
 	fixedSize: number?,
+	maxSize: number,
 	instances: number?,
+	--[[ Kept rather than discarded, because the protocol hash is taken over the lowered tree
+	     (`src/api/Protocol.luau`) and lowering a second time at seal would be the same work done
+	     twice to save one field. ]]
+	layout: Ir.Layout,
 	write: (value: any) -> (),
 	read: () -> (any, string?),
 	check: (value: any) -> string?,
@@ -1004,7 +1144,9 @@ function Serdes.build(layout: Ir.Layout): Codec
 	return {
 		framing = layout.framing,
 		fixedSize = layout.fixedSize,
+		maxSize = layout.maxSize,
 		instances = layout.instances,
+		layout = layout,
 
 		write = function(value: any)
 			write(value, NO_FLAGS)
@@ -1034,9 +1176,14 @@ function Serdes.build(layout: Ir.Layout): Codec
 			path. The receive path never needs it — a payload that decoded is valid by construction.
 		]]
 		check = function(value: any): string?
-			local parked = Buffer.save()
+			--[[ `mark`/`rollback` rather than `save`/`load`, because only one of the two clears the
+			     sidecar. `load` restores `instanceCount` and leaves the entries the trial write
+			     appended past it, so validating a payload carrying an Instance kept a reference to
+			     it until the next write happened to overwrite that slot — found by an external
+			     review (M3 phase 9). It also stops allocating a record per call. ]]
+			local used, instances = Buffer.mark()
 			local ok, failure = pcall(attempt, value, NO_FLAGS)
-			Buffer.load(parked)
+			Buffer.rollback(used, instances)
 
 			if ok then
 				return nil

@@ -61,11 +61,122 @@ actual exploits live.
 | G5 | Length-prefixed framing: one malformed packet cannot stop the rest of its batch | not expressible |
 | G6 | Direction is a class, not a string field | type error (see §7) |
 
+**G4 is enforced rather than inspected, since M3 phase 9.** It was stated unconditionally and held
+for the byte stream and not for the two paths an external review found: a non-Instance in the
+instance sidecar, which is wire data that does not travel in the buffer, and a pooled pending list
+that two dispatch loops both believed they owned. Both are closed — but fixing the paths somebody
+found does nothing for the next one, so the read phase and the dispatch phase now each run under a
+guard that restores the shared state, returns the pending list and reports the raise. The claim
+costs two `pcall`s per batch and stops resting on an argument.
+
 G4 and G5 are transport properties, settled by the wire format in `PLAN-M1` phase 2. G1 through
 G3 and G6 are what the declaration syntax has to carry.
 
 Both codegen libraries fail G4 and G5 today: a failed `assert` inside their receive loop aborts
 the whole batch, and neither has a length field to resynchronise on (`RESEARCH §3.8-R`).
+
+## 2.1 The whole surface, on one page
+
+Six classes, and the class name is the security documentation. What each one requires is what it
+cannot work without; what each one forbids is what would make its name a lie.
+
+| Class | Direction | Requires | Forbids | The handler receives |
+|---|---|---|---|---|
+| `nw.command` | C→S | `data`, `rate`, `authorize` | — | `Trusted<T>` |
+| `nw.intent` | C→S | `data`, `rate` | `authorize` — per-packet approval is the wrong model for 60 Hz input | constrained `T`, at most one per player per frame |
+| `nw.signal` | C→S | `data`, `rate` | `authorize` — if it needs approving it was a command | `Untrusted<T>` |
+| `nw.query` | C→S→C | `args`, `returns`, `rate`, `authorize`, `timeout` | a top-level optional `returns` | `Trusted<T>`, and the handler may yield |
+| `nw.state` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` — the server is the sender | `T` |
+| `nw.event` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` — same reason | `T` |
+
+Everything else on the surface:
+
+| | What it is | The one thing to know |
+|---|---|---|
+| `nw.namespace(name, channels)` | a group of channels, declared once and required by both sides | declare every one at startup; ids depend on all of them (`WIRE-FORMAT.md` §3) |
+| `nw.types` | the schema library: `t.u8`, `t.string(0, 32)`, `t.array`, `t.struct`, `t.enum`, `t.optional` | every type is bounded, which is where each channel's byte ceiling comes from |
+| `nw.policy(factory)` | two stages: the factory runs once, the check runs per request | a verdict is `nw.allow(value)` or `nw.deny(reason)`, and `ok == true` or it is a refusal |
+| `nw.all(...)` | composes policies, threading the allowed value onward | it stops at the first denial |
+| `nw.audience` | `everyone`, `owner`, `nearby(studs)`, `select(fn)` | only `everyone` gives a channel `broadcast` |
+| `nw.observe(fn)` | every rejection, with its stage | attaching one replaces the default console output; it does not make refusals stop |
+| `nw.configure(settings)` | severities per rule, and numeric limits | a severity governs output and never enforcement |
+| `nw.protocol()` / `nw.signature()` | what both peers must agree on, and the text it is hashed from | a mismatched peer is refused at stage `protocol` |
+| `nw.validate(schema, value)` | check a value you already hold | the escape hatch that produces `Trusted<T>` without a wire; it decides by running the encoder, so it is exactly as strict as the encoder is |
+| `nw.diagnostics()` | every refusal since the counters were reset, by channel and stage | frozen on read; a rule set to `"off"` still counts |
+
+### One worked example
+
+Declaring, sending, authorizing, refusing and observing, in sixty lines. This is not a sketch:
+`tests/example_runtime.luau` runs it in the suite, and `tools/messages.luau` asserts that the code
+below is the same text. A document quoting code it does not execute rots on the first rename.
+
+<!-- example: tests/example_runtime.luau -->
+```lua
+--[[ One file, required by both sides. Everything a reviewer needs to know about this channel's
+     security is on the line that declares it. ]]
+local t = nw.types
+
+local Equip = t.struct({ slot = t.u8(0, 9) })
+type Equip = { slot: number }
+
+local policy = {}
+
+policy.alive = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: Equip)
+		return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
+	end
+end)
+
+policy.ownsSlot = nw.policy(function(config)
+	local slots: number = config.slots or 3
+
+	return function(_ctx: nw.Ctx, request: Equip)
+		if request.slot > slots then
+			return nw.deny(`slot {request.slot} is past the {slots} this player owns`)
+		end
+		return nw.allow(request)
+	end
+end)
+
+local combat = nw.namespace("combat", {
+	equip = nw.command({
+		data = Equip,
+		rate = 5,
+		authorize = nw.all(policy.alive, policy.ownsSlot({ slots = 3 })),
+	}),
+
+	loadout = nw.event({
+		data = t.struct({ primary = t.u16 }),
+		audience = nw.audience.owner,
+	}),
+})
+
+--[[ The server. `chosen` is `Trusted<{ slot: number }>` — it decoded, it was inside the declared
+     rate, and the policy allowed it. Nothing else in the process can produce that type by
+     accident, which is what makes the annotation on an authoritative function worth writing. ]]
+--[[ Nothing is annotated: `chosen` is `Trusted<Equip>` and `ctx.player` is the sender, both from
+     the declaration (`DESIGN-API.md` §8 on why the player is `unknown`). ]]
+combat.server.equip:listen(function(ctx, chosen)
+	combat.server.loadout:publish(ctx.player, { primary = 100 + chosen.slot })
+end)
+
+combat.client.loadout:listen(function(loadout)
+	equipped[#equipped + 1] = loadout.primary
+end)
+
+--[[ Every refusal, whether or not anything is listening. Attaching this replaces the default
+     console output; detaching it does not make the refusals stop. ]]
+nw.observe(function(rejection)
+	refusals[#refusals + 1] = `{rejection.channel} at {rejection.stage}: {rejection.reason}`
+end)
+
+combat.client.equip:send({ slot = 1 })
+combat.client.equip:send({ slot = 7 })
+```
+
+What is *not* in it is as much the point. There is no middleware chain, no per-call options table,
+no place to pass a validator at the send site, and nothing that would let a second file change what
+`equip` accepts. The declaration is the whole security model, and it is nineteen lines.
 
 ## 3. Channel classes
 
@@ -78,8 +189,50 @@ documentation — a reader sees `nw.intent` and knows the server does not approv
 | `intent` | C→S | `data`, `rate` | `authorize` | constrained `T` |
 | `signal` | C→S | `data`, `rate` | `authorize` | `Untrusted<T>` |
 | `query` | C→S→C | `args`, `returns`, `rate`, `authorize`, `timeout` | — | `Trusted<T>` |
-| `state` | S→C | `data`, `audience` | `rate`, `authorize` | `T` |
-| `event` | S→C | `data`, `audience` | `rate`, `authorize` | `T` |
+| `state` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` | `T` |
+| `event` | S→C | `data`, `audience` | `rate`, `burst`, `maxBytes`, `authorize` | `T` |
+
+**Direction is checked on arrival, not only in the views.** ~~The reason `state` and `event` forbid
+`rate` is that the server is the sender, so there is nobody to budget.~~ That was true of the views
+and not of the wire: a client could put any id in a packet it writes, and until M3 phase 9 the
+server resolved it, found no rate to charge, decoded it and queued it. Six hundred such packets
+measured `budget=0`. A packet arriving on a channel this peer is the sender of is refused before
+decode, at stage `direction`, which G6 needed to be a guarantee about peers rather than about the
+game's own code.
+
+**Every channel carries a byte ceiling, and it derived it from the schema.** Every netweave type is
+bounded — a number by its encoding, a string or array by its range, an unbounded array by the 65535
+its prefix can express — so the layout can add them up. `t.struct({ origin = t.vector3, seq = t.u16 })`
+can never be more than fourteen bytes, and a packet claiming more is refused before a byte of it is
+decoded, at stage `budget`, with the game having declared nothing. `RESEARCH §3.7-F` records that no
+surveyed library checks a payload size at all; the reason is that they would have to ask the author
+for the number.
+
+~~and a packet claiming more is provably a lie~~ — **it was provably a lie only where the schema had
+no flags below its top level.** `Ir.ceiling` counted the root's bitfield and not the one a dynamic
+array or map element opens per element, so `t.array(t.boolean, 0, 10)` derived one byte where ten
+elements cost eleven, and an honest three-element packet was refused at stage `budget` against its
+own sender. Corrected in M3 phase 9, and `tests/ir_runtime.luau` now asserts the property the number
+claims — encode at the maximum, assert it fits — rather than a table of examples that all happened
+to work.
+
+An inbound class may declare **`maxBytes`** to *tighten* that ceiling, and only to tighten it. Two
+declarations are refused rather than accepted, because both would let an author believe they had set
+a limit: a ceiling above what the schema can produce, and **any** ceiling on a statically framed
+channel — a static payload carries no length prefix, so there is no claim to check and the number
+would never be consulted. It is for the schema whose bound is
+honest and useless — `t.array(t.array(t.u8, 0, 1000), 0, 1000)` derives 1,002,002, and `maxBytes = 2048`
+at `rate = 20` turns that into 40,960 bytes per second.
+
+Every class that declares a `rate` may also declare a **`burst`**, the depth of its token bucket.
+It defaults to `rate` — one second's worth, the safe reading of silence — and it cannot be
+declared below `rate`, because tokens accrue at the rate and a shallower bucket would throw the
+difference away every second, leaving the declared rate unreachable and therefore fiction.
+
+`rate` is a *sustained* rate, enforced by a bucket rather than a window. A window that resets on a
+boundary admits a full allowance on each side of it: a channel declared `rate = 20` measured **39
+admissions across ten milliseconds** before M3 phase 0. The guarantee is now "no more than `rate`
+per second in any second", not "in the seconds netweave happened to draw".
 
 **`command`** changes authoritative state. Authorization is not optional, because a command
 without it is the exact shape of every Roblox exploit writeup.
@@ -90,6 +243,21 @@ says that out loud so nobody mistakes it for an RPC.
 
 **`signal`** carries no authority. `authorize` is *forbidden* here so the class stays honest:
 if you need to approve it, it was a `command`. Its payload arrives branded `Untrusted<T>`.
+
+**`query`** is a `command` that answers, and the differences all follow from the answer. `timeout`
+is required and has no unlimited value, because a request that never resolves is a leak
+(`RESEARCH §3.7-G`). `returns` may not be a top-level `t.optional`, because `invoke` reports failure
+as `nil` and an answer that may itself be nil would be indistinguishable from a call that never came
+back (§7). Its reply gets a derived ceiling of its own from `returns`, which is not declarable —
+`maxBytes` exists to police a peer, and on a query the peer is the client asking the question, not
+the server answering it.
+
+It is also **the one class whose handler may yield**, which is what a query is for: a datastore
+read, a `WaitForChild`, an HTTP call. Three things follow. The handler runs on its own thread, so
+the rest of the batch is not waiting on it. It receives a context of its own rather than the shared
+per-player one, which is refreshed out from under anything that yields (§8). And a player's parked
+handlers are a resource they can spend, so `callsInFlight` bounds how many of them one player may
+hold at once.
 
 **`state`** and **`event`** must name their audience. Broadcasting everything to everyone is how
 positional data leaks to wallhacks; making the recipient set a declaration rather than a call
@@ -239,8 +407,9 @@ export type function Trusted(payload)     -- T otherwise
 ```
 
 Only three things produce `Trusted<T>`: a `command` handler, a `query` handler, and
-`nw.validate(schema, value)`. **There is no `nw.untrust`.** An unwrap function would be used
-reflexively and the brand would become decoration.
+`nw.validate(schema, value)` — plus an explicit cast for server-authored data. **There is no
+`nw.untrust`.** An unwrap function would be used reflexively and the brand would become
+decoration; a cast has to be written out, which is why it is the escape hatch.
 
 ```lua
 local function giveItem(player: Player, request: nw.Trusted<{ id: number, count: number }>) end
@@ -254,17 +423,66 @@ end)
 ~~The example above used `data = t.u8` and a `Trusted<number>` parameter.~~ It could not have
 worked, for the reason just given. A channel whose payload you intend to brand carries a struct.
 
+### What `Trusted<T>` actually asserts
+
+Not "this data is well-formed" — the codec already guaranteed that. By the time a handler runs, a
+`t.u8(0, 100)` field **is** in 0..100; anything else was refused at the `parse` stage and the
+handler was never called. `Untrusted<T>` does not mean unvalidated.
+
+It means: **the server has not taken responsibility for this value.** The hazard is authorization
+confusion, not malformed data. Both producers confer trust on that reading — a `command` handler
+because a policy ran and allowed it, `nw.validate` because the caller ran a check and wrote the
+failure branch. A `signal` payload is structurally perfect and nobody vouched for it.
+
+### The tag is required
+
+~~`Untrusted<T>` is deliberately a subtype of `T`, and only three things produce `Trusted<T>`.~~
+The first half stands; **the second was false until M3 phase 3.** The tag was
+`{ __nwTrusted: true? }`, and an optional property is one a table literal is inferred to satisfy by
+not having it:
+
+```lua
+giveItem({ screen = 1 })                        -- compiled
+giveItem({ screen = untrusted.screen })         -- compiled
+```
+
+The second line is the one that matters. The brand is on the container, so taking an untrusted
+payload apart and putting it back together laundered it, in a line a programmer writes without
+thinking. Making the property required rejects both; `tests/api_reject.luau` cases 16 and 17 are
+those two lines, and cases 13 and 18 pin the two brands separately so neither can quietly become
+`any`.
+
+`Trusted<T>` is still a subtype of `T`, so reading fields, logging and arithmetic work with no
+ceremony — that has not changed and is what a wrapper would have cost.
+
+**The price** is a type that asserts a field the runtime has not got: `__nwTrusted` reads `nil`
+where the type promises `true`. A phantom on a name nobody reads, against a wrapper that would have
+misdescribed the entire value and allocated one per packet.
+
+**Server-authored data uses a cast**, `(value :: any) :: nw.Trusted<T>`, pinned in
+`tests/api_ok.luau`. Deliberately a cast rather than an `nw.trust()` helper, for the same reason
+there is no `nw.untrust`: a function gets reached for reflexively and a cast does not.
+
 ### The limits, stated plainly
 
 **A scalar payload is unbranded.** `Trusted<number>` *is* `number`, and the type says so rather
-than pretending to a guarantee Luau cannot express. Wrap a scalar in a one-field struct if the
-brand matters on that channel — which is also the shape that survives adding a second field later.
+than pretending to a guarantee Luau cannot express. `number & { tag }` normalises to `never`, which
+would satisfy every parameter rather than none. Wrap a scalar in a one-field struct if the brand
+matters on that channel — which is also the shape that survives adding a second field later.
 
-**Enforcement is opt-in on the game's side.** Luau is structurally typed, so a value usable as `T`
-is accepted anywhere `T` is. `Untrusted<T>` is deliberately a subtype of `T` — that is what makes
-field access, logging and UI work without ceremony — and the price is that it also satisfies an
-un-annotated `f(x: T)`. Functions that carry authority have to declare `Trusted<T>`. netweave
-cannot make that automatic, and claiming otherwise would be false. Deciding which of your
+**Reading a field escapes the brand, and no encoding fixes that.** `untrusted.amount` is a plain
+`number`, because a scalar cannot carry the tag. Taint does not propagate into fields and cannot be
+made to. The brand catches confusion about a *payload*; it cannot catch confusion about a number
+that came out of one.
+
+**A spelled-out forgery still compiles.** `giveItem({ screen = 1, __nwTrusted = true })`
+type-checks. That is the cast escape hatch wearing a different hat, and the difference from the old
+behaviour is the one that counts: a forgery you have to write is one a reviewer sees and `grep`
+finds, where an omitted optional property was invisible.
+
+**Enforcement is opt-in on the game's side.** Luau is structurally typed, so `Untrusted<T>`
+satisfies an un-annotated `f(x: T)`. Functions that carry authority have to declare `Trusted<T>`.
+netweave cannot make that automatic, and claiming otherwise would be false. Deciding which of your
 functions are authoritative is the discipline this library is selling, so requiring it to be
 written down is acceptable.
 
@@ -272,8 +490,13 @@ written down is acceptable.
 the module defining it does not reference anywhere reduces to `any` for a module that requires it,
 with no diagnostic — so `nw.Trusted<T>` would keep compiling and stop meaning anything. This is
 guarded in `src/api/Trust.luau` by two local aliases whose only job is to be that reference, and in
-`src/api/View.luau` by `Views<D>`. `tests/api_reject.luau` is what would catch a regression:
-its count would drop, and `analyze` fails on that. See `spike/declare/README.md` Q5.
+`src/api/View.luau` by `Views<D>`. `tests/api_reject.luau` is what would catch a regression: its
+count would drop, and `analyze` fails on that. See `spike/declare/README.md` Q5.
+
+**Four places build the tag and they cannot share code.** A `type function` body sees only the
+`types` library, so `src/api/View.luau` builds its own copy of what `src/api/Trust.luau` builds.
+`tests/api_ok.luau` asserts they agree by assigning one to the other; changing one side alone fails
+it, which was verified rather than assumed.
 
 *(The alternative — typing `Untrusted<T>` as a table with arithmetic metamethods while it is a
 bare number at runtime — buys automatic rejection at the cost of a type that lies about the
@@ -300,6 +523,51 @@ combat.fireWeapon:send(shot)
 combat.playerState:listen(function(state) end)
 local loadout, failure = combat.getLoadout:invoke(0)
 ```
+
+### What `invoke` returns
+
+`(R?, string?)` — the answer, or `nil` and a reason. Decided in M3 phase 4, against a shared plan
+that asked for `nil` not to mean failure.
+
+The objection to `nil` is real in general: it conflates "failed" with "returned nothing". It does
+not apply here, because **a query's `returns` may not be a top-level `t.optional`**. That is
+refused at the declaration, where the fix is one line the author writes once:
+
+```lua
+returns = t.struct({ found = t.boolean, value = t.optional(...) })
+```
+
+With that rule in force `nil` is unambiguous, and the alternatives cost more than they buy:
+
+| Shape | Cost |
+|---|---|
+| `(R?, string?)` | none; `R?` cannot be used without a nil check under the solver netweave requires |
+| `{ ok, value } \| { ok, reason }` | a table per call, to buy narrowing that `if not answer then` already gives |
+| raise on failure | a refused query is an ordinary outcome, not an exception (G4) |
+| `(boolean, R \| string)` | the caller cannot narrow a union off a separate boolean, so every call site casts |
+
+The failure cannot be ignored, and the type system is what enforces that rather than a convention:
+`local loadout = getLoadout:invoke(0)` types `loadout` as `Loadout?`, and reading a field off it is
+a diagnostic. That is the same bargain §7 makes for direction — a guarantee that is a type error or
+it is nothing.
+
+**The reason is netweave's own words, never the server's.** A refusal's reason names the policy and
+sometimes the player, and it goes to the observer on the server. What crosses the wire is a status
+code (`WIRE-FORMAT.md` §2), and the caller sees a sentence built from that code plus, for a
+timeout, the deadline it missed. Sending the real reason back would publish the authorization model
+to the machine it exists to distrust, one denied request at a time.
+
+**Every way a call can end resolves the caller.** A refusal, a raising policy, a raising handler, an
+answer that will not encode, a missing handler, a full call budget, a rate refusal, an answer the
+pending-set ceiling discarded, and a deadline — nine failure paths, each of which resumes the parked
+thread, and each with a reason describing what actually happened rather than defaulting to the
+timeout's wording. Blink and Zap resolve none of them: they have no timeout at all, so a peer that
+does not answer parks the caller for the session (`RESEARCH §3.7-G`).
+
+**How many calls may be open** is `callsInFlight`, and it is one number read from both ends. On the
+server it bounds the threads one player can have parked inside slow handlers; on the caller it
+bounds the answers one game may be waiting for. They are the same number because they count the
+same player from either side.
 
 ~~`.server` and `.client` need to map each key of the declaration to a different channel type,
 and Luau has no mapped types, so one of two fallbacks is required.~~
@@ -343,6 +611,28 @@ them to ignore those is worse than telling them to turn the solver on.
 `ctx` reaches every policy and every handler, so it must not be allocated per packet — that
 would break the zero-hot-path-allocation criterion on day one (`RESEARCH §3.6-A4`, `§3.6-B4`).
 
+### What a handler sees, and the one field that is `unknown`
+
+A `:listen` handler's `ctx` is a table the view builds, so `ctx.now` is a `number`, `ctx.channel` a
+`string`, and `ctx.playr` is a typo the analyser catches. `player`, `character` and `humanoid` are
+`unknown`, because a `type function` body has only the `types` library and no way to reach `Player`,
+`Model` or `Humanoid`. They pass anywhere `unknown` is accepted — `publish(ctx.player, ...)` is the
+common case and works — and take a cast anywhere it is not:
+
+```lua
+local player = ctx.player :: Player
+```
+
+~~The whole context was `unknown`.~~ **Until M3 phase 7**, which is worse than it sounds: a handler
+could neither read through it nor annotate it, because `Ctx` is not a supertype of `unknown` and
+`function(ctx: nw.Ctx, shot)` was rejected outright. Nothing caught it, because every handler in the
+suite was written `function(_ctx, ...)` and none of them wanted the context. Writing the worked
+example is what found it — `ctx.player` is the first thing a real handler reaches for.
+
+A **policy** is a plain function typed `(ctx: Ctx, value: T) -> Verdict`, so `nw.Ctx` annotates
+normally there, and the example above does. The asymmetry is not a design; it is what a type
+function can and cannot name.
+
 **One `ctx` per player, fields refreshed in place, valid only for the synchronous duration of
 the handler.** Retaining it is a defect:
 
@@ -366,11 +656,121 @@ and the failure Warp demonstrates by silently blackholing players (`§3.7-K`).
 ```lua
 nw.observe(function(rejection)
     -- channel, player, stage, reason, bytes
-    -- stage: "parse" | "budget" | "authorize"
+    -- stage: "parse" | "budget" | "authorize" | "handler"
+    --      | "queue" | "send" | "protocol" | "query"
 end)
 ```
 
-## 10. Open
+`query` is the caller's side of a request that produced no answer — a timeout, or a refusal the
+server sent back as a code. It is not a duplicate of the stage that made the refusal: that one
+fired on the server with the real reason, and this one fires on the end that was waiting, which is
+the end that has to decide what to do next.
+
+### 9.1 Observed by default
+
+~~`nw.observe` is the only way to find out.~~ **Corrected.** M2 shipped six rejection stages and
+returned early from `emit` when nothing was observing, so a game that attached no observer got
+silent drops at all six — the failure `§3.7-K` faults Warp for, rebuilt with extra steps. netweave
+now writes to the console by default and goes quiet on its own: one channel and stage prints three
+times and then says it is suppressed. Observers are unaffected and always receive everything.
+
+Because the console goes quiet, `nw.diagnostics()` is what is left: every refusal since the
+counters were last reset, by channel and then by stage, with a count and the bytes those packets
+carried. It is frozen at every level and built on read rather than kept assembled, so counting a
+refusal stays two increments and a diagnostic screen cannot become a way to reset them. A rule set
+to `"off"` still counts — severity is about output, and a setting that could make refusals vanish
+from a diagnostic screen would be the one thing §10 says a severity must never do.
+
+## 10. Settings
+
+`nw.configure` takes rules in the shape ESLint made familiar, and one thing about it is not like
+ESLint at all.
+
+```lua
+nw.configure({
+    rules = {
+        parse = "warn",       -- default
+        budget = "warn",      -- default
+        authorize = "off",    -- default: expected to fire in normal play
+        handler = "error",    -- default: the game's own bug, so with a traceback
+        queue = "warn",
+        send = "warn",
+        protocol = "error",
+        query = "warn",       -- a call that came back without an answer
+        rateUnbounded = "warn",
+    },
+    limits = {
+        queueCapacity = 256,
+        pendingPerBatch = 256,
+        unreliableBytes = 908,
+        repeatsPerDiagnostic = 3,
+        callsInFlight = 16,   -- unanswered queries one player may hold
+    },
+    contextGuard = nil,       -- nil means Studio-only, as before
+})
+```
+
+:::note
+Every field is optional and a call that sets one leaves the rest alone. That was not true until M3
+phase 4: `nw.configure` was typed `<S>(settings: S & Settings)`, which Luau rejects for every
+argument, and no test called it with settings that should work — so the example above did not
+compile and the rejection file's count was counting the bug. `tests/config_ok.luau` is the missing
+half, and the name and value checks now both live in the `CheckedSettings` type function, one
+message per mistake.
+:::
+
+**A severity governs output and never enforcement.** A packet refused at `budget` is refused
+whatever `budget` is set to. There is no setting anywhere in netweave that makes a refused packet
+arrive, a missing policy optional, or an unauthorised sender authorised.
+
+That asymmetry is the whole design. A linter's `off` is safe because a linter only ever reports;
+if `off` here had meant "stop refusing", then the single most copy-pasted artifact in any
+ecosystem — a config block off a forum post — would be a way to delete G1 through G6 from a game
+whose author never read what they pasted. Severities live in `rules`, limits live in `limits`, and
+nothing can cross.
+
+| Severity | On a wire rule | On a declaration rule |
+|---|---|---|
+| `"off"` | silent | the check does not run |
+| `"warn"` | once per channel and stage | reported, and execution continues |
+| `"error"` | **every** occurrence, with a stack | raised |
+
+`"error"` on a wire rule does not raise and **cannot be made to** — that is G4, and
+`Config.raises` answers `false` for every wire rule at every severity rather than leaving it to a
+convention someone has to remember. Only `rateUnbounded` raises, because it fires on the game's own
+declaration, where `CLAUDE.md` §4 says raising is correct.
+
+**`"off"` is discouraged and the caution says why.** Reach for it when a stage fires in normal play
+by design and its log is drowning something else out. Reaching for it because a warning is annoying
+removes the only notice a game gets that it is dropping traffic.
+
+**`rateUnbounded` is the only lint here**, in the ESLint sense of the word: a declaration that is
+legal and probably a mistake. A `rate` above 10,000 packets per second is past anything a client can
+reach, so the channel is effectively unlimited and G2 has been satisfied on paper only.
+`bench/src/shared/Modes/netweave.luau` declares `1e6` and turns the rule off immediately above the
+declaration — a considered exception, written down, which is the shape the rule exists to produce.
+
+Limits are not all read at the same moment. `queueCapacity` is read when a channel's queue is first
+created, so a queue that already exists keeps the depth it was made with; `unreliableBytes` and
+`repeatsPerDiagnostic` are read at the point of use and take effect immediately. Configuring before
+the first channel is declared makes all three behave alike, which is why that is the advice rather
+than the rule. `unreliableBytes` can only be *lowered*: 908 is Roblox's ceiling, not netweave's
+preference (`§3.7-F`).
+
+**Two layers check a settings table, and they catch different things.** `Settings` catches the
+values — a severity that is not one of the three, a limit that is not a number, a `contextGuard`
+that is not a boolean. It cannot catch a *name*, because width subtyping accepts extra properties
+and `{ rules = { handlers = "warn" } }` satisfies a type with no `handlers`. So `nw.configure` also
+carries `CheckedSettings`, a `type function` that reads `properties` and refuses an unknown rule,
+limit or section at the call site with the same message the runtime would have given — the answer
+§4 already uses for channel specs. A misspelled rule is the case that matters: it reads as
+"configured" while the default silently stays in force.
+
+`nw.config.snapshot()` returns what is in force, frozen at every level, so a diagnostic screen
+cannot become a way to reconfigure the library by accident. `nw.config.describe()` lists every rule
+with its default, whether it is a wire rule, and one line on what it reports.
+
+## 11. Open
 
 1. ~~**Type-inference spike.**~~ **Answered** in `spike/inference/`. `type function` gives both
    per-field payload inference and directional views, under `LuauSolverV2`. See §7.

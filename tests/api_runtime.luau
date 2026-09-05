@@ -230,7 +230,7 @@ do
 
 	refuses("all with no policies", function()
 		(nw.all :: any)()
-	end, "at least one")
+	end, "was given none")
 
 	refuses("all with something that is not a policy", function()
 		(nw.all :: any)(double, function() end)
@@ -520,17 +520,21 @@ do
 
 	refuses("a handler that is not a function", function()
 		client.blast:listen(42)
-	end, "needs a function")
+	end, "takes the function that runs per packet")
 
-	--[[ M1 declares; M2 moves bytes. A `send` that silently did nothing would make this milestone's
-	     tests pass and every integration fail in a way that looks like packet loss. ]]
+	--[[ A `send` that silently did nothing would make this file pass and every integration fail in a
+	     way that looks like packet loss.
+
+	     ~~The message named the milestone that would land the transport.~~ It named M1 and M2 until
+	     M3 phase 7, which was true when it was written and a lie once the transport shipped; what is
+	     left is the case that can still reach it — netweave required where `game` does not exist. ]]
 	refuses("sending with no transport installed", function()
 		client.ping:send(1)
-	end, "M2")
+	end, "needs a transport")
 
 	refuses("broadcasting with no transport installed", function()
 		server.blast:broadcast(1)
-	end, "M2")
+	end, "Transport.install")
 
 	local sent: { any } = {}
 
@@ -623,6 +627,77 @@ end
 
 Namespace.reset()
 Observer.reset()
+
+-- ---------------------------------------------------------------------------------------------
+-- Every channel carries a byte ceiling it did not have to ask for (PLAN-M3 D-5)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local allows = nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+
+	--[[ The point of deriving it: a game that declares nothing still gets a bound, because every
+	     netweave type is bounded and the layout adds them up. `RESEARCH §3.7-F` records that no
+	     surveyed library checks a payload size at all — they would have to ask the author for the
+	     number, and here the schema already knows it. ]]
+	local tight = nw.command({
+		data = t.struct({ origin = t.vector3, seq = t.u16 }),
+		rate = 20,
+		authorize = allows,
+	}) :: any
+
+	equals("a tight schema derives an exact ceiling", tight.maxBytes, 14)
+
+	local loose = nw.command({ data = t.array(t.u8), rate = 20, authorize = allows }) :: any
+
+	equals("an unbounded array derives the most its prefix can express", loose.maxBytes, 65537)
+
+	--[[ The case a declaration is for: the type allows sixty-four kilobytes because the array has
+	     no bound, and the game never sends more than three hundred. Declaring the smaller number
+	     turns a theoretical ceiling into a real one. ]]
+	local tightened = nw.command({
+		data = t.array(t.u8),
+		rate = 20,
+		maxBytes = 300,
+		authorize = allows,
+	}) :: any
+
+	equals("a declaration tightens it", tightened.maxBytes, 300)
+
+	--[[ Fourteen bytes every time, and a ceiling of four is *below* that — so the upper-bound check
+	     does not catch it. It is inert for a different reason: a static payload carries no length
+	     prefix, so there is no claim to check and the ceiling is never consulted. Accepted and
+	     silently ignored until an audit found it. ]]
+	refuses("a ceiling on a statically framed channel", function()
+		nw.command({
+			data = t.struct({ origin = t.vector3, seq = t.u16 }),
+			rate = 20,
+			maxBytes = 4,
+			authorize = allows,
+		})
+	end)
+
+	--[[ The upper bound, on a schema where the check does run. Found by audit: the lower form of
+	     the same mistake — a ceiling below what a static schema always sends — was accepted and then
+	     never consulted, so the author had a limit that did nothing. ]]
+	refuses("a ceiling above what a counted schema can reach", function()
+		nw.command({ data = t.array(t.u8, 0, 10), rate = 20, maxBytes = 5000, authorize = allows })
+	end)
+
+	refuses("a fractional ceiling", function()
+		nw.command({ data = t.array(t.u8), rate = 20, maxBytes = 12.5, authorize = allows })
+	end)
+
+	refuses("a ceiling of zero", function()
+		nw.command({ data = t.array(t.u8), rate = 20, maxBytes = 0, authorize = allows })
+	end)
+
+	--[[ `maxBytes` on an outbound class is a type error, so its case lives in
+	     `tests/api_reject.luau` where a file is allowed to fail analysis. ]]
+end
 
 if failures > 0 then
 	error(`{failures} api assertions failed`)

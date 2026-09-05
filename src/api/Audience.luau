@@ -99,7 +99,12 @@ Audience.owner = table.freeze({
 ]=]
 function Audience.nearby(studs: number): Audience<"subset">
 	if type(studs) ~= "number" or studs ~= studs or studs <= 0 or studs == math.huge then
-		error(`audience.nearby needs a positive finite radius, got {tostring(studs)}`, 2)
+		error(
+			`nw.audience.nearby takes a radius in studs, got {tostring(studs)}. Write the number the `
+				.. `game actually needs — nw.audience.nearby(120) — because it is also the answer to `
+				.. `"how far away can a wallhack read this from".`,
+			2
+		)
 	end
 
 	return table.freeze({
@@ -131,7 +136,12 @@ end
 ]=]
 function Audience.select(chooser: (subject: any) -> { Player }): Audience<"subset">
 	if type(chooser) ~= "function" then
-		error("audience.select needs a function", 2)
+		error(
+			"nw.audience.select takes a function from the subject to a list of players, got "
+				.. typeof(chooser)
+				.. ". Write it as: nw.audience.select(function(subject) return { subject } end).",
+			2
+		)
 	end
 
 	return table.freeze({

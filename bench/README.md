@@ -52,6 +52,23 @@ Studio runs uncapped and measured 200-240 FPS, where 1000/frame is ~138 MB/s of 
 the remote and do not depend on load, so the load only has to separate the libraries on
 framerate. Change it for every mode or not at all.
 
+## Reading the allocation numbers
+
+`encodeBytesPerPacket` and `decodeBytesPerPacket` are medians over sample windows, and each is
+recorded with `...BytesLow`, `...BytesHigh` and `...AllocSamples` beside it. **Read those three
+before quoting the median.**
+
+The collector cannot be stopped in Roblox, so a window it runs inside is discarded, and on a large
+schema most windows are. Measured in M3 phase 9: the `ArrayHeavy` cells survive three to seven
+windows out of twenty-five, and between two runs of the same matrix, libraries whose code had not
+changed by a line moved **19% and 21%** on encode and **37% and 86%** on decode. Every flag cell in
+both runs agreed to the decimal, because their windows are small enough that all of them survive.
+
+So a cell with four samples and a low-to-high spread of a factor is not a number. It was written
+into a milestone plan as a netweave regression before anyone looked at the control group, and the
+same comparison run under lune with one *frame* per window — four hundred usable windows out of four
+hundred, spread of zero — showed the two trees identical to the decimal.
+
 ## What the numbers mean, and do not mean
 
 - Studio play mode is **loopback**. The replication path is real, the network is not. These

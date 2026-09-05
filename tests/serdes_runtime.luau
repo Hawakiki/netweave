@@ -17,7 +17,15 @@
 
 local Buffer = require("../src/codec/Buffer")
 local Serdes = require("../src/codec/Serdes")
+local harness = require("./harness")
 local t = require("../src/types")
+
+--[[ This file measures `Buffer.used()` after every write, so it starts from a buffer it knows is
+     empty. Under lune each suite is its own process and that is free; in Studio they share one, and
+     a suite that ran earlier can leave bytes parked in an `Outbound` — which is exactly what
+     happened, and cost a run's worth of confusion before phase 8's rehearsal caught it. ]]
+Buffer.take()
+Buffer.load(nil)
 
 local failures = 0
 
@@ -415,8 +423,8 @@ do
 	--[[ `Instance.new` does not exist under lune, and the sidecar only preserves order and count,
 	     so a frozen table stands in. Class checking needs a real instance and is covered in the
 	     Studio place. ]]
-	local first = table.freeze({}) :: any
-	local second = table.freeze({}) :: any
+	local first = harness.instance("first")
+	local second = harness.instance("second")
 
 	local codec = Serdes.fromSchema(t.struct({ a = t.instance, b = t.instance }))
 	local packed, instances = encode(codec, { a = first, b = second })
@@ -427,6 +435,39 @@ do
 	local decoded = decode(codec, packed, instances)
 	check("the first instance survives", decoded.a == first)
 	check("the second instance survives", decoded.b == second)
+end
+
+do
+	--[[
+		`check` serialises for real — that is the whole design, so that the encoder stays the only
+		statement of what a value must satisfy — and then throws the result away. What it used to
+		fail to throw away was the sidecar: `Buffer.load` restores the count and leaves the entries
+		the trial write appended past it, so every `nw.validate` of a payload carrying an Instance
+		kept a reference to it until some later write happened to reuse that slot.
+
+		Found by an external review (M3 phase 9). `mark`/`rollback` is the pair that clears them,
+		and it is the one the send path already uses for an encode that raised.
+	]]
+	local codec = Serdes.fromSchema(t.struct({ a = t.instance }))
+	local held = harness.instance("held")
+
+	Buffer.load(nil)
+
+	local before = Buffer.save()
+	equals("nothing is parked to begin with", before.instanceCount, 0)
+
+	equals("the value validates", codec.check({ a = held }), nil)
+
+	local after = Buffer.save()
+
+	equals("and the count is back where it started", after.instanceCount, 0)
+	check("with nothing left in the slot past it", after.instances[1] == nil)
+
+	--[[ And a value that fails halfway leaves no more behind than one that passed. ]]
+	check("a bad value is refused", codec.check({ a = 12345 }) ~= nil)
+	check("and holds nothing either", Buffer.save().instances[1] == nil)
+
+	Buffer.load(nil)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -442,6 +483,33 @@ refuses("a missing struct field", t.struct({ a = t.u8, b = t.u8 }), { a = 1 })
 refuses("an array of the wrong exact length", t.array(t.u8, 4), { 1, 2, 3 })
 refuses("an array above its bound", t.array(t.u8, 0, 2), { 1, 2, 3 })
 refuses("a string above its bound", t.string(0, 4), "toolong")
+
+--[[
+	Everything below passed the encoder until M3 phase 9, and `nw.validate` decides "this value
+	conforms" by running the encoder — so each of these was a value branded `Trusted<T>` while
+	failing the schema it was checked against.
+
+	The boolean writer tested truthiness, so `"false"` went on the wire as `true`. The instance
+	writer tested only non-nil. The integer writers checked the range and let `buffer.writeu8`
+	truncate the fraction, which with an offset is not even truncation: `-0.4` on
+	`t.i16(-100, 100)` stored as `99` and read back as `-1`.
+]]
+refuses("a string where a boolean was declared", t.boolean, "false")
+refuses("a number where a boolean was declared", t.boolean, 0)
+refuses("nil where a boolean was declared", t.boolean, nil)
+refuses("a number where an instance was declared", t.instance, 12345)
+refuses("a table with no IsA where an instance was declared", t.instance, {})
+refuses("a fraction where a u8 was declared", t.u8, 3.7)
+refuses("a fraction inside an offset range", t.i16(-100, 100), -0.4)
+refuses("a fraction inside a plain range", t.u16(0, 1000), 500.5)
+
+--[[ And the floats still take fractions, which is the whole point of declaring one. ]]
+do
+	local codec = Serdes.fromSchema(t.f32(-90, 90))
+	local packed = encode(codec, 12.5)
+
+	equals("a float takes a fraction", decode(codec, packed), 12.5)
+end
 
 -- ---------------------------------------------------------------------------------------------
 -- Decode survives a hostile sender
@@ -662,6 +730,108 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------------------------
+-- A claim is not paid for until it is honoured (PLAN-M3 D-4)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		`arrayReader` allocated `table.create(count)` from the wire's claimed count before reading a
+		single element, so a two-byte packet claiming 65535 bought a 65535-slot table. The packet
+		was then correctly *rejected* — the rejection was free, the allocation was not.
+
+		A source comment on that line read "the length was already bounded, so this is a cost
+		question, not a safety one". It is struck through in `PLAN-M3` D-4: a cost an attacker
+		controls and does not pay for is an amplification. At 0.17 ms per hostile packet and roughly
+		five bytes to express one, a single 900-byte batch bought about 31 ms of decode.
+
+		Zap has the same shape (`_refsrc/zap/zap/src/irgen/des.rs:298`) and no bounds check on its
+		buffer reads at all, so the equivalent packet there raises and takes the whole batch. The
+		half netweave already had right was the recovery; this is the half it did not.
+	]]
+	local codec = Serdes.fromSchema(t.array(t.u8))
+
+	local hostile = buffer.create(2)
+	buffer.writeu16(hostile, 0, 65535)
+
+	Buffer.beginRead(hostile, nil)
+	local value, failure = codec.read()
+
+	equals("a claim past the packet decodes to nothing", value, nil)
+	check("and is refused", failure ~= nil)
+	check(
+		"naming the claim rather than the byte it died on",
+		failure ~= nil and string.find(failure, "65535", 1, true) ~= nil
+	)
+
+	--[[
+		The functional assertion above is the test; this is the reason the test exists. The bound is
+		deliberately loose — 20x against a measured 690x — because a timing assertion that is tight
+		is a timing assertion that fails on somebody else's machine.
+	]]
+	local honest = buffer.create(3)
+	buffer.writeu16(honest, 0, 1)
+	buffer.writeu8(honest, 2, 7)
+
+	local function timed(packed: buffer, runs: number): number
+		local start = os.clock()
+
+		for _ = 1, runs do
+			Buffer.beginRead(packed, nil)
+			codec.read()
+		end
+
+		return os.clock() - start
+	end
+
+	timed(honest, 200)
+
+	local honestCost = timed(honest, 2000)
+	local hostileCost = timed(hostile, 2000)
+
+	check(
+		`a refused claim costs about what an honest packet costs (honest {honestCost}, hostile {hostileCost})`,
+		hostileCost < honestCost * 20 + 0.05
+	)
+end
+
+do
+	--[[ The bound is the bytes that remain, not a constant, so a claim that *is* backed by bytes
+	     still decodes. This is the case a naive cap would have broken. ]]
+	local codec = Serdes.fromSchema(t.array(t.u8))
+
+	local honest = buffer.create(302)
+	buffer.writeu16(honest, 0, 300)
+
+	for index = 0, 299 do
+		buffer.writeu8(honest, 2 + index, index % 256)
+	end
+
+	Buffer.beginRead(honest, nil)
+	local value, failure = codec.read()
+
+	equals("a claim the packet can back decodes", failure, nil)
+	equals("with every element", if value then #value else 0, 300)
+	--[[ The three-hundredth element was written as `299 % 256`. ]]
+	equals("in order", if value then value[300] else nil, 43)
+end
+
+do
+	--[[ An element whose size is not known at build time cannot be bounded by multiplication, so
+	     the pre-allocation is capped at the bytes available instead. The claim still fails, and it
+	     still fails without buying memory for it first. ]]
+	local codec = Serdes.fromSchema(t.array(t.string(0, 200)))
+
+	local hostile = buffer.create(2)
+	buffer.writeu16(hostile, 0, 65535)
+
+	Buffer.beginRead(hostile, nil)
+	local value, failure = codec.read()
+
+	equals("a dynamic element claim decodes to nothing", value, nil)
+	check("and is refused", failure ~= nil)
+end
 
 if failures > 0 then
 	error(`{failures} serdes assertions failed`)

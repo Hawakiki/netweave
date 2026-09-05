@@ -1,0 +1,785 @@
+--!strict
+
+--[[
+	The handshake, under lune.
+
+		lune run tests/protocol_runtime
+
+	Two claims are tested here and they pull in opposite directions. The hash has to **move** when
+	anything that decides how bytes are read changes — that is the whole point, and it did not move
+	before M3 phase 5. And it has to **stay still** when something only one side enforces changes,
+	because a hash that moves when the server tunes a rate limit is a hash that forces a client
+	redeploy for a server-side edit, which teaches games to stop tuning rate limits.
+]]
+
+local Batch = require("../src/transport/Batch")
+local Buffer = require("../src/codec/Buffer")
+local Inbound = require("../src/transport/Inbound")
+local Ir = require("../src/codec/Ir")
+local Namespace = require("../src/api/Namespace")
+local Observer = require("../src/api/Observer")
+local Protocol = require("../src/api/Protocol")
+local nw = require("../src/netweave")
+local t = require("../src/types")
+
+local failures = 0
+
+local function fail(message: string)
+	failures += 1
+	print(`FAIL  {message}`)
+end
+
+local function check(name: string, condition: boolean)
+	if not condition then
+		fail(name)
+	end
+end
+
+local function equals(name: string, actual: any, expected: any)
+	if actual ~= expected then
+		fail(`{name}: expected {tostring(expected)}, got {tostring(actual)}`)
+	end
+end
+
+local function differs(name: string, a: any, b: any)
+	if a == b then
+		fail(`{name}: both were {tostring(a)}`)
+	end
+end
+
+local allows = nw.policy(function()
+	return function()
+		return nw.allow()
+	end
+end)
+
+--[[ Declare, seal, take the hash, reset. A channel record carries its qualified name once it is
+     declared, so every case builds its own. ]]
+--[[ The builder returns `any` rather than `{ [string]: any }`: a sealed table literal is not a
+     subtype of an indexer type under the new solver, and every case here is a literal. ]]
+local function hashOf(build: () -> any): number
+	Namespace.reset()
+	Namespace.declare("probe", build())
+
+	local hash = Namespace.protocol().hash
+
+	Namespace.reset()
+	return hash
+end
+
+local function signatureOf(build: () -> any): string
+	Namespace.reset()
+	local declared = Namespace.declare("probe", build())
+	Namespace.seal()
+
+	local names: { string } = {}
+	local byName: { [string]: any } = {}
+
+	for _, channel in declared.channels do
+		table.insert(names, channel.qualified)
+		byName[channel.qualified] = channel
+	end
+
+	table.sort(names)
+
+	local text = Protocol.signature(names, byName)
+
+	Namespace.reset()
+	return text
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The change that used to be invisible
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		One field, `t.u8` to `t.u16`, and nothing else.
+
+		This is D-7's case. Under the name-only hash both sides computed the same number, agreed,
+		and then refused each other on every packet for the rest of the session with nothing saying
+		why. The old hash is recomputed below so the correction is measured rather than asserted.
+	]]
+	local narrow = hashOf(function()
+		return { shot = nw.signal({ data = t.struct({ seq = t.u8 }), rate = 20 }) }
+	end)
+
+	local wide = hashOf(function()
+		return { shot = nw.signal({ data = t.struct({ seq = t.u16 }), rate = 20 }) }
+	end)
+
+	differs("widening one field moves the hash", narrow, wide)
+
+	--[[ The hash netweave used to compute, rebuilt here: FNV-1a over the sorted qualified names.
+	     Both declarations produce the string "probe.shot", so both produce this number. ]]
+	local function overNames(names: { string }): number
+		local text = table.concat(names, "\n")
+		local hash = 2166136261
+
+		for index = 1, #text do
+			hash = bit32.bxor(hash, string.byte(text, index))
+			hash = bit32.band(hash * 16777619, 0xFFFFFFFF)
+		end
+
+		return hash
+	end
+
+	equals(
+		"and the hash it replaced could not tell them apart",
+		overNames({ "probe.shot" }),
+		overNames({ "probe.shot" })
+	)
+end
+
+do
+	--[[ Every other shape of change that reaches the wire. Each pair differs in exactly one thing. ]]
+	local cases: { { name: string, a: () -> any, b: () -> any } } = {
+		{
+			name = "a field renamed",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ seq = t.u8 }), rate = 20 }) }
+			end,
+			b = function()
+				return { s = nw.signal({ data = t.struct({ tick = t.u8 }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "a field added",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ seq = t.u8 }), rate = 20 }) }
+			end,
+			b = function()
+				return { s = nw.signal({ data = t.struct({ seq = t.u8, hp = t.u8 }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "a range narrowed, which narrows the storage",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ n = t.u16 }), rate = 20 }) }
+			end,
+			b = function()
+				return { s = nw.signal({ data = t.struct({ n = t.u16(0, 200) }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "an array bound raised",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ a = t.array(t.u8, 0, 4) }), rate = 20 }) }
+			end,
+			b = function()
+				return { s = nw.signal({ data = t.struct({ a = t.array(t.u8, 0, 5) }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "an enum variant added",
+			a = function()
+				return {
+					s = nw.signal({ data = t.struct({ e = t.enum({ a = true, b = true }) }), rate = 20 }),
+				}
+			end,
+			b = function()
+				return {
+					s = nw.signal({
+						data = t.struct({ e = t.enum({ a = true, b = true, c = true }) }),
+						rate = 20,
+					}),
+				}
+			end,
+		},
+		{
+			name = "an enum variant renamed",
+			a = function()
+				return {
+					s = nw.signal({ data = t.struct({ e = t.enum({ a = true, b = true }) }), rate = 20 }),
+				}
+			end,
+			b = function()
+				return {
+					s = nw.signal({ data = t.struct({ e = t.enum({ a = true, z = true }) }), rate = 20 }),
+				}
+			end,
+		},
+		{
+			name = "a field made optional",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20 }) }
+			end,
+			b = function()
+				return { s = nw.signal({ data = t.struct({ n = t.optional(t.u8) }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "a channel renamed",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20 }) }
+			end,
+			b = function()
+				return { other = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "a channel's class changed",
+			a = function()
+				return { s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20 }) }
+			end,
+			b = function()
+				return { s = nw.intent({ data = t.struct({ n = t.u8 }), rate = 20 }) }
+			end,
+		},
+		{
+			name = "a query's returns changed, with its args untouched",
+			a = function()
+				return {
+					q = nw.query({
+						args = t.u8,
+						returns = t.struct({ v = t.u8 }),
+						rate = 2,
+						timeout = 5,
+						authorize = allows,
+					}),
+				}
+			end,
+			b = function()
+				return {
+					q = nw.query({
+						args = t.u8,
+						returns = t.struct({ v = t.u16 }),
+						rate = 2,
+						timeout = 5,
+						authorize = allows,
+					}),
+				}
+			end,
+		},
+	}
+
+	for _, case in cases do
+		differs(case.name, hashOf(case.a), hashOf(case.b))
+	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- What must not move it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		Server-side policy, all of it. A hash that moved for these would mean a client redeploy every
+		time a rate limit is tuned, which is a good way to make sure rate limits are never tuned.
+	]]
+	local baseline = hashOf(function()
+		return {
+			s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20 }),
+			e = nw.event({ data = t.struct({ n = t.u8 }), audience = nw.audience.everyone }),
+		}
+	end)
+
+	equals(
+		"the rate does not move the hash",
+		hashOf(function()
+			return {
+				s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 500 }),
+				e = nw.event({ data = t.struct({ n = t.u8 }), audience = nw.audience.everyone }),
+			}
+		end),
+		baseline
+	)
+
+	equals(
+		"nor the burst",
+		hashOf(function()
+			return {
+				s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20, burst = 40 }),
+				e = nw.event({ data = t.struct({ n = t.u8 }), audience = nw.audience.everyone }),
+			}
+		end),
+		baseline
+	)
+
+	equals(
+		"nor the audience",
+		hashOf(function()
+			return {
+				s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20 }),
+				e = nw.event({ data = t.struct({ n = t.u8 }), audience = nw.audience.nearby(120) }),
+			}
+		end),
+		baseline
+	)
+
+	equals(
+		"nor whether the channel is unreliable",
+		hashOf(function()
+			return {
+				s = nw.signal({ data = t.struct({ n = t.u8 }), rate = 20, unreliable = true }),
+				e = nw.event({ data = t.struct({ n = t.u8 }), audience = nw.audience.everyone }),
+			}
+		end),
+		baseline
+	)
+
+	--[[ Field order in the literal. Both peers sort before writing (`WIRE-FORMAT.md` §5), so two
+	     declarations that differ only in the order they were typed are the same protocol — and if
+	     they were not, the hash would be a coin flip on table iteration order. ]]
+	equals(
+		"nor the order the fields were written in",
+		hashOf(function()
+			return { s = nw.signal({ data = t.struct({ a = t.u8, b = t.u16, c = t.boolean }), rate = 20 }) }
+		end),
+		hashOf(function()
+			return { s = nw.signal({ data = t.struct({ c = t.boolean, b = t.u16, a = t.u8 }), rate = 20 }) }
+		end)
+	)
+
+	--[[ And the same declaration twice. A hash that is not reproducible is not a handshake. ]]
+	local function twice()
+		return {
+			s = nw.signal({ data = t.struct({ n = t.u8, s = t.string(0, 32) }), rate = 20 }),
+			q = nw.query({
+				args = t.u8,
+				returns = t.struct({ v = t.u16 }),
+				rate = 2,
+				timeout = 5,
+				authorize = allows,
+			}),
+		}
+	end
+
+	equals("the same declarations hash the same", hashOf(twice), hashOf(twice))
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The hand-kept attribute list
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		`Protocol` lists the node attributes that reach the signature rather than walking whatever a
+		`Node` happens to carry, because most of what a node carries is a derived position. A list is
+		the shape that drifts — the phase 4 audit found `Config`'s limit list missing an entry — so
+		this changes each one in turn on a lowered node and asserts the signature notices.
+	]]
+	local attributes: { [string]: any } = {
+		bits = 3,
+		fixedSize = 99,
+		instances = 7,
+		storage = "u32",
+		min = -5,
+		max = 12345,
+		unit = true,
+		class = "BasePart",
+		lengthStorage = "u16",
+		count = 42,
+	}
+
+	local function channelWith(mutate: ((Ir.Node) -> ())?): any
+		local layout = Ir.lower(t.struct({ n = t.u8, s = t.string(0, 32) }))
+
+		if mutate then
+			mutate(layout.root)
+		end
+
+		return {
+			qualified = "probe.s",
+			class = "signal",
+			codec = { layout = layout },
+		}
+	end
+
+	local baseline = Protocol.signatureOf(channelWith(nil))
+
+	for name, value in attributes do
+		local moved = Protocol.signatureOf(channelWith(function(root: Ir.Node)
+			(root :: any)[name] = value
+		end))
+
+		differs(`the signature covers node.{name}`, moved, baseline)
+	end
+
+	--[[ A nested node too, not only the root: the walk has to reach into `fields`. ]]
+	local nested = Protocol.signatureOf(channelWith(function(root: Ir.Node)
+		local fields = root.fields :: { Ir.Field }
+		(fields[1].node :: any).storage = "u32"
+	end))
+
+	differs("and reaches a field's own node", nested, baseline)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The signature is readable
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ A hash that differs says nothing about why. Two peers print this and the line that differs
+	     is the declaration that differs, which is the only affordance a deploy skew needs. ]]
+	local text = signatureOf(function()
+		return { s = nw.signal({ data = t.struct({ seq = t.u16 }), rate = 20 }) }
+	end)
+
+	check("the signature names the channel", string.find(text, "probe.s", 1, true) ~= nil)
+	check("and its class", string.find(text, "signal", 1, true) ~= nil)
+	check("and the field", string.find(text, "seq:", 1, true) ~= nil)
+	check("and the storage that field lowered to", string.find(text, "storage=u16", 1, true) ~= nil)
+	check("and the framing", string.find(text, "static", 1, true) ~= nil)
+
+	equals("hex is eight digits and a prefix", Protocol.hex(0x1a2b3c4d), "0x1a2b3c4d")
+	equals("padded", #Protocol.hex(1), 10)
+end
+
+do
+	--[[ The same text, through the public surface. A signature nobody can reach from `nw` is not an
+	     affordance, and "the hashes do not match" without it is a dead end. ]]
+	Namespace.reset()
+	Namespace.declare("probe", {
+		s = nw.signal({ data = t.struct({ seq = t.u16 }), rate = 20 }),
+	})
+
+	local text = nw.signature()
+
+	check("nw.signature names the channel", string.find(text, "probe.s|signal", 1, true) ~= nil)
+	check("and the storage its field lowered to", string.find(text, "storage=u16", 1, true) ~= nil)
+
+	Namespace.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The control packet
+-- ---------------------------------------------------------------------------------------------
+
+local Ping: any = nil
+local byId: { [number]: any } = {}
+
+do
+	Namespace.reset()
+
+	local declared = Namespace.declare("probe", {
+		ping = nw.signal({ data = t.struct({ seq = t.u8 }), rate = 100 }),
+	})
+
+	Namespace.seal()
+
+	Ping = declared.channels.ping
+	byId[Ping.id] = Ping
+end
+
+type Record = { kind: string, value: any }
+
+local function sinkOf(record: { Record }): Batch.Sink
+	return {
+		resolve = function(id: number): any
+			return byId[id]
+		end,
+
+		answers = true,
+
+		admit = function(): (string?, string?)
+			return nil, "budget"
+		end,
+
+		deliver = function(_channel: any, value: any)
+			table.insert(record, { kind = "deliver", value = value.seq })
+		end,
+
+		reply = function()
+			table.insert(record, { kind = "reply", value = 0 })
+		end,
+
+		hello = function(hash: number)
+			table.insert(record, { kind = "hello", value = hash })
+		end,
+
+		refuse = function(_channel: any?, stage: string, reason: string)
+			table.insert(record, { kind = "refuse", value = `{stage}: {reason}` })
+		end,
+	}
+end
+
+do
+	local record: { Record } = {}
+
+	Buffer.load(nil)
+	Batch.writeHello(0xdeadbeef)
+
+	equals("a hello is a version byte, id 0, a kind, a length and four bytes", buffer.len((Buffer.take())), 8)
+
+	Buffer.load(nil)
+	Batch.writeHello(0xdeadbeef)
+	Batch.writePacket(Ping, { seq = 5 })
+
+	local packed = Buffer.take()
+
+	equals("and it batches with what follows it", buffer.len(packed), 10)
+
+	Batch.read(packed, nil, sinkOf(record))
+
+	equals("two packets came out", #record, 2)
+	equals("the hello first", record[1].kind, "hello")
+	equals("carrying the hash", record[1].value, 0xdeadbeef)
+	equals("and the packet behind it decoded", record[2].value, 5)
+end
+
+do
+	--[[
+		A control kind this build has never heard of.
+
+		Reserved id 0 is meant to carry "whatever v2 needs", and a reserved slot that cannot be
+		extended without breaking every v1 reader is not reserved for anything. The length prefix is
+		what makes the unknown one steppable, so this writes one by hand and checks the batch
+		survives it.
+	]]
+	local record: { Record } = {}
+
+	Buffer.load(nil)
+	Buffer.writeU8(Batch.VERSION)
+	Buffer.writeVarint(0)
+	Buffer.writeU8(99)
+	Buffer.writeVarint(3)
+	Buffer.writeU8(1)
+	Buffer.writeU8(2)
+	Buffer.writeU8(3)
+	Batch.writePacket(Ping, { seq = 6 })
+
+	local packed = Buffer.take()
+
+	Batch.read(packed, nil, sinkOf(record))
+
+	equals("the unknown kind was reported and stepped over", #record, 2)
+	equals("reported", record[1].kind, "refuse")
+	check("naming the kind", string.find(tostring(record[1].value), "control kind 99", 1, true) ~= nil)
+	equals("and the packet behind it still arrived", record[2].value, 6)
+end
+
+do
+	--[[ A control packet whose declared body runs off the end. There is nothing behind it to
+	     resynchronise on, so the batch stops — the same rule as a length that overruns. ]]
+	local record: { Record } = {}
+
+	Buffer.load(nil)
+	Buffer.writeU8(Batch.VERSION)
+	Buffer.writeVarint(0)
+	Buffer.writeU8(Batch.HELLO)
+	Buffer.writeVarint(200)
+	Buffer.writeU32(1)
+
+	local packed = Buffer.take()
+	local survived = pcall(Batch.read, packed, nil, sinkOf(record))
+
+	check("an overrunning control body does not raise", survived)
+	equals("it is refused", #record, 1)
+	equals("at parse", record[1].kind, "refuse")
+	check("naming the overrun", string.find(tostring(record[1].value), "past the batch", 1, true) ~= nil)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Agreement
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local alice = { name = "alice" }
+	local bob = { name = "bob" }
+
+	local announced: { any } = {}
+	local mine = 0x11223344
+
+	local agreement = Protocol.new({
+		hash = function(): number
+			return mine
+		end,
+
+		announce = function(who: any?)
+			table.insert(announced, who)
+		end,
+
+		isServer = true,
+	})
+
+	check("a peer that has said nothing is accepted", agreement.verdict(alice) == nil)
+	equals("and nothing was announced at it", #announced, 0)
+
+	agreement.greet(alice, mine)
+	check("a peer that agrees is accepted", agreement.verdict(alice) == nil)
+	equals("and is not answered", #announced, 0)
+
+	agreement.greet(bob, 0x99999999)
+
+	local verdict = agreement.verdict(bob)
+	check("a peer that disagrees is refused", verdict ~= nil)
+	check("the reason carries their hash", string.find(verdict or "", "0x99999999", 1, true) ~= nil)
+	check("and this one's", string.find(verdict or "", "0x11223344", 1, true) ~= nil)
+	equals("the server answers a mismatch so the other console says so too", #announced, 1)
+	equals("addressed to the peer that got it wrong", announced[1], bob)
+
+	check("and the peer that agreed is untouched", agreement.verdict(alice) == nil)
+
+	--[[
+		A hello flood, which is the cheapest thing a client can send that makes the server work.
+
+		Id 0 is read before `sink.admit` — resolving it would fail, and that failure would be the
+		unrecoverable one — so nothing charges a hello a rate. Every mismatched one used to build a
+		fresh reason and answer with a hello of this peer's own; an external review measured 300 in
+		one 2,101-byte batch costing 300 replies and 76 KB (M3 phase 9). A peer already known to be
+		wrong is not re-judged now, whether it repeats itself or rotates its hash, because the only
+		thing that lifts a refusal is a hash that agrees.
+	]]
+	for index = 1, 300 do
+		agreement.greet(bob, if index % 2 == 0 then 0x99999999 else 0x12345678 + index)
+	end
+
+	equals("three hundred more hellos are answered no more", #announced, 1)
+	check("and the verdict still stands", agreement.verdict(bob) ~= nil)
+	check("naming the hash they first claimed", string.find(verdict or "", "0x99999999", 1, true) ~= nil)
+
+	--[[ A rejoin on a fixed build. The refusal is per peer and is cleared, not sticky. ]]
+	agreement.greet(bob, mine)
+	check("agreeing later clears the refusal", agreement.verdict(bob) == nil)
+
+	agreement.greet(bob, 0x99999999)
+	agreement.forget(bob)
+	check("and leaving clears it", agreement.verdict(bob) == nil)
+end
+
+do
+	--[[ The client's side: one peer, no player, and `nil` is not a table key. ]]
+	local agreement = Protocol.new({
+		hash = function(): number
+			return 7
+		end,
+
+		announce = function()
+			fail("a client must not answer a mismatch; there is nobody it could tell")
+		end,
+
+		isServer = false,
+	})
+
+	agreement.greet(nil, 8)
+	check("the client refuses a server it disagrees with", agreement.verdict(nil) ~= nil)
+
+	agreement.greet(nil, 7)
+	check("and accepts one it agrees with", agreement.verdict(nil) == nil)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Refusal, end to end
+-- ---------------------------------------------------------------------------------------------
+
+do
+	local bob = { name = "bob" }
+	local reported: { string } = {}
+	local delivered: { number } = {}
+
+	Observer.reset()
+	Observer.observe(function(rejection)
+		table.insert(reported, `{rejection.stage}:{rejection.reason}`)
+	end)
+
+	local mine = Namespace.protocol().hash
+
+	local agreement = Protocol.new({
+		hash = function(): number
+			return mine
+		end,
+
+		announce = function() end,
+		isServer = true,
+	})
+
+	local inbound = Inbound.new({
+		resolve = function(id: number): any
+			return byId[id]
+		end,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = true,
+		agreement = agreement,
+	})
+
+	Ping.handler = function(_ctx, value)
+		table.insert(delivered, value.seq)
+	end
+
+	--[[
+		The hello and three payloads, in one batch, from a peer on the wrong build.
+
+		The packets behind the hello are the ones that matter. They are in the same batch, so a check
+		that ran per batch rather than per packet would let all three land — and they would land as
+		well-formed payloads, because a wrong id resolves to a real channel whose schema happens to
+		accept those bytes. That is worse than a decode failure, and it is what D-7 is written
+		against.
+	]]
+	Buffer.load(nil)
+	Batch.writeHello(mine + 1)
+
+	for seq = 1, 3 do
+		Batch.writePacket(Ping, { seq = seq })
+	end
+
+	local packed = Buffer.take()
+	local survived = pcall(inbound.receive, packed, nil, bob)
+
+	check("the batch did not raise", survived)
+	equals("nothing behind the hello was delivered", #delivered, 0)
+	--[[ Four, not three: the hello itself is reported now. Until M3 phase 9 a mismatch was recorded
+	     silently and first surfaced on a data packet behind it, so a peer that sent a hello and
+	     nothing else disagreed with this one forever without either console saying so. ]]
+	equals("the hello and all three behind it were refused", #reported, 4)
+	check("at stage protocol", string.find(reported[1], "protocol:", 1, true) ~= nil)
+	check("with both hashes in the reason", string.find(reported[1], Protocol.hex(mine), 1, true) ~= nil)
+
+	--[[ Once at join, not per packet: a later batch from the same peer is refused from the
+	     recorded verdict, without a second hello and without re-hashing anything. ]]
+	table.clear(reported)
+
+	Buffer.load(nil)
+	Batch.writePacket(Ping, { seq = 9 })
+
+	local later = Buffer.take()
+	inbound.receive(later, nil, bob)
+
+	equals("a later batch is refused too", #reported, 1)
+	equals("and still delivered nothing", #delivered, 0)
+
+	--[[ And the peer on the right build, through the same inbound. ]]
+	local alice = { name = "alice" }
+	table.clear(reported)
+
+	Buffer.load(nil)
+	Batch.writeHello(mine)
+	Batch.writePacket(Ping, { seq = 4 })
+
+	inbound.receive(Buffer.take(), nil, alice)
+
+	equals("a peer that agrees is delivered", #delivered, 1)
+	equals("its payload", delivered[1], 4)
+	equals("with nothing reported", #reported, 0)
+
+	--[[ A peer that never says hello. Accepted, deliberately: the handshake diagnoses deploy skew
+	     and is not an authorization boundary, so refusing a silent peer would cost a real client
+	     whose hello was lost and gain nothing against one that simply omits it. ]]
+	local carol = { name = "carol" }
+
+	Buffer.load(nil)
+	Batch.writePacket(Ping, { seq = 8 })
+	inbound.receive(Buffer.take(), nil, carol)
+
+	equals("a silent peer is accepted", #delivered, 2)
+	equals("its payload", delivered[2], 8)
+
+	Ping.handler = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+
+Namespace.reset()
+
+if failures > 0 then
+	error(`{failures} protocol assertions failed`)
+end
+
+print("OK      protocol_runtime")
+
+return true

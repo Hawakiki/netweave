@@ -225,6 +225,33 @@ control.OnServerEvent:Connect(function(player, command, mode, schema)
 	end
 end)
 
+--[[ The ends of the surviving windows. A median with no spread beside it cannot be checked, and on
+     `ArrayHeavy` it was wrong by 86% in a run where nothing under test had changed
+     (`bench/src/shared/Alloc.luau`). ]]
+local function low(values: { number }): number?
+	local smallest: number? = nil
+
+	for _, value in values do
+		if smallest == nil or value < smallest then
+			smallest = value
+		end
+	end
+
+	return smallest
+end
+
+local function high(values: { number }): number?
+	local largest: number? = nil
+
+	for _, value in values do
+		if largest == nil or value > largest then
+			largest = value
+		end
+	end
+
+	return largest
+end
+
 local function median(values: { number }): number?
 	if #values == 0 then
 		return nil
@@ -266,6 +293,12 @@ local function snapshot(mode: string, schema: string): any
 		wireBytes = if tap then bytes else nil,
 		wireCalls = if tap then calls else nil,
 		decodeBytesPerPacket = median(cell.allocSamples),
+		--[[ The spread, for the same reason the encode side records one: on `ArrayHeavy` two
+		     libraries whose code had not changed moved 37% and 86% between two runs of this matrix,
+		     and a median on its own cannot say which of its numbers to believe
+		     (`bench/src/shared/Alloc.luau`). ]]
+		decodeBytesLow = low(cell.allocSamples),
+		decodeBytesHigh = high(cell.allocSamples),
 		decodeAllocSamples = #cell.allocSamples,
 	}
 end

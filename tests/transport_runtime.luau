@@ -16,41 +16,51 @@
 
 local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
+local Channel = require("../src/api/Channel")
 local Buffer = require("../src/codec/Buffer")
+local Config = require("../src/api/Config")
+local Context = require("../src/api/Context")
 local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
 local Observer = require("../src/api/Observer")
 local Outbound = require("../src/transport/Outbound")
 local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
+local harness = require("./harness")
 local t = require("../src/types")
 
-local failures = 0
+--[[
+	The sections below are tagged failure- or success-path, and the file declares a floor
+	(`PLAN-M3` D-10).
 
-local function fail(message: string)
-	failures += 1
-	print(`FAIL  {message}`)
-end
+	The tag is per section because that is the granularity these tests are written at. A G5 case
+	crafts one bad packet among three and then asserts three things: the bad one was refused, the
+	other two arrived, and the batch did not stop. All three are assertions about **failure
+	isolation** — the middle one asserts a success but tests what happens when something goes wrong,
+	and calling it success-path would be reading the assertion instead of the test.
 
-local function check(name: string, condition: boolean)
-	if not condition then
-		fail(name)
-	end
-end
-
-local function equals(name: string, actual: any, expected: any)
-	if actual ~= expected then
-		fail(`{name}: expected {tostring(expected)}, got {tostring(actual)}`)
-	end
-end
+	What is genuinely success-path is here too, and is tagged so: framing arithmetic, the fan-out,
+	the audience resolution, the coalescing. Those are the file's other half and the reason its floor
+	is not the 0.95 `budget_runtime` declares.
+]]
+local suite = harness.suite("transport_runtime", 0.5)
+local check, equals, fail = suite.check, suite.equals, suite.fail
 
 --[[ A channel is a plain record to this layer: an id and a codec. Building them by hand rather
      than through `nw.namespace` keeps these tests about the envelope. ]]
-local function channelOf(id: number, descriptor: any): any
+local function channelOf(id: number, descriptor: any, class: string?): any
+	--[[ The direction flags come from `Channel`, not from a copy of the rule here: the receive path
+	     refuses a packet on a channel this peer sends on (G6 on the wire, `PLAN-M3` phase 9), and a
+	     test that decided the answer for itself would keep passing after the rule moved. ]]
+	local fromClient, fromServer = Channel.directionOf(class or "signal")
+
 	return {
 		id = id,
 		qualified = `test.c{id}`,
+		class = class or "signal",
 		codec = Serdes.fromSchema(descriptor),
+		fromClient = fromClient,
+		fromServer = fromServer,
 	}
 end
 
@@ -66,7 +76,14 @@ for _, channel in { Fixed, Counted, Big, Bounded } do
 end
 
 --[[ A sink that records, so a test can assert on order as well as content. ]]
-type Record = { channel: string?, stage: string?, value: any, bytes: number }
+type Record = {
+	channel: string?,
+	stage: string?,
+	value: any,
+	bytes: number,
+	call: number?,
+	status: number?,
+}
 
 local seen: { Record } = {}
 local denyOn: { [string]: string } = {}
@@ -76,20 +93,39 @@ local sink: Batch.Sink = {
 		return byId[id]
 	end,
 
-	admit = function(channel: any, _bytes: number): string?
-		return denyOn[channel.qualified]
+	--[[ These envelope tests are all request-shaped, so this sink reads like a server. The reply
+	     direction has its own file: `tests/query_runtime.luau`. ]]
+	answers = true,
+
+	admit = function(channel: any, _bytes: number): (string?, string?)
+		return denyOn[channel.qualified], "budget"
 	end,
 
-	deliver = function(channel: any, value: any, bytes: number)
-		table.insert(seen, { channel = channel.qualified, value = value, bytes = bytes })
+	hello = function(hash: number)
+		table.insert(seen, { channel = "control", stage = "hello", value = hash, bytes = 0 })
 	end,
 
-	refuse = function(channel: any?, stage: string, reason: string, bytes: number)
+	deliver = function(channel: any, value: any, bytes: number, call: number?)
+		table.insert(seen, { channel = channel.qualified, value = value, bytes = bytes, call = call })
+	end,
+
+	reply = function(channel: any, call: number, status: number, value: any?, bytes: number)
+		table.insert(seen, {
+			channel = channel.qualified,
+			value = value,
+			bytes = bytes,
+			call = call,
+			status = status,
+		})
+	end,
+
+	refuse = function(channel: any?, stage: string, reason: string, bytes: number, call: number?)
 		table.insert(seen, {
 			channel = if channel then channel.qualified else nil,
 			stage = stage,
 			value = reason,
 			bytes = bytes,
+			call = call,
 		})
 	end,
 }
@@ -103,6 +139,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- Framing
 -- ---------------------------------------------------------------------------------------------
+
+suite.passing()
 
 do
 	equals("a fixed schema frames statically", Fixed.codec.framing, "static")
@@ -161,6 +199,8 @@ end
 -- The length reservation, widened
 -- ---------------------------------------------------------------------------------------------
 
+suite.passing()
+
 do
 	reset()
 
@@ -211,6 +251,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- Isolation — guarantee G5
 -- ---------------------------------------------------------------------------------------------
+
+suite.failing()
 
 do
 	reset()
@@ -338,6 +380,8 @@ end
 -- Budget refusal happens before the payload is read
 -- ---------------------------------------------------------------------------------------------
 
+suite.failing()
+
 do
 	reset()
 
@@ -363,6 +407,8 @@ end
 -- The instance sidecar
 -- ---------------------------------------------------------------------------------------------
 
+suite.passing()
+
 do
 	reset()
 
@@ -379,8 +425,8 @@ do
 
 	equals("a fixed instance count is known", WithInstance.codec.instances, 1)
 
-	local first = { name = "first" }
-	local second = { name = "second" }
+	local first = harness.instance("first")
+	local second = harness.instance("second")
 
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
@@ -402,13 +448,15 @@ do
 	local WithInstance = channelOf(7, t.struct({ who = t.instance, n = t.u8(0, 200) }))
 	byId[7] = WithInstance
 
-	local first = { name = "first" }
-	local second = { name = "second" }
+	local first = harness.instance("first")
+	local second = harness.instance("second")
 
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
 
 	local packed, instances = Buffer.take()
+
+	suite.failing()
 
 	--[[ Corrupt the first packet's `n` past its declared bound, so it is refused after having
 	     been about to consume a sidecar entry. ]]
@@ -435,7 +483,7 @@ do
 
 	equals("a variable instance count is not fixed", Maybe.codec.instances, nil)
 
-	local present = { name = "present" }
+	local present = harness.instance("present")
 
 	Batch.writePacket(Maybe, { who = present :: any, n = 1 })
 	Batch.writePacket(Maybe, { who = nil, n = 2 })
@@ -469,8 +517,8 @@ do
 	local Maybe = channelOf(9, t.struct({ who = t.optional(t.instance), n = t.u8 }))
 	byId[9] = Maybe
 
-	local mine = { name = "mine" }
-	local yours = { name = "yours" }
+	local mine = harness.instance("mine")
+	local yours = harness.instance("yours")
 
 	Batch.writePacket(Maybe, { who = mine :: any, n = 1 })
 	Batch.writePacket(Maybe, { who = yours :: any, n = 2 })
@@ -528,6 +576,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- Outbound
 -- ---------------------------------------------------------------------------------------------
+
+suite.passing()
 
 --[[ A loopback link. Everything the real one does to a `RemoteEvent`, recorded instead. ]]
 type Sent = { reliable: boolean, destination: any, packed: buffer, instances: { any } }
@@ -587,11 +637,15 @@ local roster: Recipients.Roster = {
 }
 
 local function outboundChannel(id: number, descriptor: any, extra: { [string]: any }?): any
-	local channel = channelOf(id, descriptor)
+	local fields: { [string]: any } = extra or {}
+	local channel = channelOf(id, descriptor, (fields.class :: string?) or "signal")
 
-	for key, value in extra or {} do
+	for key, value in fields do
 		channel[key] = value
 	end
+
+	--[[ Set after the copy, because `class` arrives through it. ]]
+	channel.fromClient, channel.fromServer = Channel.directionOf(channel.class)
 
 	return channel
 end
@@ -930,8 +984,100 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- One bad recipient does not starve the others (PLAN-M3 phase 9)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		`flush` saved the record only when the send returned, so a `link.send` that raised left the
+		same bytes parked: the next frame loaded them, sent them, raised again, and the loop never
+		reached the destinations iterated after it. One bad recipient stopped delivery to a subset of
+		players permanently, with an error every frame — and `nw.audience.select` hands back whatever
+		the game returned, so one non-Player entry was enough to reach it.
+
+		Measured before the fix: three frames, `bad` retried each time, `good1` and `good2` sent once
+		and then never again.
+	]]
+	local sent: { any } = {}
+	local bad = { name = "bad" }
+	local badBytes: { number } = {}
+	local failing = true
+
+	local link: Link.Link = {
+		send = function(_reliable, destination, packed, _instances)
+			if destination == bad then
+				--[[ Fails once, then works. A recipient that only ever fails cannot tell the two
+				     bugs apart: the `pcall` alone stops the *other* destinations being starved, and
+				     it takes a recipient that recovers to show whether the failed frame's bytes were
+				     still parked waiting to be sent again. ]]
+				if failing then
+					error("FireClient raised for this recipient")
+				end
+
+				table.insert(badBytes, buffer.len(packed))
+			end
+
+			table.insert(sent, destination)
+		end,
+
+		sendAll = function() end,
+		receive = function() end,
+	}
+
+	local out = Outbound.new(link, roster)
+	local channel = outboundChannel(95, t.struct({ a = t.u8 }), { class = "event" })
+	byId[95] = channel
+
+	local reported: { string } = {}
+
+	Observer.reset()
+	Observer.observe(function(rejection)
+		table.insert(reported, rejection.stage)
+	end)
+
+	for frame = 1, 3 do
+		--[[ The first frame raises for `bad`; every frame after it succeeds. ]]
+		failing = frame == 1
+
+		out.push(channel, bad, { a = 1 })
+		out.push(channel, alice, { a = 2 })
+		out.push(channel, bob, { a = 3 })
+
+		out.flush()
+	end
+
+	local reached: { [any]: number } = {}
+
+	for _, destination in sent do
+		reached[destination] = (reached[destination] or 0) + 1
+	end
+
+	equals("alice got all three frames", reached[alice], 3)
+	equals("and so did bob", reached[bob], 3)
+	equals("the failure was reported once, on the frame it happened", #reported, 1)
+	equals("at the send stage", reported[1], "send")
+
+	--[[ Two frames after the failing one, each carrying exactly one packet. Before the fix the
+	     record still held the raised frame's bytes, so the next flush sent them again — the same
+	     packet delivered twice, and growing every frame the send kept failing. ]]
+	equals("the recovered recipient got the two frames after it", #badBytes, 2)
+	equals("the first carrying one packet and not two", badBytes[1], badBytes[2])
+
+	byId[95] = nil
+	Observer.reset()
+end
+
+suite.passing()
+
+-- ---------------------------------------------------------------------------------------------
 -- Inbound
 -- ---------------------------------------------------------------------------------------------
+
+suite.passing()
 
 local function inboundOf(isServer: boolean, deny: { [string]: string }): (Inbound.Inbound, { string })
 	local reported: { string } = {}
@@ -992,6 +1138,8 @@ end
 
 do
 	reset()
+
+	suite.failing()
 
 	--[[ A policy that denies stops the handler and reports at the authorize stage. The packet
 	     decoded and was in budget; what refused it was the game's own rule. ]]
@@ -1088,8 +1236,112 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Yielding handlers resume in whatever order their waits finish (PLAN-M3 phase 9)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		The pending lists were indexed by a re-entrancy **depth**, which assumes claims and releases
+		nest. Roblox resumes remote callbacks in whatever order their waits complete, not in nesting
+		order — so a batch that yields second and finishes first put `depth` back while another loop
+		was still walking the list at that depth, and the next batch claimed it out from under them.
+
+		Measured before the fix: bob loses two packets with no report, and his resumed loop raises
+		`attempt to index nil with 'handler'` — an `error()` on the receive path, from ordinary
+		traffic, on any channel whose handler yields with two players online.
+
+		`transport_runtime` already covered two batches resumed in nesting order, which is the one
+		interleaving that worked.
+	]]
+	local channel = outboundChannel(90, t.struct({ n = t.u8 }), { class = "signal" })
+	byId[90] = channel
+
+	local delivered: { string } = {}
+	local parked: { thread } = {}
+	local yielding = true
+
+	channel.handler = function(ctx: any, value: any)
+		table.insert(delivered, `{tostring(ctx.player.name)}:{value.n}`)
+
+		if yielding then
+			table.insert(parked, coroutine.running())
+			coroutine.yield()
+		end
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ Roblox runs each remote callback on its own coroutine; this is what that looks like. ]]
+	local function arrive(from: any, first: number)
+		reset()
+
+		for index = first, first + 2 do
+			Batch.writePacket(channel, { n = index })
+		end
+
+		local packed = Buffer.take()
+		local thread = coroutine.create(function()
+			inbound.receive(packed, nil, from)
+		end)
+
+		local ok, err = coroutine.resume(thread)
+		check(`the batch from {tostring(from.name)} did not raise on arrival`, ok)
+
+		if not ok then
+			fail(`  {tostring(err)}`)
+		end
+	end
+
+	arrive(alice, 1)
+	arrive(bob, 4)
+
+	equals("both batches are parked in their first handler", #parked, 2)
+
+	--[[ alice finishes first — the order the depth index did not allow for. ]]
+	yielding = false
+
+	local ok1 = coroutine.resume(parked[1])
+	check("alice's batch resumes and finishes", ok1)
+
+	--[[ A third batch arrives while bob is still parked. Under the depth index this claimed the
+	     very list bob's loop had not finished walking. ]]
+	arrive(carol, 7)
+
+	local ok2, err2 = coroutine.resume(parked[2])
+	check("bob's batch resumes without raising", ok2)
+
+	if not ok2 then
+		fail(`  {tostring(err2)}`)
+	end
+
+	equals("every packet from every batch arrived", #delivered, 9)
+	equals("and nothing was reported lost", #reported, 0)
+
+	local once: { [string]: boolean } = {}
+
+	for _, entry in delivered do
+		check(`{entry} was delivered exactly once`, not once[entry])
+		once[entry] = true
+	end
+
+	for _, expected in { "alice:1", "alice:2", "alice:3", "bob:4", "bob:5", "bob:6" } do
+		check(`{expected} arrived`, once[expected] == true)
+	end
+
+	channel.handler = nil
+	byId[90] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- Intent coalescing
 -- ---------------------------------------------------------------------------------------------
+
+suite.passing()
 
 do
 	reset()
@@ -1148,6 +1400,8 @@ end
 -- ---------------------------------------------------------------------------------------------
 -- The listener-less queue
 -- ---------------------------------------------------------------------------------------------
+
+suite.failing()
 
 do
 	reset()
@@ -1217,6 +1471,152 @@ do
 
 	channel.handler = nil
 	byId[46] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		Under a flood the rejection path allocates nothing — which `Observer` and `Budget` both
+		promise in as many words, and which `Inbound` did not keep.
+
+		The queue-full reason carried `dropped {n} so far`, so it was rebuilt for every dropped
+		packet to print a number three times: the repeat suppression caps the console at three lines
+		per stage, and `nw.observe` sees every rejection and can count them itself. An external
+		review measured a 12,000-packet flood producing 11,744 distinct reason strings (M3 phase 9).
+
+		Counted rather than weighed, because a garbage-collector reading is not a number until it
+		survives re-running (`CLAUDE.md` §9) and this property does not need one: a reason built per
+		packet is a reason that *differs* per packet, and a set does not care how fast the collector
+		is. Two thousand refusals across the three stages a peer can provoke, and the answer is how
+		many different strings came out.
+	]]
+	local channel = outboundChannel(48, t.struct({ a = t.u16 }), { class = "signal" })
+	local server = outboundChannel(49, t.struct({ a = t.u16 }), { class = "event" })
+	local listened = outboundChannel(50, t.struct({ a = t.u16 }), { class = "signal" })
+
+	listened.handler = function() end
+
+	byId[48] = channel
+	byId[49] = server
+	byId[50] = listened
+
+	local distinct: { [string]: boolean } = {}
+	local kinds = 0
+	local refused = 0
+
+	Observer.reset()
+	Observer.observe(function(rejection)
+		refused += 1
+
+		if not distinct[rejection.reason] then
+			distinct[rejection.reason] = true
+			kinds += 1
+		end
+	end)
+
+	local inbound = Inbound.new({
+		resolve = function(id: number): any
+			return byId[id]
+		end,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = true,
+	})
+
+	Config.configure({ limits = { pendingPerBatch = 2, queueCapacity = 8 } })
+
+	for index = 1, 1000 do
+		--[[ Queue-full, because nothing is listening on 48, and the pending ceiling behind it. ]]
+		for _ = 1, 2 do
+			Batch.writePacket(channel, { a = index })
+		end
+
+		--[[ And the direction refusal, which is the cheapest one a peer can provoke: anything at
+		     all on a server-to-client id. ]]
+		for _ = 1, 2 do
+			Batch.writePacket(server, { a = index })
+		end
+
+		--[[ Three on a channel somebody is listening to, against a ceiling of two, for the third
+		     reason. Queued packets never reach it — they take no pending slot, which is the answer
+		     phase 9 examined and kept. ]]
+		for _ = 1, 3 do
+			Batch.writePacket(listened, { a = index })
+		end
+
+		inbound.receive(Buffer.take(), nil, alice)
+	end
+
+	check("the flood was refused", refused > 2000)
+	equals("and it took three reasons to say so", kinds, 3)
+
+	Config.reset()
+	listened.handler = nil
+	byId[48] = nil
+	byId[49] = nil
+	byId[50] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		A queue is the one place a packet outlives the connection that carried it.
+
+		`forget` released the budget, the context, the intent and the call slots and left the queues
+		alone, so a `:listen` attached after a player left ran their commands against a `Player` who
+		is gone — and `Context.acquire` built a fresh record for that departed player to run them
+		against, which nothing would forget a second time. Found by an external review; measured
+		here, where before the fix all six arrived and `got` held alice's three.
+	]]
+	local channel = outboundChannel(47, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[47] = channel
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ Interleaved, because the fix compacts a ring in place and the survivors have to come out in
+	     arrival order rather than in whatever order the compaction wrote them. ]]
+	for index = 1, 3 do
+		Batch.writePacket(channel, { a = index * 2 - 1 })
+		inbound.receive(Buffer.take(), nil, alice)
+
+		Batch.writePacket(channel, { a = index * 2 })
+		inbound.receive(Buffer.take(), nil, bob)
+	end
+
+	inbound.forget(alice)
+
+	local got: { number } = {}
+	local senders: { any } = {}
+
+	channel.handler = function(ctx: any, value: any)
+		table.insert(got, value.a)
+		table.insert(senders, ctx.player)
+	end
+
+	inbound.drain(channel)
+
+	equals("only the peer who is still here is delivered", #got, 3)
+	equals("in arrival order", got[1], 2)
+	equals("still", got[2], 4)
+	equals("and still", got[3], 6)
+	check("and every one of them is theirs", senders[1] == bob and senders[3] == bob)
+	equals("the drop is reported once for the channel", #reported, 1)
+	equals("at the queue stage", reported[1], "queue:test.c47")
+
+	--[[ And the survivors' queue is intact: draining again finds nothing, rather than finding the
+	     three slots the compaction moved out from under. ]]
+	inbound.drain(channel)
+	equals("a second drain has nothing to do", #got, 3)
+
+	channel.handler = nil
+	byId[47] = nil
 	Observer.reset()
 end
 
@@ -1319,12 +1719,423 @@ do
 	Observer.reset()
 end
 
-reset()
+-- ---------------------------------------------------------------------------------------------
+-- A policy is game code, and game code does not get the batch (PLAN-M3 D-1)
+-- ---------------------------------------------------------------------------------------------
 
-if failures > 0 then
-	error(`{failures} transport assertions failed`)
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		M2 wrapped the handler and left `authorize` bare, so a policy that raised took every packet
+		behind it — including other players', once the queue drain crosses senders. That turns the
+		authorization layer into the denial-of-service surface: find one input that trips a game's
+		policy and the traffic batched behind it dies.
+
+		`RESEARCH §3.8-R` is the same failure at the codec layer, which netweave already avoids.
+		This is that discipline applied to the game's own code rather than to a peer's.
+
+		Against the pre-fix code this block reports `receive survived = false` and delivers 0 of 2.
+	]]
+	local channel = outboundChannel(50, t.struct({ a = t.u8 }), {
+		class = "command",
+		authorize = function(_ctx: any, value: any)
+			if value.a == 1 then
+				error("policy blew up")
+			end
+
+			return { ok = true, value = nil, reason = nil }
+		end,
+	})
+
+	byId[50] = channel
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, value.a)
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	Batch.writePacket(channel, { a = 2 })
+	Batch.writePacket(channel, { a = 3 })
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("a raising policy does not reach the receive loop", survived)
+	equals("the packets it did not refuse were delivered", #got, 2)
+	equals("and the first of those is the second packet", got[1], 2)
+	equals("the raise was reported once", #reported, 1)
+	check(
+		"at the authorize stage",
+		reported[1] ~= nil and string.find(reported[1], "authorize:", 1, true) ~= nil
+	)
+
+	channel.handler = nil
+	byId[50] = nil
+	Observer.reset()
 end
 
-print("OK      transport_runtime")
+-- ---------------------------------------------------------------------------------------------
+-- A verdict is `ok == true` or it is a refusal (PLAN-M3 D-2)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		Not truthy. A policy that returns nothing is a policy someone forgot to finish, and the safe
+		reading of an unfinished policy is "no" — this is the one place in netweave where a shrug
+		must not mean yes.
+
+		Against the pre-fix code the `nil` case raises `attempt to index nil` on the receive path,
+		which is a G4 violation reachable from a game's own bug, and `{ ok = "yes" }` is *admitted*
+		because the check was `if not allowed`.
+	]]
+	local shrugs: { { name: string, returns: any } } = {
+		{ name = "nil", returns = nil },
+		{ name = "false", returns = false },
+		{ name = "a number", returns = 0 },
+		{ name = "an empty table", returns = {} },
+		{ name = "a table with no ok", returns = { value = 1 } },
+		{ name = "ok = false", returns = { ok = false } },
+		{ name = "a truthy non-true ok", returns = { ok = "yes" } },
+	}
+
+	for index, shrug in shrugs do
+		local id = 60 + index
+		local channel = outboundChannel(id, t.struct({ a = t.u8 }), {
+			class = "command",
+			authorize = function()
+				return shrug.returns
+			end,
+		})
+
+		byId[id] = channel
+
+		local called = 0
+		channel.handler = function()
+			called += 1
+		end
+
+		local inbound, reported = inboundOf(true, {})
+
+		Batch.writePacket(channel, { a = 1 })
+
+		local packed, instances = Buffer.take()
+		local survived = pcall(function()
+			inbound.receive(packed, instances, alice)
+		end)
+
+		check(`a policy returning {shrug.name} does not raise`, survived)
+		equals(`a policy returning {shrug.name} refuses`, called, 0)
+		equals(`and reports it`, #reported, 1)
+
+		channel.handler = nil
+		byId[id] = nil
+		Observer.reset()
+	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A raising policy does not leak the context (PLAN-M3 D-1)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		`Context.release` was only reached on the paths that returned normally, so a policy that
+		raised left the record's generation unbumped — and a `ctx` retained from that packet stayed
+		*valid* into the next one, reading the next sender's channel and clock through a proxy the
+		guard should have expired.
+
+		That is the wrong-player attribution M2 phase 3 fixed at the batch level, reintroduced one
+		packet at a time by an exception path. The guard is Studio-only, so the leak is invisible in
+		production, where it is also the only place it matters.
+
+		Against the pre-fix code the retained proxy reads packet two's channel instead of raising.
+	]]
+	local guardWas = Context.guarded()
+	Context.setGuarded(true)
+
+	local stashed: any = nil
+
+	local channel = outboundChannel(70, t.struct({ a = t.u8 }), {
+		class = "command",
+		authorize = function(ctx: any, value: any)
+			if value.a == 1 then
+				stashed = ctx
+				error("policy blew up")
+			end
+
+			return { ok = true, value = nil, reason = nil }
+		end,
+	})
+
+	byId[70] = channel
+	channel.handler = function() end
+
+	local inbound = inboundOf(true, {})
+
+	Batch.writePacket(channel, { a = 1 })
+	local first, firstInstances = Buffer.take()
+	pcall(function()
+		inbound.receive(first, firstInstances, alice)
+	end)
+
+	check("the policy stashed a ctx", stashed ~= nil)
+
+	reset()
+	Batch.writePacket(channel, { a = 2 })
+	local second, secondInstances = Buffer.take()
+	pcall(function()
+		inbound.receive(second, secondInstances, bob)
+	end)
+
+	local readable = pcall(function()
+		return (stashed :: any).channel
+	end)
+
+	check("the ctx the raising policy held is expired, not alive on the next packet", not readable)
+
+	Context.setGuarded(guardWas)
+	channel.handler = nil
+	byId[70] = nil
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Every channel has a byte ceiling, and the game declared none of it (PLAN-M3 D-5)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		The ceiling is derived from the schema, so it exists whether or not the author thought to
+		ask for one. `RESEARCH §3.7-F` records that no surveyed library checks a payload size at
+		all, and the reason is that they would have to ask — here the layout adds the bounds up.
+
+		Refused before the payload is decoded, and the batch steps over it: the length prefix is
+		what makes that possible, and it is the length that was wrong.
+	]]
+	local channel = outboundChannel(80, t.array(t.u8), { class = "signal", maxBytes = 4 })
+	byId[80] = channel
+
+	local got: { number } = {}
+	channel.handler = function(_ctx: any, value: any)
+		table.insert(got, #value)
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	Batch.writePacket(channel, { 1, 2 })
+	Batch.writePacket(channel, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
+	Batch.writePacket(channel, { 3, 4 })
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("an oversized packet does not reach the receive loop", survived)
+	equals("the packets under the ceiling were delivered", #got, 2)
+	equals("and the one over it was not", got[2], 2)
+	equals("it was reported once", #reported, 1)
+	check("at the budget stage", reported[1] ~= nil and string.find(reported[1], "budget:", 1, true) ~= nil)
+
+	channel.handler = nil
+	byId[80] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ The layout derives a ceiling for every schema, so the transport always has one to enforce.
+	     That it reaches a declared channel is `tests/api_runtime.luau`; that it is right is here. ]]
+	local channel = outboundChannel(81, t.struct({ origin = t.vector3, seq = t.u16 }), { class = "signal" })
+
+	equals("a tight schema derives an exact ceiling", channel.codec.maxSize, 14)
+	equals("which is what the packet actually costs", channel.codec.fixedSize, 14)
+
+	byId[81] = nil
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A batch cannot hold more than it is allowed to (PLAN-M3 D-6)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		Reading a batch to completion before dispatching any of it is not negotiable — a yielding
+		handler plus a global decode cursor attributes one player's bytes to another (`PLAN-M2`
+		phase 3) — and it means every decoded value in a batch is live at once.
+
+		`bench/RESULTS.md` measured the price: `ArrayHeavy` decode allocation went 1184.8 B to
+		9309.2 B on the same payload, because two hundred decoded values were alive where one had
+		been. The size of that batch is chosen by an untrusted client, which makes it a resource
+		limit rather than a performance note.
+
+		Past the bound the rest of the batch is refused *before* decode, not decoded and dropped:
+		refusing has to stay cheaper than accepting or the limit becomes the amplifier.
+	]]
+	local channel = outboundChannel(85, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[85] = channel
+
+	local delivered = 0
+	channel.handler = function()
+		delivered += 1
+	end
+
+	Config.configure({ limits = { pendingPerBatch = 4 } })
+
+	local inbound, reported = inboundOf(true, {})
+
+	for index = 1, 10 do
+		Batch.writePacket(channel, { a = index })
+	end
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("an oversized batch does not reach the receive loop", survived)
+	equals("only the bound was dispatched", delivered, 4)
+	equals("every packet past it was reported", #reported, 6)
+	check("at the budget stage", reported[1] ~= nil and string.find(reported[1], "budget:", 1, true) ~= nil)
+
+	Config.reset()
+	channel.handler = nil
+	byId[85] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[ The bound is per batch, not a running total: the next batch from the same sender starts
+	     with an empty pending set. A limit that leaked across batches would blackhole a player
+	     after one bad frame, which is the failure `RESEARCH §3.7-K` is about. ]]
+	local channel = outboundChannel(86, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[86] = channel
+
+	local delivered = 0
+	channel.handler = function()
+		delivered += 1
+	end
+
+	Config.configure({ limits = { pendingPerBatch = 2 } })
+
+	local inbound = inboundOf(true, {})
+
+	for _ = 1, 3 do
+		Batch.writePacket(channel, { a = 1 })
+	end
+
+	local first, firstInstances = Buffer.take()
+	inbound.receive(first, firstInstances, alice)
+
+	equals("the first batch delivered its bound", delivered, 2)
+
+	reset()
+
+	for _ = 1, 2 do
+		Batch.writePacket(channel, { a = 1 })
+	end
+
+	local second, secondInstances = Buffer.take()
+	inbound.receive(second, secondInstances, alice)
+
+	equals("and the next batch starts fresh", delivered, 4)
+
+	Config.reset()
+	channel.handler = nil
+	byId[86] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		Nesting cannot evade the ceiling, because the ceiling is on bytes and nesting is paid for in
+		bytes. `t.array(t.array(t.u8, 0, 1000), 0, 1000)` derives 1,002,002 — honest, and useless as
+		a limit — so this is the schema a declared `maxBytes` exists for.
+
+		The measurement that settled the shape of this check: after `PLAN-M3` D-4 bounded a claim by
+		the bytes behind it, a hostile 1000x1000 packet costs **0.0238 us per byte** and an honest
+		packet of the same schema costs **0.0480** — the hostile one is *cheaper per byte*. Decode
+		work is proportional to payload size and no longer amplifiable, so bounding the bytes bounds
+		the work, and a separate per-element counter would charge every honest packet for a threat
+		that no longer exists.
+	]]
+	local nested = outboundChannel(87, t.array(t.array(t.u8, 0, 1000), 0, 1000), {
+		class = "signal",
+		maxBytes = 64,
+	})
+
+	byId[87] = nested
+
+	local delivered = 0
+	nested.handler = function()
+		delivered += 1
+	end
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ Under the ceiling: two inner arrays of ten. ]]
+	Batch.writePacket(nested, { { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }, { 1, 2, 3 } })
+
+	--[[ Over it, by nesting rather than by one long array — which is the evasion the bound has to
+	     be immune to. ]]
+	local wide = {}
+
+	for outer = 1, 20 do
+		wide[outer] = { 1, 2, 3, 4, 5 }
+	end
+
+	Batch.writePacket(nested, wide)
+
+	local packed, instances = Buffer.take()
+	local survived = pcall(function()
+		inbound.receive(packed, instances, alice)
+	end)
+
+	check("a nested payload does not reach the receive loop", survived)
+	equals("the one under the ceiling arrived", delivered, 1)
+	equals("and the one that nested past it did not", #reported, 1)
+	check(
+		"refused at the budget stage",
+		reported[1] ~= nil and string.find(reported[1], "budget:", 1, true) ~= nil
+	)
+
+	equals("the derived ceiling on that schema is honest and useless", nested.codec.maxSize, 1002002)
+
+	nested.handler = nil
+	byId[87] = nil
+	Observer.reset()
+end
+reset()
+
+suite.finish()
 
 return true

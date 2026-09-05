@@ -22,8 +22,13 @@
 ]]
 
 local Batch = require("./Batch")
+--[[ Aliased, because this module already exports a type named `Config` for its own constructor
+     options and two `Config`s in one file is a reading hazard even where Luau permits it. ]]
+local Settings = require("../api/Config")
 local Context = require("../api/Context")
 local Observer = require("../api/Observer")
+local Protocol = require("../api/Protocol")
+local Query = require("./Query")
 
 local Inbound = {}
 
@@ -37,13 +42,25 @@ local Inbound = {}
 	into a memory leak that looks like a networking library, and the packets worth keeping when a
 	handler finally attaches are the recent ones, not the ones from a minute ago.
 ]]
-local QUEUE_CAPACITY = 256
+--[[ A default rather than a constant since M3: `nw.configure` moves it, and it is read when a
+     queue is first created so a game that raises it before declaring gets the queue it asked for.
+     Stored on the queue itself, because changing the limit must not desynchronise the ring
+     arithmetic of a queue that already exists. ]]
+local DEFAULT_QUEUE_CAPACITY = 256
+
+--[[ Constant because a flood is exactly when it is said. It used to carry `dropped {n} so far`,
+     which allocated a string per dropped packet to print a number three times — the repeat
+     suppression caps the console at three lines per stage, and `nw.observe` sees every one and can
+     count them itself (M3 phase 9). ]]
+local QUEUE_FULL = "no handler is attached and the queue is full, so the oldest was dropped. "
+	.. "Attach a :listen, or raise the queueCapacity limit"
 
 type Queue = {
 	values: { any },
 	senders: { any },
 	read: number,
 	count: number,
+	capacity: number,
 	dropped: number,
 }
 
@@ -54,6 +71,13 @@ export type Config = {
 	admit: (channel: any, sender: any?, bytes: number) -> string?,
 	--[[ Server-side handlers receive a context; client-side ones receive the payload alone. ]]
 	isServer: boolean,
+	--[[ Request/response, when this endpoint does any. One record rather than four callbacks: an
+	     endpoint either serves queries or refuses them, and there is no half of it that makes
+	     sense on its own. Absent, a query packet is reported and dropped. ]]
+	queries: Query.Queries?,
+	--[[ Who has agreed on the declarations. Absent, every peer is taken at its word — which is what
+	     a test that is not about the handshake wants. ]]
+	agreement: Protocol.Agreement?,
 }
 
 export type Inbound = {
@@ -62,6 +86,11 @@ export type Inbound = {
 	tick: () -> (),
 	forget: (sender: any) -> (),
 }
+
+--[[ `pcall` of a function whose return pack is empty is typed as returning `boolean` alone, so the
+     error cannot be destructured out of it. The alias widens the pack without changing what runs,
+     and is hoisted so neither guard builds one per batch. ]]
+local read: (...any) -> ...any = Batch.read
 
 --[[ `xpcall` with a shared handler allocates no closure per call. A traceback is worth the string
      because a handler error is a game bug and the line is the whole of the diagnosis. ]]
@@ -88,16 +117,37 @@ end
 	still being consumed. Each pending entry carries its own sender, so nothing is attributed by
 	timing.
 ]]
+--[[
+	`calls` and `statuses` carry the query correlation through the same wait.
+
+	A reply is delivered on the caller's side by resuming a parked thread, and that thread is game
+	code that may yield — so resuming it during the read phase would reintroduce the exact bug this
+	structure exists to prevent, one packet later. A reply waits its turn in the pending list like
+	everything else.
+
+	`statuses` is `-1` for anything that is not a reply, never nil: a stale positive left over from
+	a previous batch would make an ordinary packet dispatch as somebody's answer.
+]]
 type Pending = {
 	channels: { any },
 	senders: { any },
 	values: { any },
 	sizes: { number },
+	calls: { number },
+	statuses: { number },
 	count: number,
 }
 
 local function emptyPending(): Pending
-	return { channels = {}, senders = {}, values = {}, sizes = {}, count = 0 }
+	return {
+		channels = {},
+		senders = {},
+		values = {},
+		sizes = {},
+		calls = {},
+		statuses = {},
+		count = 0,
+	}
 end
 
 --[=[
@@ -110,6 +160,8 @@ function Inbound.new(config: Config): Inbound
 	local resolve = config.resolve
 	local admit = config.admit
 	local isServer = config.isServer
+	local queries = config.queries
+	local agreement = config.agreement
 
 	--[[
 		The sender of the batch currently being **read**.
@@ -123,14 +175,25 @@ function Inbound.new(config: Config): Inbound
 	local queues: { [any]: Queue } = {}
 
 	--[[
-		Pending lists, indexed by re-entrancy depth.
+		Pending lists, held by whoever is walking one.
 
-		At depth one — every ordinary frame — this is the same four arrays reused forever and costs
-		nothing. A deeper entry is allocated only when a handler actually yields and another batch
-		arrives inside it, which is the case that would otherwise have corrupted both.
+		~~Indexed by re-entrancy depth.~~ **That assumed claims and releases nest, and they do not.**
+		Roblox resumes remote callbacks in whatever order their waits complete, not in nesting order,
+		so a batch that yielded second and finished first put the depth back while another loop was
+		still walking the list at that depth — and the next batch to arrive claimed that list out
+		from under it, reset its count, and overwrote the entries it had not reached. Silent loss,
+		then `attempt to index nil with 'handler'` on the receive path from ordinary traffic
+		(`PLAN-M3` phase 9; found by an external review, reproduced in `transport_runtime`).
+
+		A free list has no order to get wrong. A list is taken by a `receive`, `drain` or `tick` that
+		is going to walk it, and given back when that walk ends; two overlapping walks hold different
+		lists because neither has returned its own. The high-water mark is the number of dispatches
+		in flight at once, which is what the depth counter was reaching for and could not express.
+
+		At one batch a frame — every ordinary frame — this is still the same six arrays reused
+		forever and still costs nothing.
 	]]
-	local pool: { Pending } = { emptyPending() }
-	local depth = 0
+	local free: { Pending } = { emptyPending() }
 
 	--[[
 		At most one `intent` per player per tick reaches the handler. Stale input has no value, so an
@@ -149,7 +212,127 @@ function Inbound.new(config: Config): Inbound
 		Observer.emit(if channel then channel.qualified else "?", who, stage, reason, bytes)
 	end
 
-	local function call(channel: any, who: any?, value: any, bytes: number)
+	--[[
+		The policy, and whether it said yes.
+
+		Factored out of `call` because `serveQuery` needs the identical decision on a different
+		thread, and D-1 and D-2 are exactly the kind of rule that gets one of its two copies fixed.
+		The narrowed value is returned rather than assigned through, so neither caller can forget
+		which of the two things a verdict carries.
+	]]
+	local function decide(channel: any, who: any?, ctx: any, value: any, bytes: number): (boolean, any)
+		--[[ Annotated because it is read off an `any` channel and truth-tested, which narrows to a
+		     type that is not callable. ]]
+		local authorize: ((any, any) -> any)? = channel.authorize
+
+		if not authorize then
+			return true, nil
+		end
+
+		--[[
+			A policy is game code, and game code does not get the batch.
+
+			M2 wrapped the handler and left this call bare, which made the authorization layer a
+			denial-of-service surface: one input that trips a game's policy takes every packet
+			batched behind it, and the queue drain crosses senders, so those packets are not
+			necessarily the same player's. `RESEARCH §3.8-R` is this failure at the codec layer,
+			which netweave already avoids; `PLAN-M3` D-1 is the same discipline applied to the
+			game's own code.
+
+			`xpcall` with the module-level `traceback` handler allocates no closure per call.
+		]]
+		local ran, verdict = xpcall(authorize, traceback, ctx, value)
+
+		if not ran then
+			report(channel, who, "authorize", `the policy raised: {tostring(verdict)}`, bytes)
+			return false, nil
+		end
+
+		--[[
+			`ok == true`, not truthy, and only off a table.
+
+			A policy that returns nothing is a policy someone forgot to finish, and the safe
+			reading of an unfinished policy is "no" — this is the one place in netweave where a
+			shrug must not mean yes. The pre-fix check was `if not allowed`, which admitted
+			`ok = "yes"` and raised outright on `nil` (`PLAN-M3` D-2).
+
+			Read out of the shared verdict record before anything else can overwrite it
+			(`src/api/Policy.luau`).
+		]]
+		local shaped = if type(verdict) == "table" then verdict else nil
+
+		if shaped == nil or shaped.ok ~= true then
+			local reason = if shaped then shaped.reason else nil
+
+			report(
+				channel,
+				who,
+				"authorize",
+				reason
+					or (if shaped then "denied" else `the policy returned {typeof(verdict)}, not a verdict`),
+				bytes
+			)
+
+			return false, nil
+		end
+
+		return true, shaped.value
+	end
+
+	--[[
+		One request, from the policy to the answer, on a thread of its own.
+
+		`nw.query` is the only class whose handler is allowed to yield, and that permission forces
+		everything unusual here. It runs off the dispatch loop, so a datastore read does not hold up
+		the rest of the batch or the frame's flush; it gets a detached context, because the shared
+		per-player one is refreshed out from under a handler that yields; and every exit writes a
+		reply, because the caller is parked on a deadline and silence costs it the whole timeout.
+
+		The query record is a parameter rather than an upvalue so that the non-nil narrowing survives
+		into it — this is spawned from a place where the field is still `Queries?`.
+	]]
+	local function serveQuery(
+		serving: Query.Queries,
+		channel: any,
+		who: any,
+		value: any,
+		bytes: number,
+		id: number
+	)
+		local ctx = Context.detached(who, channel.qualified)
+		local allowed, narrowed = decide(channel, who, ctx, value, bytes)
+
+		if not allowed then
+			serving.answer(channel, who, id, Batch.REFUSED, nil)
+			return
+		end
+
+		if narrowed ~= nil then
+			value = narrowed
+		end
+
+		local handler: (...any) -> ...any = channel.handler
+
+		--[[ Attached when the packet was read and gone by the time this ran. `:handle` cannot be
+		     detached, but a namespace can be reset out from under an in-flight call, and calling nil
+		     here would raise on a thread with nobody to catch it. ]]
+		if not handler then
+			serving.answer(channel, who, id, Batch.UNHANDLED, nil)
+			return
+		end
+
+		local ok, result = xpcall(handler, traceback, ctx, value)
+
+		if not ok then
+			report(channel, who, "handler", tostring(result), bytes)
+			serving.answer(channel, who, id, Batch.FAILED, nil)
+			return
+		end
+
+		serving.answer(channel, who, id, Batch.OK, result)
+	end
+
+	local function call(channel: any, who: any?, value: any, bytes: number, id: number)
 		--[[ Annotated so `xpcall` resolves: a handler read off an `any` channel is narrowed to "not
 		     false or nil" by the caller's check, which is not a callable type. ]]
 		local handler: (...any) -> ...any = channel.handler
@@ -166,30 +349,33 @@ function Inbound.new(config: Config): Inbound
 			return
 		end
 
-		local ctx = Context.acquire(who, channel.qualified)
+		if channel.class == "query" then
+			local serving = queries
 
-		--[[ Annotated for the same reason as `handler`: read off an `any` channel and truth-tested,
-		     which narrows to a type that is not callable. ]]
-		local authorize: ((any, any) -> any)? = channel.authorize
-
-		if authorize then
-			local verdict = authorize(ctx, value)
-
-			--[[ Read out of the shared verdict record before anything else can overwrite it
-			     (`src/api/Policy.luau`). ]]
-			local allowed = verdict.ok
-			local narrowed = verdict.value
-			local reason = verdict.reason
-
-			if not allowed then
-				report(channel, who, "authorize", reason or "denied", bytes)
-				Context.release(who)
+			if not serving then
+				report(channel, who, "handler", "this endpoint does not serve queries", bytes)
 				return
 			end
 
-			if narrowed ~= nil then
-				value = narrowed
+			--[[ The slot is taken here, synchronously, rather than on the spawned thread. Taking it
+			     there would run the check after the thread it exists to prevent. ]]
+			if serving.enter(channel, who, id) then
+				serving.spawn(serveQuery, serving, channel, who, value, bytes, id)
 			end
+
+			return
+		end
+
+		local ctx = Context.acquire(who, channel.qualified)
+		local allowed, narrowed = decide(channel, who, ctx, value, bytes)
+
+		if not allowed then
+			Context.release(who)
+			return
+		end
+
+		if narrowed ~= nil then
+			value = narrowed
 		end
 
 		local ok, failure = xpcall(handler, traceback, ctx, value)
@@ -209,24 +395,20 @@ function Inbound.new(config: Config): Inbound
 		reused for the next frame.
 	]]
 	local function claim(): Pending
-		depth += 1
-
-		local list = pool[depth]
-
-		if not list then
-			list = emptyPending()
-			pool[depth] = list
-		end
+		local taken: Pending? = table.remove(free)
+		local list = taken or emptyPending()
 
 		list.count = 0
 		return list
 	end
 
-	local function dispatch(list: Pending)
+	local function walk(list: Pending)
 		local channels = list.channels
 		local senders = list.senders
 		local values = list.values
 		local sizes = list.sizes
+		local calls = list.calls
+		local statuses = list.statuses
 		local count = list.count
 
 		list.count = 0
@@ -235,24 +417,64 @@ function Inbound.new(config: Config): Inbound
 			local channel = channels[index]
 			local who = senders[index]
 			local value = values[index]
+			local id = calls[index]
+			local status = statuses[index]
 
 			channels[index] = nil
 			senders[index] = nil
 			values[index] = nil
 
-			call(channel, who, value, sizes[index])
+			--[[ A status of zero or more is a reply, and a reply resumes a thread instead of calling
+			     a handler. Anything else — including a query *request* — goes to `call`. ]]
+			if status >= 0 then
+				local waiting = queries
+
+				if waiting then
+					waiting.answered(channel, id, status, value)
+				end
+			else
+				call(channel, who, value, sizes[index], id)
+			end
 		end
 
 		--[[
-			The depth is released **after** the loop, not before it.
+			The list goes back **after** the loop, not before it.
 
-			Releasing it first looks harmless — the list has already been drained into locals — and is
-			not: a handler that yields lets the next batch in, and that batch would then `claim` this
-			very list and overwrite the entries this loop has not reached yet. The failure is silent
-			and size-dependent, which is why it survived a first test: the interleaved batch only
-			corrupts the outer one when it is at least as long.
+			Returning it first looks harmless — the entries have already been read into locals — and
+			is not: a handler that yields lets the next batch in, and that batch would then `claim`
+			this very list and overwrite the entries this loop has not reached yet. The failure is
+			silent and size-dependent, which is why it survived a first test: the interleaved batch
+			only corrupts the outer one when it is at least as long.
+
+			A raise inside the loop leaks one list rather than corrupting one, which is the trade the
+			free list buys over the counter it replaced — and `dispatch` below takes even that back.
 		]]
-		depth -= 1
+	end
+
+	--[[
+		Guarantee G4, structurally.
+
+		`walk` calls game code through `call`, which `xpcall`s the policy and the handler, so the
+		raises anyone thought of are already values. The two that broke G4 were the ones nobody
+		thought of — a table in the sidecar, and a pooled list two loops both believed they owned —
+		and both are fixed above. What is not fixed by fixing them is that the *next* one inherits
+		the same shape: a raise here would leave the list unreturned and the rest of the batch
+		undelivered with nothing said.
+
+		So the claim stops resting on inspection. One `pcall` per dispatch, the list returned either
+		way, and a raise that reaches here is reported like any other failure rather than escaping
+		into the remote callback that called it. `PLAN-M3` phase 9.
+	]]
+	local attempt: (...any) -> ...any = walk
+
+	local function dispatch(list: Pending)
+		local ok, failure = pcall(attempt, list)
+
+		table.insert(free, list)
+
+		if not ok then
+			report(nil, nil, "handler", `dispatch raised: {tostring(failure)}`, 0)
+		end
 	end
 
 	--[[
@@ -264,9 +486,12 @@ function Inbound.new(config: Config): Inbound
 		local queue = queues[channel]
 
 		if not queue then
+			local capacity = Settings.limitOf("queueCapacity") or DEFAULT_QUEUE_CAPACITY
+
 			queue = {
-				values = table.create(QUEUE_CAPACITY),
-				senders = table.create(QUEUE_CAPACITY),
+				values = table.create(capacity),
+				senders = table.create(capacity),
+				capacity = capacity,
 				read = 0,
 				count = 0,
 				dropped = 0,
@@ -275,41 +500,246 @@ function Inbound.new(config: Config): Inbound
 			queues[channel] = queue
 		end
 
-		if queue.count == QUEUE_CAPACITY then
+		if queue.count == queue.capacity then
 			--[[ Drop the oldest and step the read cursor past it. Reported once per drop so a
 			     forgotten `:listen` is visible rather than merely quiet. ]]
-			queue.read = (queue.read + 1) % QUEUE_CAPACITY
+			queue.read = (queue.read + 1) % queue.capacity
 			queue.count -= 1
 			queue.dropped += 1
 
-			report(
-				channel,
-				who,
-				"queue",
-				`no handler is attached and the queue is full; dropped {queue.dropped} so far`,
-				bytes
-			)
+			report(channel, who, "queue", QUEUE_FULL, bytes)
 		end
 
-		local slot = (queue.read + queue.count) % QUEUE_CAPACITY
+		local slot = (queue.read + queue.count) % queue.capacity
 		queue.values[slot + 1] = value
 		queue.senders[slot + 1] = who
 		queue.count += 1
 	end
 
+	--[[ One string per class rather than one per packet.
+
+	     This is the reason a hostile peer can provoke most cheaply — send anything at all on a
+	     `state` or `event` id and every packet in the batch lands here — so building it per refusal
+	     would have made the check that stops the flood the thing the flood costs. Six classes, and
+	     `isServer` is fixed for the life of this `Inbound`, so the table cannot grow. ]]
+	local directionReasons: { [string]: string } = {}
+
+	local function directionReason(class: string): string
+		local reason = directionReasons[class]
+
+		if not reason then
+			reason = `{class} is sent by the {if isServer then "server" else "client"}, so nothing `
+				.. `may arrive on it here — netweave guarantee G6, which the declaration enforces at `
+				.. `analysis and this enforces on the wire`
+			directionReasons[class] = reason
+		end
+
+		return reason
+	end
+
 	--[[ The list the read phase is filling. Set for the duration of one `Batch.read`, which cannot
 	     yield, for the same reason `sender` is safe. ]]
-	local filling: Pending = pool[1]
+	local filling: Pending = emptyPending()
+
+	--[[ Set when the pending set fills, cleared when a batch starts. Not a field on `Pending`
+	     because a batch that arrives inside another batch's dispatch has its own, and the outer
+	     one's state is restored around it the way `sender` and `filling` are. ]]
+	local full = false
+	local pendingCeiling = Settings.limitOf("pendingPerBatch")
+
+	--[[
+		The two reasons whose only variable is the ceiling, built when it moves rather than per
+		refusal.
+
+		An external review measured a 12,000-packet flood producing 11,744 distinct reason strings,
+		against an `Observer` and a `Budget` whose comments both promise a refused packet allocates
+		nothing (M3 phase 9). The promise was true of them and false here, which is the worst place
+		for it to be false: the flood is the case the limit exists for, so the limit was paying
+		garbage in proportion to the attack it was refusing.
+
+		The ceiling changes only when the game reconfigures, so this is one interpolation per
+		`nw.configure` rather than one per dropped packet.
+	]]
+	local ceilingReason = ""
+	local ceilingReplyReason = ""
+
+	local function refreshCeiling()
+		local limit = Settings.limitOf("pendingPerBatch")
+
+		if limit == pendingCeiling and ceilingReason ~= "" then
+			return
+		end
+
+		pendingCeiling = limit
+		ceilingReason = `batch holds more than {limit} packets; the rest were dropped`
+		ceilingReplyReason = `the answer arrived in a batch holding more than {limit} packets and `
+			.. `was dropped`
+	end
+
+	refreshCeiling()
+
+	--[[ A query request that was refused before it ever reached a handler. The caller is already
+	     parked on a deadline, so the refusal goes back as a code rather than being left for the
+	     timeout to discover — the difference between a call that fails in a frame and one that
+	     fails in five seconds.
+
+	     Writing during the read phase is safe: `src/codec/Buffer.luau` keeps the incoming cursor and
+	     the outgoing buffer in separate state, and nothing here calls game code. ]]
+	local function decline(channel: any, who: any?, id: number?, status: number)
+		local serving = queries
+
+		if serving and id and isServer and channel and channel.class == "query" then
+			serving.refuse(channel, who, id, status)
+		end
+	end
+
+	--[[
+		An answer, on the side that asked, held until dispatch.
+
+		Resuming the parked thread here would run game code inside the read phase, and the thread it
+		resumes is free to yield — which is the corruption the read-then-dispatch split exists to
+		prevent, arriving through the one path that did not go through a handler.
+	]]
+	local function holdReply(channel: any, id: number, status: number, value: any?, bytes: number)
+		local count = filling.count + 1
+
+		if count > pendingCeiling then
+			full = true
+			report(channel, sender, "budget", ceilingReason, bytes)
+
+			--[[
+				A dropped *reply* is not like a dropped packet, because somebody is waiting for it.
+
+				Reaching here needs `callsInFlight` above `pendingPerBatch`, which is a
+				misconfiguration rather than a hostile peer — but what it produced before M3 phase 4's
+				audit was a five second stall ending in "no answer within 5s", said about an answer
+				that had arrived, decoded, and been thrown away one frame earlier. The caller is told
+				what happened instead, on the next tick, which is later in this same frame.
+			]]
+			local waiting = queries
+
+			if waiting and channel.class == "query" then
+				waiting.abandon(channel, id, ceilingReplyReason)
+			end
+
+			return
+		end
+
+		filling.count = count
+		filling.channels[count] = channel
+		filling.senders[count] = sender
+		filling.values[count] = value
+		filling.sizes[count] = bytes
+		filling.calls[count] = id
+		filling.statuses[count] = status
+	end
 
 	local sink: Batch.Sink = {
 		resolve = resolve,
 
-		admit = function(channel: any, bytes: number): string?
-			return admit(channel, sender, bytes)
+		--[[ The endpoint's side of a query, not the packet's. A server reads requests, a client
+		     reads replies, and neither ever reads the other (`src/transport/Batch.luau`). ]]
+		answers = isServer,
+
+		admit = function(channel: any, bytes: number): (string?, string?)
+			--[[ Once the pending set is full the rest of the batch is refused here, before decode,
+			     rather than decoded and then dropped. Refusing has to stay cheaper than accepting or
+			     the limit becomes the amplifier. ]]
+			if full then
+				return ceilingReason, "budget"
+			end
+
+			--[[
+				A peer whose declarations disagree with this one's is refused **before decode**, and
+				that ordering is the point rather than an optimisation.
+
+				Their ids map to different channels, so their bytes would not fail to decode — they
+				would decode into whatever channel this peer has at that number, and be delivered to
+				its handler as a well-formed payload. A wrong payload arriving successfully is worse
+				than no payload, and it is the failure `PLAN-M3` D-7 is written against.
+
+				Checked per packet rather than per batch because the hello is *in* the first batch:
+				the packets behind it in that same batch are the first ones that must not land.
+			]]
+			if agreement then
+				local disagreement = agreement.verdict(sender)
+
+				if disagreement then
+					return disagreement, "protocol"
+				end
+			end
+
+			--[[
+				Direction, on the wire rather than only in the views.
+
+				A packet arriving on a channel this peer is the *sender* of is one nobody can
+				legitimately send: `nw.state` and `nw.event` go server to client, and a client's
+				packet on that id is a confused build or a hostile one. It was decoded and queued
+				until M3 phase 9, and it could not be budgeted because those classes declare no rate —
+				which is the argument for forbidding `rate` on them, resting on a check that was not
+				there.
+
+				Refused here, before decode, so a flood of them costs an id read and a seek. That is
+				the same place and the same reason as the byte ceiling below.
+			]]
+			if not (if isServer then channel.fromClient else channel.fromServer) then
+				return directionReason(channel.class), "direction"
+			end
+
+			--[[ The injected `admit` is the rate budget, which has one stage; naming it here rather
+			     than defaulting keeps the two callers of `sink.refuse` symmetrical. ]]
+			return admit(channel, sender, bytes), "budget"
 		end,
 
-		deliver = function(channel: any, value: any, bytes: number)
+		--[[ A peer announcing its own declarations. Handled here rather than routed onward, because
+		     what it decides is whether the rest of this batch is admitted at all. ]]
+		hello = function(hash: number, bytes: number)
+			if not agreement then
+				return
+			end
+
+			--[[ `greet` answers a reason only the first time a peer is found to be wrong, so this is
+			     one report per mismatched peer rather than one per hello. Before M3 phase 9 the
+			     mismatch was recorded and nothing was said until a data packet followed it. ]]
+			local disagreement = agreement.greet(sender, hash)
+
+			if disagreement then
+				report(nil, sender, "protocol", disagreement, bytes)
+			end
+		end,
+
+		deliver = function(channel: any, value: any, bytes: number, id: number?)
+			--[[
+				A packet with no handler is queued and does **not** count against `pendingPerBatch`,
+				which an external review read as the ceiling being bypassed. Examined in M3 phase 9
+				and left alone, because the two limits answer different questions and moving this one
+				would break the thing the queue is for.
+
+				What the queue holds is bounded by `queueCapacity`, per channel, and it drops the
+				*oldest* — which is the right policy for its case, a `:listen` that attached a frame
+				late. The batch ceiling drops the newest, so applying it here would lose exactly the
+				traffic the queue exists to keep.
+
+				What is left is decode *work*, and on an inbound class that is what `rate` licenses:
+				the packets would have been decoded anyway had a handler been attached. The genuinely
+				unbounded case the finding pointed at was an outbound-class id, which declares no rate
+				and is now refused above, before decode.
+			]]
 			if not channel.handler then
+				--[[
+					A query nobody is answering is refused, not queued.
+
+					The queue exists so a handler attached one frame late does not lose the traffic
+					that arrived first, and for a fire-and-forget class late is better than never. A
+					request is the opposite: the caller is holding a thread against a deadline, so
+					keeping the request until a handler appears converts an immediate, legible
+					"nothing is listening" into a timeout that says nothing at all.
+				]]
+				if isServer and id and channel.class == "query" then
+					decline(channel, sender, id, Batch.UNHANDLED)
+					return
+				end
+
 				enqueue(channel, sender, value, bytes)
 				return
 			end
@@ -331,16 +761,60 @@ function Inbound.new(config: Config): Inbound
 				return
 			end
 
+			--[[
+				The pending set is bounded, and the bound is the price of reading a batch to completion
+				before dispatching any of it.
+
+				That order is not negotiable — a yielding handler plus a global decode cursor attributes
+				one player's bytes to another (`PLAN-M2` phase 3) — but it means every decoded value in
+				a batch is live at once. The benchmark measured what that costs: `ArrayHeavy` decode
+				allocation went 1184.8 B to 9309.2 B on the same payload, because two hundred decoded
+				values were alive where one had been. The batch's size is chosen by an untrusted client,
+				which makes it a resource limit rather than a performance note (`PLAN-M3` D-6).
+
+				Past the bound the batch stops. Dispatching early to make room is the one thing that
+				cannot be done here, because it is the order the bound exists to protect.
+			]]
 			local count = filling.count + 1
+
+			if count > pendingCeiling then
+				full = true
+				report(channel, sender, "budget", ceilingReason, bytes)
+				decline(channel, sender, id, Batch.REFUSED)
+				return
+			end
+
 			filling.count = count
 			filling.channels[count] = channel
 			filling.senders[count] = sender
 			filling.values[count] = value
 			filling.sizes[count] = bytes
+			filling.calls[count] = id or 0
+			filling.statuses[count] = -1
 		end,
 
-		refuse = function(channel: any?, stage: string, reason: string, bytes: number)
+		reply = holdReply,
+
+		refuse = function(channel: any?, stage: string, reason: string, bytes: number, id: number?)
 			report(channel, sender, stage :: Observer.Stage, reason, bytes)
+
+			--[[
+				A refused query is answered rather than left hanging, in both directions.
+
+				On the server the caller is told its request was thrown away; on the client a reply
+				that would not decode resolves the parked thread as a failure instead of costing it
+				the whole timeout. The rule is the same from either end: a call that cannot be
+				answered gets an answer saying so.
+			]]
+			if not id or not channel or channel.class ~= "query" then
+				return
+			end
+
+			if isServer then
+				decline(channel, sender, id, Batch.REFUSED)
+			else
+				holdReply(channel, id, Batch.FAILED, nil, bytes)
+			end
 		end,
 	}
 
@@ -353,14 +827,25 @@ function Inbound.new(config: Config): Inbound
 			     found it. ]]
 			local outerSender = sender
 			local outerFilling = filling
+			local outerFull = full
 
 			sender = from
 			filling = list
+			full = false
+			refreshCeiling()
 
-			Batch.read(packed, instances, sink)
+			--[[ The same reason as `dispatch`: the read phase calls no game code and should not be
+			     able to raise, and "should not" is what the sidecar was. Restoring the three
+			     upvalues on both paths is what keeps a raise from costing every batch after it. ]]
+			local ok, failure = pcall(read, packed, instances, sink)
 
 			sender = outerSender
 			filling = outerFilling
+			full = outerFull
+
+			if not ok then
+				report(nil, from, "parse", `the read phase raised: {tostring(failure)}`, buffer.len(packed))
+			end
 
 			dispatch(list)
 		end,
@@ -385,10 +870,14 @@ function Inbound.new(config: Config): Inbound
 				list.senders[count] = queue.senders[slot + 1]
 				list.values[count] = queue.values[slot + 1]
 				list.sizes[count] = 0
+				--[[ Never a query: a request with no handler is refused rather than queued, so
+				     nothing in a queue was ever waiting on an answer. ]]
+				list.calls[count] = 0
+				list.statuses[count] = -1
 
 				queue.values[slot + 1] = nil
 				queue.senders[slot + 1] = nil
-				queue.read = (slot + 1) % QUEUE_CAPACITY
+				queue.read = (slot + 1) % queue.capacity
 				queue.count -= 1
 			end
 
@@ -412,6 +901,9 @@ function Inbound.new(config: Config): Inbound
 					list.senders[count] = who
 					list.values[count] = value
 					list.sizes[count] = bytes[who] or 0
+					--[[ Intents only, and an intent is not a query. ]]
+					list.calls[count] = 0
+					list.statuses[count] = -1
 
 					bytes[who] = nil
 				end
@@ -429,6 +921,55 @@ function Inbound.new(config: Config): Inbound
 
 			for _, bytes in coalescedBytes do
 				bytes[who] = nil
+			end
+
+			--[[
+				And whatever they left in a queue, which an external review found still there (M3
+				phase 9).
+
+				A queue holds packets for a channel nobody is listening to yet. Attaching the
+				`:listen` afterwards used to dispatch them all, including the ones sent by a player
+				who has since left — so a command ran for somebody who is gone, with
+				`ctx.character == nil`, and `Context.acquire` built a fresh record for the departed
+				`Player` to run it against, which nothing would ever forget again.
+
+				Compacted in place rather than rebuilt: the ring is walked in arrival order and the
+				survivors are written back from `read`, so the entry being written is always at or
+				behind the entry being read and the order the queue exists to preserve is kept.
+			]]
+			for channel, queue in queues do
+				if queue.count == 0 then
+					continue
+				end
+
+				local kept = 0
+
+				for index = 0, queue.count - 1 do
+					local slot = (queue.read + index) % queue.capacity
+					local from = queue.senders[slot + 1]
+
+					if from ~= who then
+						local target = (queue.read + kept) % queue.capacity
+						queue.values[target + 1] = queue.values[slot + 1]
+						queue.senders[target + 1] = from
+						kept += 1
+					end
+				end
+
+				--[[ The tail the survivors no longer reach. Nil'd rather than left, because a
+				     queued value holds every table and Instance the packet decoded into. ]]
+				for index = kept, queue.count - 1 do
+					local slot = (queue.read + index) % queue.capacity
+					queue.values[slot + 1] = nil
+					queue.senders[slot + 1] = nil
+				end
+
+				local dropped = queue.count - kept
+				queue.count = kept
+
+				if dropped > 0 then
+					report(channel, who, "queue", `dropped {dropped} queued packets; the sender left`, 0)
+				end
 			end
 
 			Context.forget(who)

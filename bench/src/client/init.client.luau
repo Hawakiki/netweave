@@ -257,6 +257,16 @@ local function runUp(mode: string, adapter: Modes.Adapter, schema: Modes.SchemaN
 			then Metrics.bytesPerPacket(snapshot.wireBytes, snapshot.received)
 			else nil,
 		decodeBytesPerPacket = snapshot.decodeBytesPerPacket,
+		--[[ The spread the server computed, which this used to drop on the way into the document.
+
+		     Phase 9 taught both sides to record it and then measured a run where every encode cell
+		     carried its range and no decode cell did — because the copy here listed the fields by
+		     hand and nobody added the two new ones. That is the same shape as the `Config` limit
+		     name and the `Protocol` attribute list (`CLAUDE.md` §9): a hand-kept list, drifting from
+		     what it lists. It matters more here than there, because acceptance 6 is a *decode*
+		     allocation figure and it is the one number this milestone could not answer. ]]
+		decodeBytesLow = snapshot.decodeBytesLow,
+		decodeBytesHigh = snapshot.decodeBytesHigh,
 		decodeAllocSamples = snapshot.decodeAllocSamples,
 	}
 end
@@ -356,6 +366,10 @@ for mode, adapter in adapters do
 			down = down,
 			fireAll = fireAll,
 			encodeBytesPerPacket = encodeAlloc.bytesPerCall,
+			--[[ The spread, so a cell whose median is where the collector happened to run announces
+			     itself in the document rather than in the next milestone's plan (`Alloc.luau`). ]]
+			encodeBytesLow = encodeAlloc.low,
+			encodeBytesHigh = encodeAlloc.high,
 			encodeAllocSamples = encodeAlloc.usableSamples,
 			encodeAllocRepeats = encodeAlloc.repeats,
 		}

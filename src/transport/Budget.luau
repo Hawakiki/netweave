@@ -39,6 +39,8 @@ local Budget = {}
 local WINDOW = 1
 
 type Record = {
+	tokens: number,
+	refilled: number,
 	opened: number,
 	packets: number,
 	bytes: number,
@@ -108,8 +110,23 @@ function Budget.new(clock: (() -> number)?): Budget
 			local record = byChannel[channel]
 			local at = now()
 
+			--[[
+				The depth of the bucket. Declaring it is how a game says "this channel is bursty";
+				omitting it says one second's worth, which is the safe reading of silence.
+
+				**At least one token, whatever the rate.** A rate below one packet per second is legal
+				and ordinary — "one purchase every two seconds" — and a bucket 0.5 deep can never hold
+				the whole token the admission test wants, so the channel would be refused forever after
+				its first packet. That is Warp's failure (`RESEARCH §3.7-K`) reintroduced by the fix
+				meant to make it unreachable, and it took an audit rather than a test to find.
+			]]
+			local declared = channel.burst or rate
+			local burst = if declared < 1 then 1 else declared
+
 			if not record then
 				byChannel[channel] = {
+					tokens = burst - 1,
+					refilled = at,
 					opened = at,
 					packets = 1,
 					bytes = bytes,
@@ -120,14 +137,34 @@ function Budget.new(clock: (() -> number)?): Budget
 			end
 
 			--[[
-				The lazy reset. It happens here, on the charge, and nowhere else — so there is no
-				path that can be skipped and leave a player charged forever. That is Warp's bug
-				(`RESEARCH §3.7-K`) made unreachable rather than merely fixed.
+				A token bucket rather than a fixed window, and the difference is not academic.
 
-				A clock that went backwards also reopens the window. `os.clock` is monotonic so this
-				cannot happen with the default, but an injected one could — and the failure it would
-				cause is Warp's exact failure by another route: a window that never closes and a
-				player refused for the rest of the session.
+				A window that resets on a boundary admits a full allowance on each side of it, so a
+				channel declared `rate = 20` passes 39 across a span of ten milliseconds — measured,
+				and now a test. The game declared 20, got 39, and had no way to find out.
+
+				The bucket has no boundary to straddle: entitlement accrues continuously at `rate`
+				and is capped at `burst`, so the guarantee is "no more than `rate` per second in
+				*any* second" rather than "in the seconds we happen to have drawn"
+				(`PLAN-M3` D-3).
+			]]
+			local elapsed = at - record.refilled
+
+			--[[ A clock that goes backwards must not mint tokens. `os.clock` is monotonic so this
+			     cannot happen with the default, but an injected one can — and the failure it would
+			     cause is the limiter quietly ceasing to limit, which is worse than refusing. ]]
+			if elapsed > 0 then
+				local refilled = record.tokens + elapsed * rate
+				record.tokens = if refilled > burst then burst else refilled
+			end
+
+			record.refilled = at
+
+			--[[
+				The reporting window is separate from admission and stays a window on purpose:
+				`usage` answers "what did this player send in the last second", which is a question
+				about a span. Warp's reset bug lived in the admission path (`RESEARCH §3.7-K`);
+				there is nothing to skip here, because nothing depends on it.
 			]]
 			if at - record.opened >= WINDOW or at < record.opened then
 				record.opened = at
@@ -136,7 +173,7 @@ function Budget.new(clock: (() -> number)?): Budget
 				record.refused = 0
 			end
 
-			if record.packets >= rate then
+			if record.tokens < 1 then
 				record.refused += 1
 
 				--[[ The bytes are charged whether or not the packet is admitted. A refused packet
@@ -147,6 +184,7 @@ function Budget.new(clock: (() -> number)?): Budget
 				return `over {rate} packets per second`
 			end
 
+			record.tokens -= 1
 			record.packets += 1
 			record.bytes += bytes
 

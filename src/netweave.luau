@@ -33,7 +33,7 @@
 	| G1 | An inbound channel that changes authoritative state has no listener until a policy is attached | type error |
 	| G2 | Every inbound channel declares a rate budget. There is no unlimited | type error |
 	| G3 | Every server-to-client channel declares its audience. `broadcast` exists only where the audience is everyone | type error |
-	| G4 | Wire data never reaches `error()`. Rejections are values, routed to an observer | not expressible |
+	| G4 | Wire data never reaches `error()`. Rejections are values, routed to an observer. The sidecar is wire data, and the read and dispatch phases are guarded rather than trusted | not expressible |
 	| G5 | Length-prefixed framing: one malformed packet cannot stop the rest of its batch | not expressible |
 	| G6 | Direction is a class, not a string field | type error |
 
@@ -53,8 +53,10 @@
 local Audience = require("./api/Audience")
 local Driver = require("./transport/Driver")
 local Channel = require("./api/Channel")
+local Config = require("./api/Config")
 local Context = require("./api/Context")
 local Namespace = require("./api/Namespace")
+local Protocol = require("./api/Protocol")
 local Observer = require("./api/Observer")
 local Policy = require("./api/Policy")
 local Transport = require("./api/Transport")
@@ -76,6 +78,26 @@ if typeof(game) == "Instance" then
 end
 
 local nw = {}
+
+--[=[
+	@prop milestone string
+	@within netweave
+
+	Which milestone this build is. `"M3"`.
+
+	netweave has no release versions yet, so this is the coarsest true thing it can say about
+	itself, and it exists because something else needed it to be true: the benchmark writes the
+	subject of every run into the run document, and it wrote `"M2"` for the whole of M3, because the
+	string was typed into the harness rather than read from the library. A results file that
+	misattributes its own subject is worse than one with no attribution — it is evidence for the
+	wrong thing (`CLAUDE.md` §5). Read this instead of typing it.
+
+	:::note
+	The wire format has its own version, which is not this one and moves for different reasons. See
+	`docs/WIRE-FORMAT.md` and `nw.protocol()`.
+	:::
+]=]
+nw.milestone = "M3"
 
 --[=[
 	@prop types Types
@@ -120,6 +142,98 @@ nw.observe = Observer.observe
 
 --[=[
 	@within netweave
+	@function diagnostics
+	@return Observer.Diagnostics
+
+	Every refusal since the counters were last reset, by channel and stage.
+
+	```lua
+	for channel, stages in nw.diagnostics().channels do
+		for stage, tally in stages do
+			print(channel, stage, tally.count, tally.bytes)
+		end
+	end
+	```
+
+	The console goes quiet after a few reports per channel and stage so a flood does not become the
+	outage, which makes this the only way to answer "is this channel refusing more than it was" —
+	the question that separates a bug from an attack.
+]=]
+nw.diagnostics = Observer.diagnostics
+
+-- Settings --------------------------------------------------------------------------------------
+
+--[=[
+	@within netweave
+	@function configure
+	@param settings Config.Settings
+
+	Global settings, in the shape ESLint made familiar.
+
+	```lua
+	nw.configure({
+		rules = {
+			budget = "warn",     -- a sender over its declared rate
+			authorize = "error", -- with a traceback, and suppressed like any other
+			handler = "warn",
+		},
+		limits = { queueCapacity = 512 },
+	})
+	```
+
+	Call it before declaring channels: limits are read when the transport builds the thing they
+	limit, and a queue that already exists keeps the capacity it was created with.
+
+	:::caution `"off"` is discouraged, and it is not an off switch
+	No severity turns enforcement off. A packet refused at `budget` is refused whatever `budget` is
+	set to — `"off"` silences netweave's console output for that stage and nothing else, and
+	callbacks attached with [netweave.observe] keep receiving it.
+
+	Reach for `"off"` when a stage is *expected* to fire in normal play and the log is drowning
+	something else out — a `signal` channel that refuses under load by design, say. Reaching for it
+	because a warning is annoying removes the only notice a game gets that it is dropping traffic,
+	which is the failure `RESEARCH §3.7-K` documents in Warp and the reason these defaults are on.
+	:::
+]=]
+--[[ `S` alone, not `S & Config.Settings`. The intersection reads correctly and rejects every call:
+     Luau binds `S` to the argument's own type and then wants the intersection to be exactly that,
+     so a settings table that omits any optional field — which is all of them — fails. The names and
+     the value types are both checked by `CheckedSettings`, which says what is wrong in one line
+     rather than eight. ]]
+nw.configure = function<S>(settings: S): Config.CheckedSettings<S, Config.Snapshot>
+	Config.configure(settings :: any)
+
+	--[[
+		`contextGuard` is applied here rather than read inside `Context` because the guard is
+		checked once per packet and `Config` would be a second table index on that path. Pushing it
+		at configure time keeps the read side a single upvalue, which is what `CLAUDE.md` §4 asks
+		of anything the receive loop touches.
+	]]
+	local guard = Config.contextGuard()
+
+	if guard ~= nil then
+		Context.setGuarded(guard)
+	end
+
+	--[[ The declared return is a type function the analyzer cannot reduce while `S` is free, so the
+	     cast is the only way to say "this is that". The type function is in the signature for its
+	     `error()`, which is what rejects a misspelled rule at the call site; the value handed back
+	     is a plain snapshot either way. ]]
+	return Config.snapshot() :: any
+end
+
+--[=[
+	@within netweave
+	@prop config Config
+	@within netweave
+
+	The settings themselves: `nw.config.snapshot()` for what is in force, `nw.config.describe()`
+	for every rule with its default and one line on what it reports.
+]=]
+nw.config = Config
+
+--[=[
+	@within netweave
 	@function namespace
 	@param name string
 	@param channels D -- a table of channels
@@ -149,14 +263,50 @@ end
 	@function protocol
 	@return Protocol
 
-	The agreed channel numbering: an FNV-1a hash over every qualified channel name, sorted, plus
+	The agreed protocol: an FNV-1a hash over every channel's name, class and **lowered schema**, plus
 	the names themselves in id order.
 
-	Both peers compute this independently. A mismatch means a stale client or a partial deploy, and
-	it is worth refusing loudly at startup — every packet in the session would otherwise decode as
-	the wrong channel, silently (`docs/WIRE-FORMAT.md` §4).
+	Both peers compute this independently and the client sends its hash as the first packet it ever
+	sends. A peer whose hash differs is refused at stage `"protocol"` from that point on — every
+	packet between them would otherwise decode as a different channel, successfully, and be handed
+	to a handler as a well-formed payload (`docs/WIRE-FORMAT.md` §4).
+
+	:::note
+	The hash deliberately ignores `rate`, `burst`, `maxBytes`, `authorize`, `audience` and
+	`unreliable`. Those are one side's policy, and a hash that moved when a server tuned a rate limit
+	would force a client redeploy for a server-side edit.
+	:::
 ]=]
 nw.protocol = Namespace.protocol
+
+--[=[
+	@within netweave
+	@function signature
+	@return string
+
+	The text the protocol hash is taken over: every channel, in id order, with its class and the
+	shape its schema lowered to.
+
+	```lua
+	print(nw.signature())
+	--> combat.fireWeapon|command
+	--> data=static/14/14/0:struct(origin:vector3(...)seq:number(storage=u16;...))
+	```
+
+	A hash that differs tells you *that* two builds disagree and nothing about where. Print this on
+	both sides and diff it: the line that differs is the declaration that differs. That is the whole
+	affordance, and without it "the hashes do not match" is a dead end.
+]=]
+nw.signature = function(): string
+	local protocol = Namespace.protocol()
+	local byName: { [string]: any } = {}
+
+	for _, qualified in protocol.names do
+		byName[qualified] = Namespace.channelByName(qualified)
+	end
+
+	return Protocol.signature(protocol.names, byName)
+end
 
 --[=[
 	@type Trusted<T> T
@@ -178,8 +328,12 @@ export type Ctx = Context.Ctx
 export type Verdict = Policy.Verdict
 export type Rejection = Observer.Rejection
 export type Stage = Observer.Stage
+export type Diagnostics = Observer.Diagnostics
+export type Tally = Observer.Tally
 export type Protocol = Namespace.Protocol
 export type Views<D> = View.Views<D>
+export type Severity = Config.Severity
+export type Settings = Config.Settings
 
 --[=[
 	@prop internal table
@@ -191,6 +345,7 @@ export type Views<D> = View.Views<D>
 	a game has no reason to undo.
 ]=]
 nw.internal = table.freeze({
+	config = Config,
 	transport = Transport,
 	context = Context,
 	observer = Observer,

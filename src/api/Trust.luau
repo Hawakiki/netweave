@@ -16,7 +16,8 @@
 	```
 
 	Only three things produce `Trusted<T>`: a `command` handler, a `query` handler, and
-	[Trust.validate]. **There is no `nw.untrust`.** An unwrap function would be reached for
+	[Trust.validate] — plus an explicit cast, `(value :: any) :: nw.Trusted<T>`, for server-authored
+	data that never came off a wire. **There is no `nw.untrust`.** An unwrap function would be reached for
 	reflexively and the brand would become decoration — the same reason `unsafe` in Rust is ugly
 	on purpose (`DESIGN-API.md` §10.6).
 ]=]
@@ -29,6 +30,35 @@
 
 	Deciding which of your functions carry authority is the discipline this library sells, so
 	requiring that to be written down is the intended cost, not an oversight (`DESIGN-API.md` §6).
+]]
+
+--[[
+	**The tag is required, and that is a correction.**
+
+	It was `{ __nwTrusted: true? }` — optional — until M3 phase 3, and an optional property is one
+	a table literal is inferred to satisfy by not having it. So `giveItem({ screen = 1 })` compiled,
+	and the claim above that only three things produce `Trusted<T>` was **false**: a literal of the
+	right shape produced one too, and the one-line laundering
+
+		giveItem({ screen = untrusted.screen })
+
+	rebuilt an untrusted payload into a trusted one with nothing to see. Measured, then fixed by
+	making the property required; `tests/api_reject.luau` cases 16 and 17 are those two lines.
+
+	The cost is that the type asserts a field the runtime does not have. Reading `__nwTrusted` off
+	a payload gives `nil` where the type promises `true`. That is a phantom on a `__nw`-prefixed
+	name nobody reads, and it is a much smaller lie than the alternative §6 rejected — a wrapper,
+	which would misdescribe the whole value and allocate one per packet.
+
+	**What it still does not stop.** Writing the tag out — `giveItem({ screen = 1, __nwTrusted = true })`
+	— type-checks. That is deliberate: the escape hatch has to exist for server-authored data, and
+	a forgery you have to spell is one a reviewer sees and `grep` finds. The supported spelling is a
+	cast, `(value :: any) :: nw.Trusted<T>`, which is pinned in `tests/api_ok.luau`.
+
+	**The four places that build a tag must agree**, and they cannot share code: a `type function`
+	body sees only the `types` library, so `src/api/View.luau` builds its own. `tests/api_ok.luau`
+	asserts the agreement by assigning one to the other, and a divergence fails it — verified by
+	changing one side alone.
 ]]
 
 local Serdes = require("../codec/Serdes")
@@ -70,7 +100,7 @@ export type function Trusted(payload)
 	end
 
 	local tag = types.newtable()
-	tag:setproperty(types.singleton("__nwTrusted"), types.optional(types.singleton(true)))
+	tag:setproperty(types.singleton("__nwTrusted"), types.singleton(true))
 
 	return types.intersectionof(value, tag)
 end
@@ -97,7 +127,7 @@ export type function Untrusted(payload)
 	end
 
 	local tag = types.newtable()
-	tag:setproperty(types.singleton("__nwUntrusted"), types.optional(types.singleton(true)))
+	tag:setproperty(types.singleton("__nwUntrusted"), types.singleton(true))
 
 	return types.intersectionof(value, tag)
 end
@@ -129,14 +159,20 @@ type _instantiateUntrusted = Untrusted<{ probe: boolean }>
 export type function TrustedPayload(schema)
 	local descriptor = types.copy(schema)
 
+	--[[ One sentence, two failures: something that is not a table, and a table that is not a
+	     netweave type. Both are the same mistake at the call site. ]]
+	local advice = "nw.validate takes a netweave type as its first argument and the value as its "
+		.. "second: nw.validate(t.struct({ screen = t.u8 }), value). A plain Luau table is not a "
+		.. "schema, so there is nothing to check the value against."
+
 	if not descriptor:is("table") then
-		error("nw.validate needs a netweave type as its schema")
+		error(advice)
 	end
 
 	local payload = descriptor:readproperty(types.singleton("__payload"))
 
 	if not payload then
-		error("nw.validate needs a netweave type as its schema")
+		error(advice)
 	end
 
 	if not payload:is("table") then
@@ -144,7 +180,7 @@ export type function TrustedPayload(schema)
 	end
 
 	local tag = types.newtable()
-	tag:setproperty(types.singleton("__nwTrusted"), types.optional(types.singleton(true)))
+	tag:setproperty(types.singleton("__nwTrusted"), types.singleton(true))
 
 	return types.intersectionof(payload, tag)
 end
@@ -198,10 +234,24 @@ end
 	This runs the encoder against `value` to decide, so it costs a real serialisation. It is an
 	escape hatch, not a hot path.
 	:::
+
+	:::caution
+	**It is exactly as strict as the encoder**, and until M3 phase 9 the encoder was not strict
+	enough for this to mean what it says. The boolean writer tested truthiness, so
+	`{ admin = "false" }` validated against `t.boolean` and came back branded and truthy; the
+	instance writer tested only non-nil; the integer writers checked the range and let the fraction
+	truncate. All three are refused now, and the reason to say so here is that the two ways this
+	function is reached — a DataStore row and an HTTP body — are exactly the values nobody wrote.
+	:::
 ]=]
 function Trust.validate<S>(schema: S, value: any): (TrustedPayload<S>?, string?)
 	if type(schema) ~= "table" or type((schema :: any).kind) ~= "string" then
-		error("nw.validate needs a netweave type as its schema", 2)
+		error(
+			`nw.validate takes a netweave type as its first argument and the value as its second, `
+				.. `got {typeof(schema)}. Write it as nw.validate(t.struct(...), value); a policy is `
+				.. `not a schema and neither is a plain table.`,
+			2
+		)
 	end
 
 	local failure = codecFor(schema :: any).check(value)

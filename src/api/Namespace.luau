@@ -39,6 +39,7 @@
 ]]
 
 local Channel = require("./Channel")
+local Protocol = require("./Protocol")
 local View = require("./View")
 
 local Namespace = {}
@@ -64,19 +65,32 @@ local sealed = false
 
 local function checkName(name: string)
 	if type(name) ~= "string" or name == "" then
-		error(`a namespace needs a name, got {typeof(name)}`, 3)
+		error(
+			`nw.namespace takes the name first and the channels second, got {typeof(name)}. Write it `
+				.. `as nw.namespace("combat", \{ fireWeapon = nw.command(\{ ... }) }) — the name is half `
+				.. `of every channel id on the wire, so it cannot be left out.`,
+			3
+		)
 	end
 
 	--[[ The name is half of every qualified id, and a dot in it would make `combat.fire.weapon`
 	     ambiguous about where the namespace ends. ]]
 	if string.find(name, ".", 1, true) then
-		error(`a namespace name cannot contain a dot: {name}`, 3)
+		error(
+			`the namespace name "{name}" contains a dot, and a channel id is namespace .. "." .. key. `
+				.. `Rename it without one — nw.namespace("combatRanged", ...) rather than `
+				.. `"combat.ranged" — or "combat.ranged.fire" would be ambiguous about where the `
+				.. `namespace ends.`,
+			3
+		)
 	end
 
 	if namespaces[name] then
 		error(
 			`the namespace {name} is already declared. Two namespaces with one name would collide `
-				.. `on the wire, because a channel id is derived from namespace .. "." .. key.`,
+				.. `on the wire, because a channel id is derived from namespace .. "." .. key. Give `
+				.. `this one a different name, or require the existing module instead of declaring a `
+				.. `second copy — nw.namespace is called once per namespace, at load.`,
 			3
 		)
 	end
@@ -96,6 +110,17 @@ end
 	channel ids, and the two peers would disagree — which is silent, and decodes every packet as
 	the wrong type. `nw.protocol()` is what both sides compare to catch that.
 	:::
+
+	:::caution
+	**On a client, "the first packet" is one that *arrives*.** Requiring netweave connects the
+	receive side, and the first batch the server sends seals the numbering — so a client that yields
+	between `require(netweave)` and its namespace modules (a `WaitForChild`, a deferred require) can
+	be sealed by traffic it did not ask for, and the next declaration raises. Require every namespace
+	in one unbroken run, before anything yields.
+
+	This cannot be fixed by deferring the seal: decoding an inbound packet needs the id numbering,
+	and the numbering needs every declaration. See `docs/WIRE-FORMAT.md` §3.
+	:::
 ]=]
 function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 	checkName(name)
@@ -105,10 +130,16 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 	end
 
 	if sealed then
+		--[[ The cause this names last is the one that is hardest to find: on a client, a *received*
+		     packet seals, so a `WaitForChild` between requiring netweave and requiring this module
+		     is enough. Found by an external review (M3 phase 9); it cannot be fixed by sealing
+		     later, because decoding the packet that sealed it needs the numbering. ]]
 		error(
 			`the namespace {name} was declared after the protocol was sealed. Every channel id `
 				.. `depends on every other, so a late declaration renumbers ids the other peer has `
-				.. `already agreed to. Require all namespaces at startup.`,
+				.. `already agreed to. Require all namespaces at startup, in one run — on a client `
+				.. `the first packet to arrive seals the protocol, so a yield before this line is `
+				.. `enough to lose the race.`,
 			2
 		)
 	end
@@ -117,7 +148,13 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 
 	for key, channel in channels do
 		if type(key) ~= "string" then
-			error(`{name} has a non-string channel key; ids come from the keys`, 2)
+			error(
+				`{name} has a non-string channel key, and ids come from the keys. Write the channels `
+					.. `as named fields — \{ fireWeapon = nw.command(\{ ... }) } — rather than as an `
+					.. `array, because a positional list would renumber the wire every time one is `
+					.. `inserted.`,
+				2
+			)
 		end
 
 		if not Channel.isChannel(channel) then
@@ -131,7 +168,9 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 		if channel.qualified ~= "" then
 			error(
 				`{name}.{key} is already declared as {channel.qualified}. A channel belongs to one `
-					.. `namespace; sharing the record would give it two ids and two budgets.`,
+					.. `namespace; sharing the record would give it two ids and two budgets. Declare a `
+					.. `second one with its own nw.command(\{...}), or move the shared *schema* into `
+					.. `a local and build both from it — a schema is reusable, a channel is not.`,
 				2
 			)
 		end
@@ -142,7 +181,12 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 	end
 
 	if count == 0 then
-		error(`the namespace {name} declares no channels`, 2)
+		error(
+			`the namespace {name} declares no channels, so nothing about it can reach the wire. Add `
+				.. `the ones it is for — nw.namespace("{name}", \{ fireWeapon = nw.command(\{ ... }) }) `
+				.. `— or delete the declaration.`,
+			2
+		)
 	end
 
 	local namespace: Namespace = {
@@ -159,37 +203,25 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 end
 
 --[[
-	FNV-1a, 32-bit, over the sorted qualified names joined with newlines (`WIRE-FORMAT.md` §4).
+	~~FNV-1a over the sorted qualified names.~~ **Moved to `src/api/Protocol.luau` in M3 phase 5, and
+	widened to cover the lowered IR.**
 
-	The hash covers *names* only. A field whose type changed under an unchanged name is not caught
-	here — the per-field validation catches that as a rejection instead, which is the right place
-	because it is per packet rather than per session.
+	The old note here said a field whose type changed under an unchanged name was left to the
+	per-field validation, "which is the right place because it is per packet rather than per
+	session". That was wrong twice over: the per-field validation refuses *every* packet for the rest
+	of the session, and it never says why. `PLAN-M3` D-7.
 ]]
-local function fnv1a(text: string): number
-	local hash = 2166136261
-
-	for index = 1, #text do
-		hash = bit32.bxor(hash, string.byte(text, index))
-		hash = bit32.band(hash * 16777619, 0xFFFFFFFF)
-	end
-
-	return hash
-end
 
 --[=[
 	@interface Protocol
 	@within Namespace
-	.hash number -- FNV-1a over the sorted qualified names
+	.hash number -- FNV-1a over the lowered IR of every channel
 	.count number -- how many channels were numbered
 	.names { string } -- sorted, so `names[id]` is the channel with that id
 
-	What both peers must agree on before any packet is meaningful.
+	Re-exported from [Protocol], which is where it is computed.
 ]=]
-export type Protocol = {
-	hash: number,
-	count: number,
-	names: { string },
-}
+export type Protocol = Protocol.Protocol
 
 local protocol: Protocol? = nil
 
@@ -239,11 +271,9 @@ function Namespace.seal(): Protocol
 		byId[id] = channel
 	end
 
-	local computed: Protocol = table.freeze({
-		hash = fnv1a(table.concat(names, "\n")),
-		count = #names,
-		names = table.freeze(names),
-	}) :: any
+	--[[ After the ids are assigned, not before: the signature is taken in id order, and a channel
+	     without an id has nothing to be in order by. ]]
+	local computed = Protocol.digest(names, byName)
 
 	protocol = computed
 	sealed = true
@@ -286,6 +316,33 @@ function Namespace.channelById(id: number): any?
 	end
 
 	return byId[id]
+end
+
+--[=[
+	@within Namespace
+	@function channelByName
+	@param qualified string -- `"combat.fireWeapon"`
+	@return Channel?
+	@private
+
+	The channel behind a qualified name, sealing the protocol if that has not happened yet.
+
+	Exists for `nw.signature()`, which walks the protocol's own name list and needs the declaration
+	behind each one. A search rather than a table, because it runs once when a human asks why two
+	builds disagree.
+]=]
+function Namespace.channelByName(qualified: string): any?
+	if not protocol then
+		Namespace.seal()
+	end
+
+	for _, channel in byId do
+		if channel.qualified == qualified then
+			return channel
+		end
+	end
+
+	return nil
 end
 
 --[=[
