@@ -84,6 +84,31 @@ do
 	equals("floats are not narrowed", layout.fixedSize, 4)
 end
 
+do
+	--[[ A quantised number carries no encoding of its own — the storage is chosen here, from how
+	     many steps the range holds, which is the only place that knows. That is the whole difference
+	     from `t.f32`, whose range validates and never narrows. ]]
+	local byte = Ir.lower(t.quantized(-1, 1, 2 / 254))
+	equals("254 levels fit a byte", byte.root.storage, "u8")
+	equals("the lower bound is the offset", byte.root.offset, -1)
+	equals("and the step travels with the node", byte.root.step, 2 / 254)
+	equals("one byte", byte.fixedSize, 1)
+
+	local pair = Ir.lower(t.quantized(-180, 180, 0.25))
+	equals("1440 levels take two", pair.root.storage, "u16")
+	equals("two bytes", pair.fixedSize, 2)
+
+	local wide = Ir.lower(t.quantized(0, 1, 1 / 100000))
+	equals("100,000 of them take four", wide.root.storage, "u32")
+	equals("four bytes", wide.fixedSize, 4)
+
+	--[[ The bound the *reader* is held to is the top level it can reconstruct, not the declaration —
+	     for 2.8% of evenly-dividing ranges the two differ by a rounding, and the declaration is the
+	     smaller one. `tests/serdes_runtime.luau` has the case that proves it matters. ]]
+	local eleven = Ir.lower(t.quantized(0, 100, 100 / 11))
+	check("the node's ceiling is the top level, not the declared maximum", (eleven.root.max :: number) >= 100)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- The M0 benchmark schemas, in the byte counts the competitors produced
 -- ---------------------------------------------------------------------------------------------

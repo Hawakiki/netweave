@@ -357,6 +357,28 @@ local function numberWriter(node: Node): Writer
 	local min = node.min :: number
 	local max = node.max :: number
 	local integral = not FRACTIONAL[storage]
+	local step = node.step
+
+	--[[
+		Quantised: the wire carries the number of steps from the declared minimum, so the value is
+		divided rather than only shifted, and no whole-number check applies — carrying a fraction is
+		what it is for.
+
+		The rounding is `+ 0.5` and the primitive's own truncation rather than `math.round`, which is
+		a call this would pay per value. `value >= min` is checked one line above, so the quotient is
+		never negative and round-half-up is round-to-nearest here.
+	]]
+	if step then
+		local inverse = 1 / step
+
+		return function(value: any, _flags: Flags)
+			if not (value >= min and value <= max) then
+				error(`[netweave] {value} is outside the declared range {min}..{max}`)
+			end
+
+			write((value - offset) * inverse + 0.5)
+		end
+	end
 
 	if offset == 0 then
 		return function(value: any, _flags: Flags)
@@ -510,6 +532,13 @@ type Row = {
 	lo: number,
 	hi: number,
 	offset: number,
+	--[[ Quantisation. `scale` is `1/step` on the way out and `unit` is `step` on the way back; both
+	     are 1 for an ordinary number, where neither is read. They are not folded into the arithmetic
+	     above the branch chain — `bench/profile.luau` priced that at **6.7%** on every struct in the
+	     library, control group flat — so the chain carries three more arms instead and a plain field
+	     pays nothing for a feature it does not use. ]]
+	scale: number,
+	unit: number,
 	integral: boolean,
 	storage: string,
 	code: number,
@@ -523,6 +552,8 @@ local BLANK: Row = {
 	lo = 0,
 	hi = 0,
 	offset = 0,
+	scale = 1,
+	unit = 1,
 	integral = false,
 	storage = "u8",
 	code = 1,
@@ -559,6 +590,7 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 
 		local min = node.min :: number
 		local max = node.max :: number
+		local step = node.step
 
 		rows[index] = {
 			name = field.name,
@@ -568,9 +600,13 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 			lo = if storage == "f32" then asF32(min) else min,
 			hi = if storage == "f32" then asF32(max) else max,
 			offset = node.offset :: number,
-			integral = not FRACTIONAL[storage :: string],
+			scale = if step then 1 / step else 1,
+			unit = step or 1,
+			integral = step == nil and not FRACTIONAL[storage :: string],
 			storage = storage :: string,
-			code = code,
+			--[[ Quantised codes are the plain ones plus five, so the chain keeps `u8` first and a field
+			     that is not quantised never reaches the three arms that are. ]]
+			code = if step then code + 5 else code,
 		}
 
 		at += size
@@ -614,13 +650,21 @@ local function fusedStructWriter(fields: { Field }): Writer?
 	local r7, r8 = rows[7] or BLANK, rows[8] or BLANK
 
 	local n1, a1, i1, o1, s1, lo1, hi1 = r1.name, r1.at, r1.integral, r1.offset, r1.code, r1.min, r1.max
+	local k1 = r1.scale
 	local n2, a2, i2, o2, s2, lo2, hi2 = r2.name, r2.at, r2.integral, r2.offset, r2.code, r2.min, r2.max
+	local k2 = r2.scale
 	local n3, a3, i3, o3, s3, lo3, hi3 = r3.name, r3.at, r3.integral, r3.offset, r3.code, r3.min, r3.max
+	local k3 = r3.scale
 	local n4, a4, i4, o4, s4, lo4, hi4 = r4.name, r4.at, r4.integral, r4.offset, r4.code, r4.min, r4.max
+	local k4 = r4.scale
 	local n5, a5, i5, o5, s5, lo5, hi5 = r5.name, r5.at, r5.integral, r5.offset, r5.code, r5.min, r5.max
+	local k5 = r5.scale
 	local n6, a6, i6, o6, s6, lo6, hi6 = r6.name, r6.at, r6.integral, r6.offset, r6.code, r6.min, r6.max
+	local k6 = r6.scale
 	local n7, a7, i7, o7, s7, lo7, hi7 = r7.name, r7.at, r7.integral, r7.offset, r7.code, r7.min, r7.max
+	local k7 = r7.scale
 	local n8, a8, i8, o8, s8, lo8, hi8 = r8.name, r8.at, r8.integral, r8.offset, r8.code, r8.min, r8.max
+	local k8 = r8.scale
 
 	--[[
 		The claim happens before the first check, so a struct that raises half way through has moved
@@ -648,8 +692,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to1, raw1)
 		elseif s1 == 4 then
 			buffer.writef32(out, to1, raw1)
-		else
+		elseif s1 == 5 then
 			buffer.writef64(out, to1, raw1)
+		elseif s1 == 6 then
+			buffer.writeu8(out, to1, raw1 * k1 + 0.5)
+		elseif s1 == 7 then
+			buffer.writeu16(out, to1, raw1 * k1 + 0.5)
+		else
+			buffer.writeu32(out, to1, raw1 * k1 + 0.5)
 		end
 
 		if count < 2 then
@@ -673,8 +723,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to2, raw2)
 		elseif s2 == 4 then
 			buffer.writef32(out, to2, raw2)
-		else
+		elseif s2 == 5 then
 			buffer.writef64(out, to2, raw2)
+		elseif s2 == 6 then
+			buffer.writeu8(out, to2, raw2 * k2 + 0.5)
+		elseif s2 == 7 then
+			buffer.writeu16(out, to2, raw2 * k2 + 0.5)
+		else
+			buffer.writeu32(out, to2, raw2 * k2 + 0.5)
 		end
 
 		if count < 3 then
@@ -698,8 +754,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to3, raw3)
 		elseif s3 == 4 then
 			buffer.writef32(out, to3, raw3)
-		else
+		elseif s3 == 5 then
 			buffer.writef64(out, to3, raw3)
+		elseif s3 == 6 then
+			buffer.writeu8(out, to3, raw3 * k3 + 0.5)
+		elseif s3 == 7 then
+			buffer.writeu16(out, to3, raw3 * k3 + 0.5)
+		else
+			buffer.writeu32(out, to3, raw3 * k3 + 0.5)
 		end
 
 		if count < 4 then
@@ -723,8 +785,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to4, raw4)
 		elseif s4 == 4 then
 			buffer.writef32(out, to4, raw4)
-		else
+		elseif s4 == 5 then
 			buffer.writef64(out, to4, raw4)
+		elseif s4 == 6 then
+			buffer.writeu8(out, to4, raw4 * k4 + 0.5)
+		elseif s4 == 7 then
+			buffer.writeu16(out, to4, raw4 * k4 + 0.5)
+		else
+			buffer.writeu32(out, to4, raw4 * k4 + 0.5)
 		end
 
 		if count < 5 then
@@ -748,8 +816,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to5, raw5)
 		elseif s5 == 4 then
 			buffer.writef32(out, to5, raw5)
-		else
+		elseif s5 == 5 then
 			buffer.writef64(out, to5, raw5)
+		elseif s5 == 6 then
+			buffer.writeu8(out, to5, raw5 * k5 + 0.5)
+		elseif s5 == 7 then
+			buffer.writeu16(out, to5, raw5 * k5 + 0.5)
+		else
+			buffer.writeu32(out, to5, raw5 * k5 + 0.5)
 		end
 
 		if count < 6 then
@@ -773,8 +847,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to6, raw6)
 		elseif s6 == 4 then
 			buffer.writef32(out, to6, raw6)
-		else
+		elseif s6 == 5 then
 			buffer.writef64(out, to6, raw6)
+		elseif s6 == 6 then
+			buffer.writeu8(out, to6, raw6 * k6 + 0.5)
+		elseif s6 == 7 then
+			buffer.writeu16(out, to6, raw6 * k6 + 0.5)
+		else
+			buffer.writeu32(out, to6, raw6 * k6 + 0.5)
 		end
 
 		if count < 7 then
@@ -798,8 +878,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to7, raw7)
 		elseif s7 == 4 then
 			buffer.writef32(out, to7, raw7)
-		else
+		elseif s7 == 5 then
 			buffer.writef64(out, to7, raw7)
+		elseif s7 == 6 then
+			buffer.writeu8(out, to7, raw7 * k7 + 0.5)
+		elseif s7 == 7 then
+			buffer.writeu16(out, to7, raw7 * k7 + 0.5)
+		else
+			buffer.writeu32(out, to7, raw7 * k7 + 0.5)
 		end
 
 		if count < 8 then
@@ -823,8 +909,14 @@ local function fusedStructWriter(fields: { Field }): Writer?
 			buffer.writeu32(out, to8, raw8)
 		elseif s8 == 4 then
 			buffer.writef32(out, to8, raw8)
-		else
+		elseif s8 == 5 then
 			buffer.writef64(out, to8, raw8)
+		elseif s8 == 6 then
+			buffer.writeu8(out, to8, raw8 * k8 + 0.5)
+		elseif s8 == 7 then
+			buffer.writeu16(out, to8, raw8 * k8 + 0.5)
+		else
+			buffer.writeu32(out, to8, raw8 * k8 + 0.5)
 		end
 	end
 end
@@ -1068,6 +1160,23 @@ local function numberReader(node: Node): Reader
 	local min = node.min :: number
 	local max = node.max :: number
 	local storage = node.storage
+	local step = node.step
+
+	--[[ Quantised, so the count of steps comes back multiplied. `max` is the reconstructed top
+	     (`Ir.lowerNumber`), which is exactly what the top level produces — so this refuses a count
+	     past the last level the schema declared and nothing that is inside it. ]]
+	if step then
+		return function(_flags: Flags): any
+			local value = read() * step + offset
+
+			if value > max then
+				reject("number out of range")
+				return min
+			end
+
+			return value
+		end
+	end
 
 	if storage == "f32" or storage == "f64" then
 		--[[
@@ -1210,14 +1319,14 @@ local function fusedStructReader(node: Node): Reader?
 	local r5, r6 = rows[5] or BLANK, rows[6] or BLANK
 	local r7, r8 = rows[7] or BLANK, rows[8] or BLANK
 
-	local n1, a1, o1, s1, lo1, hi1 = r1.name, r1.at, r1.offset, r1.code, r1.lo, r1.hi
-	local n2, a2, o2, s2, lo2, hi2 = r2.name, r2.at, r2.offset, r2.code, r2.lo, r2.hi
-	local n3, a3, o3, s3, lo3, hi3 = r3.name, r3.at, r3.offset, r3.code, r3.lo, r3.hi
-	local n4, a4, o4, s4, lo4, hi4 = r4.name, r4.at, r4.offset, r4.code, r4.lo, r4.hi
-	local n5, a5, o5, s5, lo5, hi5 = r5.name, r5.at, r5.offset, r5.code, r5.lo, r5.hi
-	local n6, a6, o6, s6, lo6, hi6 = r6.name, r6.at, r6.offset, r6.code, r6.lo, r6.hi
-	local n7, a7, o7, s7, lo7, hi7 = r7.name, r7.at, r7.offset, r7.code, r7.lo, r7.hi
-	local n8, a8, o8, s8, lo8, hi8 = r8.name, r8.at, r8.offset, r8.code, r8.lo, r8.hi
+	local n1, a1, o1, s1, lo1, hi1, u1 = r1.name, r1.at, r1.offset, r1.code, r1.lo, r1.hi, r1.unit
+	local n2, a2, o2, s2, lo2, hi2, u2 = r2.name, r2.at, r2.offset, r2.code, r2.lo, r2.hi, r2.unit
+	local n3, a3, o3, s3, lo3, hi3, u3 = r3.name, r3.at, r3.offset, r3.code, r3.lo, r3.hi, r3.unit
+	local n4, a4, o4, s4, lo4, hi4, u4 = r4.name, r4.at, r4.offset, r4.code, r4.lo, r4.hi, r4.unit
+	local n5, a5, o5, s5, lo5, hi5, u5 = r5.name, r5.at, r5.offset, r5.code, r5.lo, r5.hi, r5.unit
+	local n6, a6, o6, s6, lo6, hi6, u6 = r6.name, r6.at, r6.offset, r6.code, r6.lo, r6.hi, r6.unit
+	local n7, a7, o7, s7, lo7, hi7, u7 = r7.name, r7.at, r7.offset, r7.code, r7.lo, r7.hi, r7.unit
+	local n8, a8, o8, s8, lo8, hi8, u8 = r8.name, r8.at, r8.offset, r8.code, r8.lo, r8.hi, r8.unit
 
 	return function(_flags: Flags): any
 		local src, at = span(size)
@@ -1239,8 +1348,14 @@ local function fusedStructReader(node: Node): Reader?
 			v1 = buffer.readu32(src, at1) + o1
 		elseif s1 == 4 then
 			v1 = buffer.readf32(src, at1) + o1
-		else
+		elseif s1 == 5 then
 			v1 = buffer.readf64(src, at1) + o1
+		elseif s1 == 6 then
+			v1 = buffer.readu8(src, at1) * u1 + o1
+		elseif s1 == 7 then
+			v1 = buffer.readu16(src, at1) * u1 + o1
+		else
+			v1 = buffer.readu32(src, at1) * u1 + o1
 		end
 
 		if not (v1 >= lo1 and v1 <= hi1) then
@@ -1265,8 +1380,14 @@ local function fusedStructReader(node: Node): Reader?
 			v2 = buffer.readu32(src, at2) + o2
 		elseif s2 == 4 then
 			v2 = buffer.readf32(src, at2) + o2
-		else
+		elseif s2 == 5 then
 			v2 = buffer.readf64(src, at2) + o2
+		elseif s2 == 6 then
+			v2 = buffer.readu8(src, at2) * u2 + o2
+		elseif s2 == 7 then
+			v2 = buffer.readu16(src, at2) * u2 + o2
+		else
+			v2 = buffer.readu32(src, at2) * u2 + o2
 		end
 
 		if not (v2 >= lo2 and v2 <= hi2) then
@@ -1291,8 +1412,14 @@ local function fusedStructReader(node: Node): Reader?
 			v3 = buffer.readu32(src, at3) + o3
 		elseif s3 == 4 then
 			v3 = buffer.readf32(src, at3) + o3
-		else
+		elseif s3 == 5 then
 			v3 = buffer.readf64(src, at3) + o3
+		elseif s3 == 6 then
+			v3 = buffer.readu8(src, at3) * u3 + o3
+		elseif s3 == 7 then
+			v3 = buffer.readu16(src, at3) * u3 + o3
+		else
+			v3 = buffer.readu32(src, at3) * u3 + o3
 		end
 
 		if not (v3 >= lo3 and v3 <= hi3) then
@@ -1317,8 +1444,14 @@ local function fusedStructReader(node: Node): Reader?
 			v4 = buffer.readu32(src, at4) + o4
 		elseif s4 == 4 then
 			v4 = buffer.readf32(src, at4) + o4
-		else
+		elseif s4 == 5 then
 			v4 = buffer.readf64(src, at4) + o4
+		elseif s4 == 6 then
+			v4 = buffer.readu8(src, at4) * u4 + o4
+		elseif s4 == 7 then
+			v4 = buffer.readu16(src, at4) * u4 + o4
+		else
+			v4 = buffer.readu32(src, at4) * u4 + o4
 		end
 
 		if not (v4 >= lo4 and v4 <= hi4) then
@@ -1343,8 +1476,14 @@ local function fusedStructReader(node: Node): Reader?
 			v5 = buffer.readu32(src, at5) + o5
 		elseif s5 == 4 then
 			v5 = buffer.readf32(src, at5) + o5
-		else
+		elseif s5 == 5 then
 			v5 = buffer.readf64(src, at5) + o5
+		elseif s5 == 6 then
+			v5 = buffer.readu8(src, at5) * u5 + o5
+		elseif s5 == 7 then
+			v5 = buffer.readu16(src, at5) * u5 + o5
+		else
+			v5 = buffer.readu32(src, at5) * u5 + o5
 		end
 
 		if not (v5 >= lo5 and v5 <= hi5) then
@@ -1369,8 +1508,14 @@ local function fusedStructReader(node: Node): Reader?
 			v6 = buffer.readu32(src, at6) + o6
 		elseif s6 == 4 then
 			v6 = buffer.readf32(src, at6) + o6
-		else
+		elseif s6 == 5 then
 			v6 = buffer.readf64(src, at6) + o6
+		elseif s6 == 6 then
+			v6 = buffer.readu8(src, at6) * u6 + o6
+		elseif s6 == 7 then
+			v6 = buffer.readu16(src, at6) * u6 + o6
+		else
+			v6 = buffer.readu32(src, at6) * u6 + o6
 		end
 
 		if not (v6 >= lo6 and v6 <= hi6) then
@@ -1395,8 +1540,14 @@ local function fusedStructReader(node: Node): Reader?
 			v7 = buffer.readu32(src, at7) + o7
 		elseif s7 == 4 then
 			v7 = buffer.readf32(src, at7) + o7
-		else
+		elseif s7 == 5 then
 			v7 = buffer.readf64(src, at7) + o7
+		elseif s7 == 6 then
+			v7 = buffer.readu8(src, at7) * u7 + o7
+		elseif s7 == 7 then
+			v7 = buffer.readu16(src, at7) * u7 + o7
+		else
+			v7 = buffer.readu32(src, at7) * u7 + o7
 		end
 
 		if not (v7 >= lo7 and v7 <= hi7) then
@@ -1421,8 +1572,14 @@ local function fusedStructReader(node: Node): Reader?
 			v8 = buffer.readu32(src, at8) + o8
 		elseif s8 == 4 then
 			v8 = buffer.readf32(src, at8) + o8
-		else
+		elseif s8 == 5 then
 			v8 = buffer.readf64(src, at8) + o8
+		elseif s8 == 6 then
+			v8 = buffer.readu8(src, at8) * u8 + o8
+		elseif s8 == 7 then
+			v8 = buffer.readu16(src, at8) * u8 + o8
+		else
+			v8 = buffer.readu32(src, at8) * u8 + o8
 		end
 
 		if not (v8 >= lo8 and v8 <= hi8) then

@@ -129,6 +129,58 @@ local scaled = t.f32(0, 1e9)
 check("a range past the integer-exact span is a legal declaration", scaled.max == 1e9)
 
 -- ---------------------------------------------------------------------------------------------
+-- A float carried as a count of steps
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`t.quantized` is the one range on a fractional value that narrows the storage. `t.f32(-1, 1)`
+	costs four bytes because a float is never re-encoded; this says how much precision the author
+	actually needs and lets the layout spend what that costs.
+
+	The declaration carries `step` and no `encoding` — the encoding is chosen at lowering from how
+	many steps the range holds, which is the only place that knows.
+]]
+local normal = t.quantized(-1, 1, 2 / 254)
+check("a quantised number is still a number", normal.kind == "number")
+check("and carries its step", normal.step == 2 / 254)
+check("with the bounds as declared", normal.min == -1 and normal.max == 1)
+check("and no encoding of its own", normal.encoding == nil)
+
+rejects("a step of zero", function()
+	t.quantized(-1, 1, 0)
+end)
+
+rejects("a negative step", function()
+	t.quantized(-1, 1, -0.1)
+end)
+
+rejects("a step wider than the range", function()
+	t.quantized(-1, 1, 3)
+end)
+
+rejects("an inverted range", function()
+	t.quantized(1, -1, 0.1)
+end)
+
+rejects("a range with no width at all", function()
+	t.quantized(1, 1, 0.1)
+end)
+
+--[[ The one that is a judgement rather than a typo: 0..100 in steps of 3 is 33.3 of them, and which
+     end moves is the author's call. Refusing beats rounding one of them silently. ]]
+rejects("a range that is not a whole number of steps", function()
+	t.quantized(0, 100, 3)
+end)
+
+--[[ And the arithmetic that produced the caution: `2 / (2 / 254)` is 254.00000000000003, so the
+     check has to be relative or the declaration this type exists for would be refused by it. ]]
+check("a step that divides to within a rounding is accepted", t.quantized(-1, 1, 2 / 254).step ~= nil)
+
+rejects("more levels than a four-byte count holds", function()
+	t.quantized(0, 1, 1e-11)
+end)
+
+-- ---------------------------------------------------------------------------------------------
 -- Wire order never comes from table iteration
 -- ---------------------------------------------------------------------------------------------
 

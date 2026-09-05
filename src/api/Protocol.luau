@@ -81,6 +81,11 @@ local ATTRIBUTES: { string } = {
 	"storage",
 	"min",
 	"max",
+	--[[ `t.quantized(-1, 1, 2 / 254)` and `t.quantized(-1, 1, 2 / 200)` lower to the same storage,
+	     the same bounds and different meanings for every byte on the wire. Without this they hashed
+	     identically and printed byte-identical signatures — the `subject` failure below, in a third
+	     place. ]]
+	"step",
 	"unit",
 	"class",
 	"lengthStorage",

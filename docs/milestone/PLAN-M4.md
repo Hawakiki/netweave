@@ -758,6 +758,47 @@ they are struck through.
       has already cost a coroutine, a round trip and a reply packet, and its record is frozen so a
       lazy field could not cache into it anyway.
 
+#### The type vocabulary the report asked for
+
+The report's "Suggested Types" table is the last section of it, and these are the entries that can be
+verified end to end under lune. The ones needing `Vector3`, `CFrame` or a real `Instance` wait for the
+Studio pass.
+
+- [x] **Bounds count in whole numbers.** `t.u8(0.5, 2.5)` type-checked, lowered, encoded and
+      delivered a different number than was sent with no rejection anywhere — the offset became 0.5,
+      the writer's whole-number test passed on the *value*, `buffer.writeu8(1 - 0.5)` truncated, and
+      the reader added it back. Sent 1, got 0.5. Same for `t.string`/`t.buffer` lengths and
+      `t.array`'s count, where `t.array(t.u8, 1.5)` was a channel that refused every list.
+- [x] **A float reaches its encoding.** `f32` was capped at 2^24 and `f64` at 2^53 — the spans in
+      which each holds every *integer* exactly, not the values it carries — so bare `t.f32` refused
+      1e8 and `t.f32(0, 1e9)` was refused at declaration. The cap did no layout work either, because
+      a float is never narrowed. Largest finite value of each now, with the precision that is *not*
+      promised written into the docstrings.
+- [x] **`t.quantized(min, max, step)`** — the one range on a fractional value that narrows the
+      storage, because it declares how much precision is needed rather than how large the number
+      gets. `t.quantized(-1, 1, 2 / 254)` is one byte where `t.f32` is four; a quarter-degree turn is
+      two. The range must divide into a whole number of steps, refused rather than rounded, because
+      which end moves is the author's call.
+- [x] **The quantised arithmetic is three more arms on the branch chain, not a fold.** Folding it —
+      one multiply and one add above the chain, which is the smaller diff — was measured on
+      `bench/profile.luau` at **12,670 → 13,524 ns a packet, 6.7%**, with `put` flat across both sets
+      of runs. That is a tax on every struct in the library for a type most do not use, so `u8`,
+      `u16` and `u32` get quantised codes of their own at the end of the chain and a plain field
+      never reaches them. Re-measured after: 12,896 against 12,670, unmoved.
+- [x] **The node's ceiling is the top level it can reconstruct, not the declaration.** `raw * step +
+      min` lands a rounding *above* the declared maximum for **67 of 2,400** evenly-dividing ranges,
+      2.8% — `t.quantized(0, 100, 100 / 11)` is one — so a reader bounded by the declaration refuses
+      the value its own writer accepted, at the top of the range, which is where a game sends. Same
+      fix and same reason as the `f32` bound.
+- [x] `step` joins the protocol hash. `t.quantized(-1, 1, 2 / 254)` and `t.quantized(-1, 1, 2 / 200)`
+      lower to the same storage and the same bounds, hashed identically and printed byte-identical
+      signatures, and mean something different for every byte on the wire. That is the `subject`
+      failure in a third place.
+- [x] Confirmed by mutation: no integrality check on a range (4 failures) or on an array count (2),
+      the 2^24 cap restored (2, one of them the report's own message), the fused path treating a
+      quantised field as plain (1), `step` out of the hash (2), and the reader bounded by the
+      declaration (2).
+
 ## 7. Acceptance criteria
 
 1. A client joining mid-session receives a snapshot and is correct on the first frame it renders — asserted against a subject whose state changed while that client was absent.

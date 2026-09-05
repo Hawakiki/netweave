@@ -150,4 +150,20 @@ end
 
 local _seq: number = handle({ origin = Vector3.zero, seq = 9 })
 
+--[[ `t.quantized` carries a plain `number`, and saying so here is what makes that a checked claim
+     rather than a docstring: a constructor that returned `Type<unknown>` would infer `unknown` for
+     the field and every read of it downstream. ]]
+local _Aim = t.struct({
+	normal = t.quantized(-1, 1, 2 / 254),
+	yaw = t.quantized(-180, 180, 0.25),
+})
+
+local _aim: t.PayloadOf<typeof(_Aim)> = { normal = -0.5, yaw = 90 }
+
+local function heading(payload: { normal: number, yaw: number }): number
+	return payload.yaw
+end
+
+local _heading: number = heading(_aim)
+
 return nil
