@@ -32,12 +32,36 @@
 ]]
 local SMOKE = false
 
+--[[
+	**Where an `ArrayHeavy` frame actually goes**, instead of the matrix.
+
+	`PLAN-M4` phase 7 made the codec 1.31x faster on this VM, removed 1.8 ms from an 11.76 ms frame,
+	and the framerate did not move by one FPS. The matrix cannot say why, because it reports the
+	frame as one number; `bench/profile.luau` cannot either, because it takes the encode apart with
+	the frame removed. This flag runs the missing instrument: the same Play, the same load, the same
+	server, with the frame split into the part the fire loop owns and the part it does not — and the
+	server's own framerate sampled in the same window, which the Up cell has never had.
+
+	It replaces the matrix rather than running beside it: the matrix takes fifteen minutes and this
+	takes under one, and running the two together would put a drain-less probe inside the run it is
+	trying to explain.
+
+	Its numbers are diagnostics and do not go in `RESULTS.md` as a cell. What they can do is name the
+	next thing to measure — which is more than the phase that needed them had.
+]]
+local FRAME_PROBE = false
+
 --[[ nil runs every adapter that loaded. A list runs only those, in the harness's own order. ]]
 local ONLY_MODES: { string }? = nil
 
 return table.freeze({
 	SMOKE = SMOKE,
 	ONLY_MODES = ONLY_MODES,
+	FRAME_PROBE = FRAME_PROBE,
+
+	--[[ Per phase. Short because the question is a ratio between phases in one session, not a
+	     number to quote — and every phase is separated by the same drain the matrix uses. ]]
+	PROBE_SECONDS = 5,
 
 	--[[ Fires per `PostSimulation` step, per mode and schema. ]]
 	PACKETS_PER_FRAME = 200,
@@ -99,6 +123,8 @@ return table.freeze({
 		START_DOWN = "startDown",
 		START_FIREALL = "startFireAll",
 		STOP_DOWN = "stopDown",
+		START_PROBE = "startProbe",
+		STOP_PROBE = "stopProbe",
 	}),
 
 	--[[ Where the client parks the final JSON for the harness driver to read. ]]
