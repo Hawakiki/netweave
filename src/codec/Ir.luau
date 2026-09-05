@@ -107,6 +107,7 @@ export type Field = {
 	.storage Encoding? -- the narrowed encoding a number is actually written at
 	.offset number? -- subtracted before writing, added back on read
 	.step number? -- the size of one wire level, when the number is quantised
+	.whole boolean? -- whether a number must be an integer, asked on both sides
 	.min number? -- a value bound for numbers, a length bound for strings, arrays and maps
 	.max number? -- the same, and what the decoder rejects against
 	.unit boolean?
@@ -137,6 +138,7 @@ export type Node = {
 	storage: Encoding?,
 	offset: number?,
 	step: number?,
+	whole: boolean?,
 	min: number?,
 	max: number?,
 	unit: boolean?,
@@ -328,6 +330,7 @@ local function lowerNumber(descriptor: Descriptor): Node
 			step = step,
 			min = min,
 			max = math.max(max, min + levels * step),
+			whole = false,
 		}
 	end
 
@@ -348,10 +351,43 @@ local function lowerNumber(descriptor: Descriptor): Node
 			offset = 0,
 			min = min,
 			max = max,
+			whole = false,
 		}
 	end
 
-	local storage = storageFor(max - min)
+	--[[
+		**A whole number wider than four bytes.**
+
+		`u53` and `i53` are the only declared encodings with no storage of their own: a range that
+		fits an unsigned 32-bit span narrows exactly like `u32` does, and one that does not is
+		carried in an `f64`, where every integer up to 2^53 is exact. That is what makes a `UserId`
+		or a millisecond timestamp declarable — until M4 phase 8 the widest integer was `u32` and the
+		only thing that reached further was `t.f64`, which is a float and was checked for wholeness
+		by the *writer* alone (M4 report).
+
+		`offset` is zero on the wide path and it has to be. `value - min` for `t.i53` spans 2^54, and
+		an odd integer above 2^53 is not representable as a double — so subtracting the bound would
+		round the very values this exists to carry. It is subtracted only when the span is small
+		enough for a narrower storage, where it is exact by construction.
+	]]
+	local wide = encoding == "u53" or encoding == "i53"
+	local span = max - min
+
+	if wide and span > 4294967295 then
+		return {
+			kind = "number",
+			bits = 0,
+			fixedSize = ENCODING_SIZE.f64,
+			instances = 0,
+			storage = "f64",
+			offset = 0,
+			min = min,
+			max = max,
+			whole = true,
+		}
+	end
+
+	local storage = storageFor(span)
 
 	return {
 		kind = "number",
@@ -362,6 +398,7 @@ local function lowerNumber(descriptor: Descriptor): Node
 		offset = min,
 		min = min,
 		max = max,
+		whole = true,
 	}
 end
 

@@ -181,6 +181,37 @@ rejects("more levels than a four-byte count holds", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- Whole numbers wider than four bytes
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Until M4 phase 8 the widest integer was `t.u32`, so a `UserId` had to be declared `t.f64` — a
+	float, whose wholeness only the writer refused. These are the two encodings that reach 2^53 and
+	are checked on both sides.
+]]
+check("u53 spans every integer a double holds", t.u53.min == 0 and t.u53.max == 2 ^ 53)
+check("i53 is the same with a sign", t.i53.min == -(2 ^ 53) and t.i53.max == 2 ^ 53)
+check("and both are numbers", t.u53.kind == "number" and t.i53.kind == "number")
+
+--[[ Narrowing is the ordinary path: a range whose span fits a smaller storage takes it, and the
+     declaration is what says how wide the value *can* be rather than how wide it is stored. ]]
+local stamp = t.u53(1, 1000)
+check("a narrowed u53 keeps its encoding", stamp.encoding == "u53")
+check("and its bounds", stamp.min == 1 and stamp.max == 1000)
+
+rejects("a u53 range below zero", function()
+	t.u53(-1, 10)
+end)
+
+rejects("a u53 range past what a double holds exactly", function()
+	t.u53(0, 2 ^ 54)
+end)
+
+rejects("a fractional u53 bound", function()
+	t.u53(0, 10.5)
+end)
+
+-- ---------------------------------------------------------------------------------------------
 -- Wire order never comes from table iteration
 -- ---------------------------------------------------------------------------------------------
 

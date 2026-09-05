@@ -1475,6 +1475,124 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Whole numbers wider than four bytes
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ A `UserId`, a millisecond timestamp, a balance. Eight bytes bare and exact to 2^53, which is
+	     the whole point: `t.f64` reaches the same values and is a float. ]]
+	trip("a u53 carries a UserId", t.u53, 7594110182, 8)
+	trip("and the largest integer a double holds", t.u53, 2 ^ 53, 8)
+	trip("and zero", t.u53, 0, 8)
+	trip("an i53 carries the bottom of its range", t.i53, -(2 ^ 53), 8)
+
+	--[[ The value that proves the offset is not subtracted on the wide path: `value - min` here
+	     would be `2^54 - 1`, which is not representable, and it would come back rounded. ]]
+	trip("and an odd number just under the top", t.i53, 2 ^ 53 - 1, 8)
+
+	--[[ Narrowed, where it behaves like any other integer and costs what its span costs. ]]
+	trip("a narrowed u53 costs what its span costs", t.u53(1, 1000), 500, 2)
+	trip("at the bottom of the range", t.u53(1, 1000), 1, 2)
+	trip("and at the top", t.u53(1, 1000), 1000, 2)
+
+	refuses("a fraction is refused on the way out", t.u53, 1.5)
+	refuses("and so is one past the range", t.u53, 2 ^ 53 + 2)
+	refuses("an i53 refuses a fraction too", t.i53, -1.5)
+end
+
+do
+	--[[
+		**The half `t.f64` never had.** A `UserId` declared `t.f64` was checked for wholeness by the
+		writer alone, so a peer sending 1.5 on a field a game reads as an id got 1.5 delivered — and
+		`Players:GetPlayerByUserId`, a table key and a datastore write all behave differently for it.
+
+		The bytes are written by hand because no netweave writer will produce them, which is what
+		makes this a receive-path test rather than a round trip.
+	]]
+	local id = Serdes.fromSchema(t.u53)
+
+	local fraction = buffer.create(8)
+	buffer.writef64(fraction, 0, 1.5)
+
+	local value, failure = decode(id, fraction)
+
+	check("a fraction on the wire is refused where the schema says whole", failure ~= nil)
+	equals("and nothing is handed up", value, nil)
+
+	local honest = buffer.create(8)
+	buffer.writef64(honest, 0, 7594110182)
+
+	local back, refused = decode(id, honest)
+
+	check(`while a whole one arrives: {tostring(refused)}`, refused == nil)
+	equals("intact", back, 7594110182)
+
+	--[[ And the control: the same bytes through `t.f64`, which is a float and says so. A schema that
+	     refused this would be refusing the type its own docstring describes. ]]
+	local float = Serdes.fromSchema(t.f64)
+	local fine, allowed = decode(float, fraction)
+
+	check("the same bytes are fine on a float", allowed == nil)
+	equals("and arrive as they were sent", fine, 1.5)
+end
+
+do
+	--[[ A struct with a wide `u53` in it takes the loop writer rather than the unroll: the check for
+	     wholeness is one the unrolled body does not make, and folding it in would be a test per
+	     field on every struct in the library. `rowsOf` refuses the row, so the loop — which asks it
+	     already — takes over, and what has to hold is that the answer is the same. ]]
+	local mixed = Serdes.fromSchema(t.struct({ a = t.u8, owner = t.u53 }))
+
+	Buffer.take()
+	Buffer.load(nil)
+	mixed.write({ a = 7, owner = 7594110182 })
+
+	local packed = (Buffer.take())
+	Buffer.beginRead(packed, nil)
+
+	local back = mixed.read()
+
+	equals("a struct with a wide u53 is 1 + 8 bytes", buffer.len(packed), 9)
+	equals("the plain field survives", back.a, 7)
+	equals("and the wide one", back.owner, 7594110182)
+
+	local wrote = pcall(mixed.write, { a = 7, owner = 1.5 })
+	Buffer.load(nil)
+
+	check("and the loop writer still refuses a fraction", not wrote)
+
+	--[[ The half that says the refusal in `rowsOf` is load-bearing rather than tidy. The unrolled
+	     *writer* would have refused this anyway, because its integrality flag comes off the node —
+	     the unrolled **reader** has no such check, so a struct that fused would take a fraction off
+	     the wire and hand it to a handler expecting an id. Fields are emitted in name order, so
+	     `a` is the byte and `owner` the eight after it. ]]
+	local forged = buffer.create(9)
+	buffer.writeu8(forged, 0, 7)
+	buffer.writef64(forged, 1, 1.5)
+
+	local value, failure = decode(mixed, forged)
+
+	check("a fraction inside a struct is refused too", failure ~= nil)
+	equals("with nothing handed up", value, nil)
+
+	--[[ While a *narrowed* one lands on an unsigned storage, where the value is whole by
+	     construction — so that struct keeps the unroll. ]]
+	local fused = Serdes.fromSchema(t.struct({ a = t.u8, stamp = t.u53(1, 1000) }))
+
+	Buffer.take()
+	Buffer.load(nil)
+	fused.write({ a = 7, stamp = 500 })
+
+	local small = (Buffer.take())
+	Buffer.beginRead(small, nil)
+
+	local read = fused.read()
+
+	equals("a narrowed one is 1 + 2", buffer.len(small), 3)
+	equals("and reads back", read.stamp, 500)
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- A key that is not there, and a repeated thing that costs nothing (M4 report, 2 and 3)
 -- ---------------------------------------------------------------------------------------------
 
