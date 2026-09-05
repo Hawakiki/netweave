@@ -243,6 +243,47 @@ local function startDown(player: Player, mode: string, schema: Modes.SchemaName,
 	end)
 end
 
+--[[
+	The server's own framerate, sampled on demand.
+
+	`startDown` already counts frames, but only while the *server* is the sender. The Up cell has no
+	server-side number at all, and that is the hole `PLAN-M4` phase 7 fell into: Studio Play runs
+	both peers in one process, so a client frame that will not go faster may be waiting on work the
+	server is doing in the same budget — decoding the two hundred packets that client just sent.
+
+	Nothing here runs unless the frame probe asks for it. A counter left on for every cell would be
+	cheap and would still be a change to the instrument, which is the thing this file is least
+	allowed to do quietly.
+]]
+local probeConnection: RBXScriptConnection? = nil
+local probeFramerate: { number } = {}
+
+local function stopProbe()
+	if probeConnection then
+		probeConnection:Disconnect()
+		probeConnection = nil
+	end
+end
+
+local function startProbe()
+	stopProbe()
+	table.clear(probeFramerate)
+
+	local elapsed = 0
+	local frames = 0
+
+	probeConnection = RunService.PostSimulation:Connect(function(deltaTime: number)
+		elapsed += deltaTime
+		frames += 1
+
+		if elapsed >= 1 then
+			elapsed -= 1
+			table.insert(probeFramerate, frames)
+			frames = 0
+		end
+	end)
+end
+
 control.OnServerEvent:Connect(function(player, command, mode, schema)
 	if command == Config.COMMAND.RESET then
 		resetCell(mode, schema)
@@ -252,6 +293,10 @@ control.OnServerEvent:Connect(function(player, command, mode, schema)
 		startDown(player, mode, schema, true)
 	elseif command == Config.COMMAND.STOP_DOWN then
 		stopDown()
+	elseif command == Config.COMMAND.START_PROBE then
+		startProbe()
+	elseif command == Config.COMMAND.STOP_PROBE then
+		stopProbe()
 	end
 end)
 
@@ -342,6 +387,8 @@ getResults.OnServerInvoke = function(_player, command: string, mode: string?, sc
 			bandwidth = Metrics.summarize(downBandwidth),
 			framerate = Metrics.summarize(downFramerate),
 		}
+	elseif command == "probe" then
+		return { framerate = Metrics.summarize(probeFramerate), samples = #probeFramerate }
 	end
 
 	return { unavailable = unavailable }

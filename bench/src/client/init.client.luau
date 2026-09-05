@@ -179,6 +179,25 @@ if Config.SMOKE then
 	warn("[bench] SMOKE run: short windows, few samples. These numbers do not belong in RESULTS.md.")
 end
 
+--[[
+	The frame probe replaces the matrix rather than running beside it — fifteen minutes against one,
+	and a probe without drains inside the run it is trying to explain would contaminate the thing it
+	is measuring. Everything it needs is built by this point: the adapters, the drain, and the two
+	remotes.
+
+	`PLAN-M4` phase 7 is why it exists. See `bench/src/client/frame.luau`.
+]]
+if Config.FRAME_PROBE then
+	require(script.frame)({
+		adapters = adapters,
+		drain = drain,
+		control = control,
+		getResults = getResults,
+	})
+
+	return
+end
+
 local taps: { [string]: WireTap.Tap? } = {}
 for mode in adapters do
 	taps[mode] = WireTap.forMode(mode)
