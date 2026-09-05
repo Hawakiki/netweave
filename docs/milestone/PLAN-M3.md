@@ -719,13 +719,44 @@ the measured window opens.
 | `FlagIdiomatic` encode / decode | 81.9 / 462.8 | 81.9 / 462.8 | byte-identical |
 | `FlagNaive` encode / decode | 81.9 / 462.8 | 81.9 / 462.8 | byte-identical |
 
-- [ ] **Acceptance 6 is answered and the answer is a regression.** The criterion asked for the
-      number "whether it moved or not"; it moved the wrong way. The ceiling M3 added to bound it
-      never binds, because `pendingPerBatch` defaults to 256 and the harness offers 200 a frame.
-- [ ] **Find the encode regression.** The flag cells are identical to the byte, so it is not global:
-      something on the large-payload send path costs 2.6 KB per packet that M2 did not. The
-      candidates are phase 4's `guarded(writer, ...)` vararg forwarding and the `writeFramed` split.
-      Measure before changing anything.
+- [x] ~~**Acceptance 6 is answered and the answer is a regression.**~~ ~~**Find the encode
+      regression.**~~ **There is no regression, and the numbers that said there was are not
+      reproducible.**
+
+      The `ArrayHeavy` allocation cells survive three to seven sample windows out of twenty-five,
+      and between the M2 and M3 runs, libraries whose code had not changed by a line moved **19%**
+      (blink encode), **21%** (zap encode), **37%** (blink decode) and **86%** (zap decode). Every
+      flag cell in both runs agreed to the decimal, in all five modes — which is the tell: their
+      windows are small enough that every one survives.
+
+      The same comparison run under lune against both trees, with one *frame* per window instead of
+      one packet, returns four hundred usable windows out of four hundred with a spread of zero and
+      says the two are identical:
+
+      | per packet | M2 `272965a` | M3 `7e5e00b` |
+      |---|---|---|
+      | `ArrayHeavy` encode | 1908.4 B | 1908.4 B |
+      | `ArrayHeavy` through `inbound.receive` | 32048.2 B `[0 spread]` | 32048.2 B `[0 spread]` |
+      | `Flags` encode | 30.5 B | 30.5 B |
+      | `Flags` through `inbound.receive` | 560.2 B `[0 spread]` | 560.2 B `[0 spread]` |
+
+      Reproduced twice. The lune absolute figures are not comparable to Studio's — a different
+      runtime accounts for its heap differently — but the *comparison* is the question, and both
+      trees ran the same probe on the same machine in the same minute.
+
+      What nearly happened is the part worth recording. The flag cells being identical narrowed it
+      to "something on the large-payload send path", and phase 4's `guarded(writer, ...)` vararg
+      forwarding was the named suspect. Reverting it would have "fixed" a regression that did not
+      exist, and the commit would have stood forever with a plausible message and no defect behind
+      it. What answered the question was the **control group** — how far the code that did not change
+      moved in the same run.
+- [x] **The harness records its spread now.** `Alloc.measure` returns `low` and `high` beside the
+      median, both the client and the server write them into the run document, `ALLOC_REPEATS`
+      doubles, and `bench/README.md` says to read the spread and the sample count before quoting the
+      median. A probe that cannot be reproduced now says so in the document instead of in the next
+      milestone's plan. `CLAUDE.md` §5 already said never to report a number that was not produced
+      by a committed, re-runnable script; a number that does not survive re-running fails the same
+      test and nothing was checking it.
 - [ ] **Decide what to do about `ArrayHeavy`.** Against the field netweave is now last on framerate
       (83 against blink 131, bytenet 115, zap 111) and worst on decode allocation by 13 to 21 times
       (10176.5 against zap 480.3, blink 770.0, bytenet 2338.8). The decode number is read-then-
@@ -770,9 +801,12 @@ worked example rather than as another rule.
    with `t.array(t.array(t.u8, 0, 1000), 0, 1000)`, which derives 1,002,002 and is bounded by a
    declared 64.
 6. `ArrayHeavy` decode allocation per packet is reported against the M2 baseline of 9309.2 B in
-   `bench/RESULTS.md`, whether it moved or not. **Measured: 10176.5 B, +9.3%** — it moved the wrong
-   way, and the same run shows encode allocation on that cell at +66.6%. `bench/RESULTS.md` is
-   pending; the run document is `bench/runs/2026-09-05-m3.json`.
+   `bench/RESULTS.md`, whether it moved or not. ~~**Measured: 10176.5 B, +9.3%** — it moved the wrong
+   way, and the same run shows encode allocation on that cell at +66.6%.~~ **Both figures are
+   artefacts of a probe that survives four sample windows; the criterion is not met, because the
+   harness cannot yet produce a reproducible number for this cell.** Phase 9 makes the spread
+   visible so the next run can say whether it has one. The run document is
+   `bench/runs/2026-09-05-m3.json`; `bench/RESULTS.md` is pending.
 7. A game that attaches no observer sees a warning on the first refusal of each channel and stage,
    and does not see a second for the same pair.
 8. `nw.diagnostics()` returns a snapshot that cannot be mutated into the live counters.

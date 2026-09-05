@@ -404,6 +404,20 @@ The corollary is that a claim which cannot be probed is a claim to soften, not t
 written as a decode-work counter and the measurement said the hostile packet was *cheaper per byte*
 than the honest one, so the decision changed rather than the wording.
 
+### A measurement is not a number until it survives re-running
+
+`CLAUDE.md` §5 says never report a number that was not produced by a committed, re-runnable script.
+A number that does not survive *being* re-run fails the same test, and nothing was checking it: the
+benchmark's allocation probe reported a median over as few as four surviving sample windows, and
+between two runs of the same matrix, libraries whose code had not changed by a line moved 19%, 21%,
+37% and 86%. netweave's own numbers moved 67% and 9% and were written into a milestone plan as a
+regression.
+
+So a probe reports its **spread**, not only its median, and the reader checks the spread and the
+sample count before quoting anything. And when a number looks like a regression, the first question
+is what the **control group** did — how far the code that did not change moved in the same run.
+Chasing the difference without asking that would have "fixed" a defect that did not exist.
+
 ### A probe that finds nothing is written down
 
 Recording an audit's null results is what separates "checked and fine" from "never looked". `PLAN-M3`
