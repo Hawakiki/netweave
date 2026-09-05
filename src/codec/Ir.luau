@@ -957,32 +957,26 @@ end
 	kind is copied; the assignment fields are deliberately not, because `Ir.patch` reassigns them.
 ]]
 local function cloneNode(node: Node): Node
-	local copy: Node = {
-		kind = node.kind,
-		bits = node.bits,
-		fixedSize = node.fixedSize,
-		instances = node.instances,
-		storage = node.storage,
-		offset = node.offset,
-		min = node.min,
-		max = node.max,
-		unit = node.unit,
-		class = node.class,
-		lengthStorage = node.lengthStorage,
-		lengthOffset = node.lengthOffset,
-		count = node.count,
-		variants = node.variants,
-		lookup = node.lookup,
-		--[[ Frozen and read-only in both trees, so shared rather than copied. ]]
-		template = node.template,
+	--[[
+		Everything the node **is**, and nothing the layout **assigned** to it.
 
-		--[[ A nested scope is **structure**, not assignment: `lowerArray` and `lowerMap` create it
-		     because an element whose count is unknown until runtime cannot fold its flags into the
-		     enclosing bitfield. `assignBits` writes onto the nodes inside it and never onto the
-		     scope itself, so the two trees can share one. Dropping it here as though it were an
-		     assignment left an array element with flags and nowhere to put them. ]]
-		scope = node.scope,
-	}
+		This was a field-by-field copy, which is `CLAUDE.md` §9's hand-kept list in the one place
+		nothing tests it: a property missing here does not fail to compile and does not fail a round
+		trip — it produces a *patch* layout that reads a different value than the state layout wrote.
+		M4 phase 8 added four properties to `Node` and this copied none of them, so a `t.quantized`
+		field inside `nw.replicate` lost its step on the patch side and came back as a raw count.
+
+		`table.clone` inverts the list to the short one that does not grow: the four bit *positions*,
+		which are assignments `assignBits` makes over each tree separately and which would be stale
+		here. `template` and `scope` come across shared on purpose — both are read-only structure, and
+		dropping the scope left an array element with flags and nowhere to put them.
+	]]
+	local copy: Node = table.clone(node)
+
+	copy.chunkIndex = nil
+	copy.mask = nil
+	copy.tagChunks = nil
+	copy.tagMasks = nil
 
 	if node.inner then
 		copy.inner = cloneNode(node.inner :: Node)
