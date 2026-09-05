@@ -623,7 +623,13 @@ function Inbound.new(config: Config): Inbound
 	     because a batch that arrives inside another batch's dispatch has its own, and the outer
 	     one's state is restored around it the way `sender` and `filling` are. ]]
 	local full = false
-	local pendingCeiling = Settings.limitOf("pendingPerBatch")
+
+	--[[ What the game configured, and what this endpoint enforces — the same number on a server and
+	     no ceiling at all on a client. `refreshCeiling` below says why. Both are kept because the
+	     reason strings quote the configured one, and a client that reports nothing still has to be
+	     able to say what the limit was if it ever does. ]]
+	local configuredCeiling = Settings.limitOf("pendingPerBatch")
+	local pendingCeiling = if isServer then configuredCeiling else math.huge
 
 	--[[
 		The two reasons whose only variable is the ceiling, built when it moves rather than per
@@ -641,14 +647,42 @@ function Inbound.new(config: Config): Inbound
 	local ceilingReason = ""
 	local ceilingReplyReason = ""
 
+	--[[
+		**The ceiling is the server's, and applying it on a client is what broke replication at scale.**
+
+		The bound exists because the batch's size is chosen by an *untrusted* peer (`PLAN-M3` D-6). On
+		a client the peer is the server: the batch is what this game chose to send, already bounded at
+		the other end by this very limit, and refusing its tail saves no memory an attacker could have
+		claimed — it drops traffic the game asked for, and reports it against a peer that cannot be
+		asked to send less.
+
+		On a replicated channel it costs more than the tail. Past the ceiling the client refuses, a
+		refused change gives up the channel, and giving up clears the baselines it applied earlier in
+		the same batch; the resync then makes the server clear what it believed, and the next tick
+		sends the same oversized batch again. Measured with the real tick at the default limits before
+		this line existed:
+
+		  | subjects visible to one client | every frame |
+		  |---|---|
+		  | 256 | frame 1 converges, then 0 bytes |
+		  | 257 | 1,543 B down, 5 B up, mirror stuck at 256, **both sides holding nothing** |
+		  | 300 | 1,801 B down, 177 B up, 44 refusals and 44 resyncs, forever |
+
+		One subject over the limit was a channel that never worked, and the suite could not see it
+		because `tests/replication_runtime.luau` restored the limit after a single frame.
+
+		This is the same asymmetry `Driver` already writes down for `Baseline` — bounded on the
+		server, unbounded on the client — and for the same reason.
+	]]
 	local function refreshCeiling()
 		local limit = Settings.limitOf("pendingPerBatch")
 
-		if limit == pendingCeiling and ceilingReason ~= "" then
+		if limit == configuredCeiling and ceilingReason ~= "" then
 			return
 		end
 
-		pendingCeiling = limit
+		configuredCeiling = limit
+		pendingCeiling = if isServer then limit else math.huge
 		ceilingReason = `batch holds more than {limit} packets; the rest were dropped`
 		ceilingReplyReason = `the answer arrived in a batch holding more than {limit} packets and `
 			.. `was dropped`

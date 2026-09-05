@@ -865,24 +865,33 @@ do
 
 	clientIn.receive(Buffer.take(), nil, nil)
 
-	check("the two that fit were answered", first.done and second.done)
-	equals("in order", first.value.primary, 0)
-	check("and the third is still parked", not third.done)
-	equals("the drop was reported", reportsMatching("budget:test.q1"), 1)
+	--[[
+		**M4 phase 8 took the premise away, and the right thing to assert is what replaced it.**
 
-	--[[ The clock has not moved. The caller gives up on the next tick, not at its deadline. ]]
+		~~Two of the three answers fit under the ceiling and the third is dropped, and the caller is
+		told so on the next tick rather than waiting out its timeout.~~
+
+		The pending ceiling is the *server's* now: the batch's size is chosen by an untrusted peer
+		only when the peer is a client, and applying it on a client livelocked a replicated channel at
+		257 subjects (`src/transport/Inbound.luau`, `refreshCeiling`). A reply only ever arrives on a
+		client — the server `handle`s a query and the client `invoke`s it, so there is no direction in
+		which a server parks on an answer — which makes the defect the phase 4 audit found
+		**unreachable** rather than fixed twice.
+
+		So the assertion is the stronger one: three answers, three callers resolved, nothing parked
+		and nothing reported. The `holdReply` branch that abandons a dropped answer with a reason
+		stays where it is; it guards a transport that does not assume the API's directions, and
+		asserting it would need a server that can `invoke`, which netweave does not have.
+	]]
+	check("every answer arrived", first.done and second.done and third.done)
+	equals("in order", first.value.primary, 0)
+	equals("and the last one is not the one that was dropped", third.value.primary, 2)
+	equals("nothing was refused", reportsMatching("budget:test.q1"), 0)
+
 	clientQuery.tick()
 
-	check("the third resolved on the next tick", third.done)
-	equals("with no value", third.value, nil)
-	check(
-		"and a reason that says the answer was dropped, not that none came",
-		string.find(third.reason or "", "dropped", 1, true) ~= nil
-	)
-	check(
-		"and does not claim the deadline passed",
-		string.find(third.reason or "", "no answer within", 1, true) == nil
-	)
+	check("the third stays answered across a tick", third.done)
+	equals("with no reason, because nothing went wrong", third.reason, nil)
 	equals("nothing is left outstanding", clientQuery.outstanding(), 0)
 
 	Config.reset()

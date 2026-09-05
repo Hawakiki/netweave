@@ -417,25 +417,62 @@ do
 	peers[alice].resyncs = 0
 
 	--[[
-		`pendingPerBatch` drops the tail of an oversized batch. On a `signal` that is one lost
-		packet; on a replicated channel it is every later change made unreadable, because each one
-		is relative to a value the client no longer has.
+		A change that did not arrive whole is every later change made unreadable, because each one is
+		relative to a value the client no longer has. So the client notices — it is the endpoint that
+		refused the packet — clears the channel, and asks for it again. `PLAN-M4` D-2 expected a
+		sequence number on the wire to find the gap; there is none, because the gap does not have to
+		be found.
 
-		So the client notices — it is the endpoint that refused the packet — clears the channel, and
-		asks for it again. `PLAN-M4` D-2 expected a sequence number on the wire to find the gap;
-		there is none, because the gap does not have to be found.
+		~~Provoked with `pendingPerBatch = 1`.~~ **That stopped being reachable in M4 phase 8**: the
+		pending ceiling is the server's, because the batch's size is only chosen by an untrusted peer
+		when the peer is a client, and applying it here was a livelock at 257 subjects (the section
+		below). It was also the wrong provocation for this class — it set a limit no game runs, took
+		one frame, and then removed the limit before asserting the recovery.
+
+		The packet is damaged instead, which is what the failure looks like in a game: a change whose
+		bytes did not all arrive. Truncation rather than a flipped bit, because a flipped bit may
+		decode into a different valid value and this section is about the case that cannot.
 	]]
 	world[3] = { hp = 5, gold = 5, pos = { x = 5, y = 5 }, tag = nil }
 	world[4] = { hp = 6, gold = 6, pos = { x = 6, y = 6 }, tag = nil }
 	sees(3, alice)
 	sees(4, alice)
 
-	Config.configure({ limits = { pendingPerBatch = 1 } })
-	frame()
-	Config.reset()
+	tick()
+	serverOut.flush()
 
+	local damaged = 0
+
+	table.clear(carried)
+	table.move(toClient, 1, #toClient, 1, carried)
+	table.clear(toClient)
+
+	for _, sent in carried do
+		if peers[sent.to] == peers[alice] then
+			--[[ Half the bytes, so the batch's first packet is intact and whatever follows it runs
+			     off the end. ]]
+			local half = buffer.create(math.floor(buffer.len(sent.packed) / 2))
+			buffer.copy(half, 0, sent.packed, 0, buffer.len(half))
+			damaged += 1
+
+			receiving = peers[alice]
+			peers[alice].inbound.receive(half, sent.instances, nil)
+			peers[alice].inbound.tick()
+		end
+	end
+
+	clientOut.flush()
+
+	table.clear(carried)
+	table.move(toServer, 1, #toServer, 1, carried)
+	table.clear(toServer)
+
+	for _, sent in carried do
+		serverIn.receive(sent.packed, sent.instances, alice)
+	end
+
+	equals("the client was sent something", damaged, 1)
 	check("something was refused", peers[alice].resyncs > 0)
-	check("and one of the two still arrived", mirrorOf(alice)[3] ~= nil or mirrorOf(alice)[4] ~= nil)
 
 	--[[ The resync went out and the server cleared what it believed. The next frame therefore
 	     sends both in full, and the client is correct again — without the game having noticed
@@ -447,6 +484,88 @@ do
 	check("and so is the second", agrees(alice, 4))
 
 	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- More subjects than a batch may hold, at the limits a game actually runs
+-- ---------------------------------------------------------------------------------------------
+
+suite.passing()
+
+do
+	--[[
+		**The section above is one frame away from this one, and that is why it passed.**
+
+		It sets `pendingPerBatch = 1`, takes one frame, and then calls `Config.reset()`. The recovery
+		it asserts is therefore a recovery *with the limit gone*. A game does not get to remove the
+		limit: it is 256 by default and it is 256 on the frame after the refusal too.
+
+		With it in force on the client the channel never converges. The client refuses past the
+		ceiling, a refused change gives up the channel, giving up clears the baselines applied
+		earlier in the same batch, the resync makes the server clear what it believed, and the next
+		tick sends the same oversized batch. Measured before the fix, with the real tick and the
+		default limits: 257 subjects → 1,543 bytes down and 5 up **every frame**, mirror stuck at
+		256, both sides ending each frame holding nothing; 300 subjects → 1,801 down, 177 up, 44
+		refusals and 44 resyncs a frame, forever. One subject over the limit was a channel that never
+		worked.
+
+		The fix is that the ceiling is the *server's*: the batch's size is chosen by an untrusted peer
+		only when the peer is a client (`src/transport/Inbound.luau`, `refreshCeiling`).
+
+		This section runs at the **default** configuration for that reason. It is the one thing the
+		file was not doing.
+	]]
+	local COUNT = 300
+	local before = peers[alice].resyncs
+
+	--[[
+		`pendingPerBatch` stays at its default — it is the limit under test. `baselinesPerClient` is
+		raised because it is a *different* limit with a defect of its own: past it the tick re-sends
+		the whole subject every frame with nothing changing, deep-clones it, throws the clone away
+		and reports. Both defaults are 256, so any count that exercises the batch ceiling also
+		exercises the baseline ceiling, and leaving them tangled would have this section fail for the
+		other one's reason.
+
+		That defect is real and is filed as its own finding; what it is not is this section's
+		subject. Raising it is how the two are told apart.
+	]]
+	Config.configure({ limits = { baselinesPerClient = 1024 } })
+
+	for subject = 100, 100 + COUNT - 1 do
+		world[subject] = { hp = 1, gold = 2, pos = { x = 3, y = 4 }, tag = nil }
+		sees(subject, alice)
+	end
+
+	equals("the limit this runs against is the shipped one", Config.limitOf("pendingPerBatch"), 256)
+
+	frame()
+
+	local arrived = 0
+
+	for subject = 100, 100 + COUNT - 1 do
+		if agrees(alice, subject) then
+			arrived += 1
+		end
+	end
+
+	equals(`all {COUNT} subjects arrive in the frame that sent them`, arrived, COUNT)
+	equals("and nothing was given up on", peers[alice].resyncs, before)
+
+	--[[ And it stays converged. The livelock's signature was a frame that never went quiet, so the
+	     assertion that names it is a second frame carrying no change for a world that did not
+	     move. ]]
+	local settled = frame()
+
+	equals("a frame that changed nothing sends no change", settled, 0)
+	equals("still nothing given up on", peers[alice].resyncs, before)
+
+	for subject = 100, 100 + COUNT - 1 do
+		world[subject] = nil
+		visible[subject] = nil
+	end
+
+	frame()
+	Config.reset()
 end
 
 -- ---------------------------------------------------------------------------------------------
