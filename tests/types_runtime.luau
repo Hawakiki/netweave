@@ -73,6 +73,62 @@ rejects("inverted range", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- Bounds that count in whole numbers, and floats that reach their encoding (M4 report)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`t.u8(0.5, 2.5)` type-checked, lowered and encoded, and delivered a different number than was
+	sent with no rejection anywhere: the offset became 0.5, the writer's whole-number test passed on
+	the value, `buffer.writeu8(1 - 0.5)` truncated, and the reader added 0.5 back. **Sent 1, got
+	0.5.** The declaration is what has to refuse it, because everything downstream was behaving
+	correctly given the schema it was handed.
+]]
+rejects("a fractional integer bound", function()
+	t.u8(0.5, 2.5)
+end)
+
+rejects("one fractional end is enough", function()
+	t.i16(-100, 100.5)
+end)
+
+--[[ A string's range is a **length**, and half a byte is not one. Same for a buffer. ]]
+rejects("a fractional string length", function()
+	t.string(0, 8.5)
+end)
+
+rejects("a fractional buffer length", function()
+	t.buffer(1.5, 8)
+end)
+
+--[[ An array's count does not go through `ranged`, so it is checked separately — and `t.array(x,
+     1.5)` lowered happily and then refused every length the game could send. ]]
+rejects("a fractional array count", function()
+	t.array(t.u8, 1.5)
+end)
+
+rejects("and a fractional upper bound on one", function()
+	t.array(t.u8, 0, 2.5)
+end)
+
+--[[ The half that must still work, which is the whole reason this is a per-encoding question rather
+     than a blanket rule: a float range is fractional by nature. ]]
+local half = t.f32(-0.5, 0.5)
+check("a fractional float bound is what f32 is for", half.min == -0.5 and half.max == 0.5)
+
+--[[
+	~~`f32` is `-2^24..2^24` and `f64` is `-2^53..2^53`.~~ Those are the spans in which each encoding
+	represents every *integer* exactly, and as a value range they refused ordinary numbers: bare
+	`t.f32` refused `1e8`, bare `t.f64` refused `1e18`, and `t.f32(0, 1e9)` was refused at
+	declaration — with a range the author never wrote in the message.
+]]
+check("f32 reaches its encoding's largest finite value", (t.f32.max :: number) > 3.4e38)
+check("and f64 reaches a double's", (t.f64.max :: number) > 1.7e308)
+check("neither admits infinity", (t.f32.max :: number) < math.huge and (t.f64.max :: number) < math.huge)
+
+local scaled = t.f32(0, 1e9)
+check("a range past the integer-exact span is a legal declaration", scaled.max == 1e9)
+
+-- ---------------------------------------------------------------------------------------------
 -- Wire order never comes from table iteration
 -- ---------------------------------------------------------------------------------------------
 
