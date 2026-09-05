@@ -295,6 +295,83 @@ do
 	Context.forget(player)
 end
 
+do
+	--[[
+		**What a packet costs a player nobody looks at.**
+
+		`Context.acquire` runs per packet, and until M4 phase 8 it read `.Character` and searched its
+		children for a `Humanoid` on every one — whether or not the channel had a policy, and whether
+		or not the handler ever asked. On a `signal` or an `intent` with no policy that is a tree
+		search wanted by nobody, and a batch of twenty packets from one player paid twenty of them.
+
+		The M4 report filed this one as **inferred**, because it was reasoned from the call site
+		rather than measured. This is what makes it measured — and counted rather than timed, for
+		`CLAUDE.md` §9's reason: a `FindFirstChildOfClass` is a Roblox call this process does not
+		have, so a clock here would be timing a stand-in. How many times netweave asked is the claim
+		itself, and it is the same number in both places.
+	]]
+	local reads = 0
+	local searches = 0
+
+	local humanoid = { ClassName = "Humanoid" }
+
+	local character = setmetatable({}, {
+		__index = function(_, key: any): any
+			if key ~= "FindFirstChildOfClass" then
+				return nil
+			end
+
+			return function(_self: any, class: string): any
+				searches += 1
+				return if class == "Humanoid" then humanoid else nil
+			end
+		end,
+	})
+
+	local watched = setmetatable({ Name = "watched" }, {
+		__index = function(_, key: any): any
+			if key == "Character" then
+				reads += 1
+				return character
+			end
+
+			return nil
+		end,
+	})
+
+	for _ = 1, 20 do
+		Context.acquire(watched, "combat.fireWeapon")
+		Context.release(watched)
+	end
+
+	equals("twenty packets nobody looked at cost no character reads", reads, 0)
+	equals("and no tree searches", searches, 0)
+
+	--[[ And when something does ask, it is asked once. That was the old comment's argument for doing
+	     it eagerly, and it was right about the policies of one request and wrong about the requests
+	     that have none. ]]
+	local ctx: any = Context.acquire(watched, "combat.fireWeapon")
+
+	check("the character comes back", ctx.character == character)
+	check("and the humanoid under it", ctx.humanoid == humanoid)
+	check("and again on a second read", ctx.character == character)
+
+	equals("a packet that reads it reads it once", reads, 1)
+	equals("and searches once, for both fields", searches, 1)
+
+	Context.release(watched)
+
+	--[[ The next packet gets its own answer rather than the last one's, which is the difference
+	     between deferring the lookup and caching it. ]]
+	local later: any = Context.acquire(watched, "combat.aim")
+
+	check("the next packet still sees a character", later.character == character)
+	equals("having asked again for it", reads, 2)
+
+	Context.release(watched)
+	Context.forget(watched)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Rejections
 -- ---------------------------------------------------------------------------------------------
