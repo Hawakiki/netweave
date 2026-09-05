@@ -50,6 +50,7 @@ four more that are live in `develop` today.
 | The adversarial suite, with the failure/success ratio measured and asserted | `tests/hostile_runtime.luau`, `tests/fuzz_runtime.luau` |
 | Error messages that name the fix rather than the rule | every `error(` in `src/api/` |
 | The verification rules, promoted to repository policy | `CLAUDE.md` §9 |
+| **Added after an external review**: the 26 findings it returned, and the encode regression the benchmark measured | `docs/SECURITY-REPORT.md`, phase 9 |
 
 ## 4. Non-goals
 
@@ -577,6 +578,133 @@ evidence the claim is not merely unexamined:
         suite that dirties shared state cleans up, and the suite that measures it starts from a
         state it knows.
 
+### Phase 9 — the external review, and the number that went the wrong way
+
+An outside security and correctness review of `src/` at `7f5871c` returned 26 findings:
+3 중대, 5 위험, 12 경고, 6 미미 (`docs/SECURITY-REPORT.md`). The baseline suite is green against
+every one of them — fourteen `*_runtime` files, `analyze` at 44 clean, three rejection files at
+their declared counts, and `tools/messages`. **None of it is caught by anything this milestone
+built**, and that is the finding behind the findings.
+
+Five were reproduced here before any of the report was accepted, per §7. All five reproduce
+exactly as described:
+
+| Finding | Reproduced |
+|---|---|
+| `Ir.ceiling` omits per-element scope bytes | `t.array(t.boolean, 0, 10)` at ten elements: `maxSize` 1, actual 11. An honest three-element packet is refused with `payload claims 4 bytes, over the 1 this channel can hold` |
+| A non-Instance sidecar entry raises on the receive path | `pcall(inbound.receive, ...)` returns false: `Serdes:920: attempt to call missing method 'IsA' of table`. Also with a number in the slot |
+| Pooled pending lists under non-LIFO resumption | Three batches, alice resumes before bob: `Inbound:315: attempt to index nil with 'handler'`, and bob's second and third packets never arrive and are never reported |
+| A bare `t.instance` hands the handler what the client sent | `who = 12345`, `typeof == "number"`, no report |
+| A `state` id is decoded with no rate budget | 600 packets on a `nw.state` id: `queue=344`, `budget=0` |
+
+The remaining 21 are **not** accepted on the strength of those five and are to be reproduced or
+refuted one at a time.
+
+#### The three that break a guarantee
+
+- [ ] **`Ir.ceiling` must count the scope a dynamic element opens.** The walker's comment — "flags
+      live in the enclosing scope's bytes … the layout adds the scope once at the top" — is true of
+      the root scope and false of every array or map element that opens one. `make` stores the
+      result as `channel.maxBytes` and `Batch.read` refuses against it, so **every channel whose
+      element type contains a boolean, an enum or an optional refuses its own honest traffic**, at
+      stage `budget`, against the sender. This is phase 2's work and the plan records it as done.
+- [ ] **The sidecar's contents are wire data and are not checked.** `Link.onServer` tests
+      `type(instances) == "table"` and passes the table through; the instance reader then calls
+      `value:IsA(class)` on whatever is in the slot. G4 is false for every schema that names an
+      instance class. The raise also leaves `depth`, `filling` and `sender` unwound, so the pooled
+      list at that depth is never reused and its decoded values are never released.
+- [ ] **The pending pool assumes yielding handlers resume in LIFO order.** Roblox resumes remote
+      callbacks in whatever order their waits complete. `claim` hands out `pool[depth]` and
+      `dispatch` decrements at the end of its loop, so an out-of-order resume lets a third batch
+      claim a list another loop is still walking. Silent loss plus a throw. `transport_runtime`
+      tests exactly two batches resumed in LIFO order — the one interleaving that works.
+
+#### The probes that were never written, which is why the three are there
+
+- [ ] `hostile_runtime` and `fuzz_runtime` mutate the sidecar's **count** and never its
+      **contents**. Add both — a non-Instance entry, and a class mismatch — to the hostile file and
+      as a fuzz mutation.
+- [ ] Nothing compares `codec.maxSize` to what the encoder actually produced.
+      `serdes_runtime:363` round-trips `t.array(t.boolean)` and asserts five bytes; the ceiling says
+      one. A property test over the schema vocabulary — encode at the maximum, assert
+      `actual <= maxSize` — is the shape that would have caught it, and phase 3's ten-schema audit
+      is the shape that did not.
+- [ ] `transport_runtime`'s yielding-handler cases resume in nesting order. Add the interleavings
+      that Roblox actually produces, including a third batch arriving between two parked ones.
+
+#### The five 위험, each with its own probe first
+
+- [ ] Outbound-class ids are resolved, admitted and decoded for packets a client sent. G6 is
+      enforced on the views and not on the wire, and the reason `state` may not declare a `rate` —
+      "the server is the sender on this class" — rests on a check that does not exist.
+- [ ] A bare `t.instance` field delivers a client-chosen non-Instance to the handler, the policy and
+      `nw.validate`'s brand.
+- [ ] `nw.validate` treats "the encoder did not raise" as "conforms". The boolean writer tests
+      truthiness, the instance writer tests non-nil, and the integer writers accept fractions — so
+      the escape hatch that mints `Trusted<T>` brands `{ admin = "false" }` against `t.boolean`.
+- [ ] A throwing `link.send` in `flush` is retried every frame and starves every destination
+      iterated after it.
+- [ ] Handler-less channels bypass `pendingPerBatch`, because `enqueue` returns before the count is
+      taken.
+
+#### The documentation that is now wrong
+
+- [ ] G4 is stated unconditionally in three places and holds for the byte stream but not for the
+      sidecar or the dispatch loop. Either the two paths are fixed and the claim stands, or the
+      claim is qualified — not both.
+- [ ] "A packet claiming more is provably a lie" (`DESIGN-API.md` §3, D-5) is false for scoped
+      elements.
+- [ ] `t.string`, `t.buffer` and `t.array` document 65,535 while `patchVarint` caps a frame at
+      16,383 and raises past it.
+- [ ] `PLAN-M3` phase 4 says the reply path is budgeted; `Outbound.reply` says it is not.
+- [ ] Acceptance 5 and 10 were corrected in phase 8 and are correct. **Acceptance 1, 2 and 11 are
+      not**: each says "does not throw", and two receive-path throws are now measured.
+
+#### The benchmark, which answered acceptance 6 and asked a new question
+
+`bench/runs/2026-09-05-m3.json`, sixteen minutes, delivery exact in all three netweave cells
+(`received == sent`). The `pendingPerBatch` refusals seen in the console are warm-up only, before
+the measured window opens.
+
+| netweave, `up` | M2 | M3 | |
+|---|---|---|---|
+| `ArrayHeavy` framerate | 86 | 83 | −3.5% |
+| `ArrayHeavy` encode alloc | 3932.2 B | **6551.0 B** | **+66.6%** |
+| `ArrayHeavy` decode alloc | 9309.2 B | **10176.5 B** | **+9.3%** |
+| `FlagIdiomatic` encode / decode | 81.9 / 462.8 | 81.9 / 462.8 | byte-identical |
+| `FlagNaive` encode / decode | 81.9 / 462.8 | 81.9 / 462.8 | byte-identical |
+
+- [ ] **Acceptance 6 is answered and the answer is a regression.** The criterion asked for the
+      number "whether it moved or not"; it moved the wrong way. The ceiling M3 added to bound it
+      never binds, because `pendingPerBatch` defaults to 256 and the harness offers 200 a frame.
+- [ ] **Find the encode regression.** The flag cells are identical to the byte, so it is not global:
+      something on the large-payload send path costs 2.6 KB per packet that M2 did not. The
+      candidates are phase 4's `guarded(writer, ...)` vararg forwarding and the `writeFramed` split.
+      Measure before changing anything.
+- [ ] **Decide what to do about `ArrayHeavy`.** Against the field netweave is now last on framerate
+      (83 against blink 131, bytenet 115, zap 111) and worst on decode allocation by 13 to 21 times
+      (10176.5 against zap 480.3, blink 770.0, bytenet 2338.8). The decode number is read-then-
+      dispatch working as designed — D-6 chose it over cross-player attribution and that trade
+      stands — but "as designed" is not the same as "as measured", and the flag cells show netweave
+      winning decode allocation outright (462.8, best of five). The array case is one schema family
+      and the second is `§3.9-Z`'s reason for measuring two.
+- [ ] `bench/src/shared/Modes/netweave.luau` raises `pendingPerBatch` beside its `rateUnbounded`
+      exception, in the same "considered exception, written down" shape, so the harness stops
+      dropping during warm-up.
+- [ ] The run document reports `"netweave":"M2 (protocol 502048910)"`. The mode hardcodes the
+      milestone; a results file that misattributes its own subject is a provenance bug.
+
+#### What this phase is really about
+
+Every one of the three 중대 is a probe nobody wrote, and this milestone spent a whole phase writing
+`CLAUDE.md` §9 about exactly that. §9 says a hand-kept list is tested against what it lists; the
+ceiling is a *derivation* tested against nothing. It says a parameter every test ignores is a
+coverage gap; the sidecar's contents are that parameter. It says a regression test is confirmed
+against pre-fix code; the LIFO case was confirmed, and only for the interleaving that was written.
+
+The rules were right and the coverage they demand was read too narrowly. That belongs in §9 as a
+worked example rather than as another rule.
+
 ## 7. Acceptance criteria
 
 1. A policy that raises refuses that one packet at stage `"authorize"` with the raised message, and
@@ -597,7 +725,9 @@ evidence the claim is not merely unexamined:
    with `t.array(t.array(t.u8, 0, 1000), 0, 1000)`, which derives 1,002,002 and is bounded by a
    declared 64.
 6. `ArrayHeavy` decode allocation per packet is reported against the M2 baseline of 9309.2 B in
-   `bench/RESULTS.md`, whether it moved or not.
+   `bench/RESULTS.md`, whether it moved or not. **Measured: 10176.5 B, +9.3%** — it moved the wrong
+   way, and the same run shows encode allocation on that cell at +66.6%. `bench/RESULTS.md` is
+   pending; the run document is `bench/runs/2026-09-05-m3.json`.
 7. A game that attaches no observer sees a warning on the first refusal of each channel and stage,
    and does not see a second for the same pair.
 8. `nw.diagnostics()` returns a snapshot that cannot be mutated into the live counters.
@@ -620,6 +750,11 @@ evidence the claim is not merely unexamined:
     test greps for the ones that do not.
 14. `stylua --check`, `selene`, `lune run analyze`, every `*_runtime`, `lune run bench/check` and
     `lune run bench/envelope` pass.
+
+**Criteria 1, 2 and 11 each say "does not throw", and two receive-path throws are now measured
+(phase 9). They are not met, and the suite passing is the reason to distrust the suite rather than
+the measurement.** Criterion 5 was corrected in phase 8 to describe the byte ceiling that shipped;
+phase 9 finds that ceiling refuses honest traffic, so it is not met either.
 
 ## 8. Risks
 
