@@ -17,6 +17,7 @@
 
 local Buffer = require("../src/codec/Buffer")
 local Serdes = require("../src/codec/Serdes")
+local harness = require("./harness")
 local t = require("../src/types")
 
 --[[ This file measures `Buffer.used()` after every write, so it starts from a buffer it knows is
@@ -422,8 +423,8 @@ do
 	--[[ `Instance.new` does not exist under lune, and the sidecar only preserves order and count,
 	     so a frozen table stands in. Class checking needs a real instance and is covered in the
 	     Studio place. ]]
-	local first = table.freeze({}) :: any
-	local second = table.freeze({}) :: any
+	local first = harness.instance("first")
+	local second = harness.instance("second")
 
 	local codec = Serdes.fromSchema(t.struct({ a = t.instance, b = t.instance }))
 	local packed, instances = encode(codec, { a = first, b = second })

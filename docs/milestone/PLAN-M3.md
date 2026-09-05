@@ -602,35 +602,45 @@ refuted one at a time.
 
 #### The three that break a guarantee
 
-- [ ] **`Ir.ceiling` must count the scope a dynamic element opens.** The walker's comment — "flags
-      live in the enclosing scope's bytes … the layout adds the scope once at the top" — is true of
-      the root scope and false of every array or map element that opens one. `make` stores the
-      result as `channel.maxBytes` and `Batch.read` refuses against it, so **every channel whose
-      element type contains a boolean, an enum or an optional refuses its own honest traffic**, at
-      stage `budget`, against the sender. This is phase 2's work and the plan records it as done.
-- [ ] **The sidecar's contents are wire data and are not checked.** `Link.onServer` tests
-      `type(instances) == "table"` and passes the table through; the instance reader then calls
-      `value:IsA(class)` on whatever is in the slot. G4 is false for every schema that names an
-      instance class. The raise also leaves `depth`, `filling` and `sender` unwound, so the pooled
-      list at that depth is never reused and its decoded values are never released.
-- [ ] **The pending pool assumes yielding handlers resume in LIFO order.** Roblox resumes remote
-      callbacks in whatever order their waits complete. `claim` hands out `pool[depth]` and
-      `dispatch` decrements at the end of its loop, so an out-of-order resume lets a third batch
-      claim a list another loop is still walking. Silent loss plus a throw. `transport_runtime`
-      tests exactly two batches resumed in LIFO order — the one interleaving that works.
+- [x] **`Ir.ceiling` counts the scope a dynamic element opens.** The walker's comment — "flags live
+      in the enclosing scope's bytes … the layout adds the scope once at the top" — was true of the
+      root scope and false of every array or map element that opens one, so **every channel whose
+      element type contained a boolean, an enum or an optional refused its own honest traffic** at
+      stage `budget`, against the sender. One line: a node that opens a scope pays for it in
+      `ceiling`, which is uniform rather than special-cased because only those three sites open one.
+      The root's scope lives on the `Layout` rather than on `root`, so it cannot double-count.
+- [x] **The sidecar's contents are checked where they are read.** `value:IsA(class)` on a table
+      raised out of the read phase — G4 broken by the one piece of wire data that does not travel in
+      the buffer. Refused per packet rather than per batch, because the length prefix can step over
+      it and G5 says it should. The bare `t.instance` case was worse and is closed by the same
+      check: with no class to test, whatever the client sent used to reach the handler *as an
+      Instance*, with no report at all.
+- [x] **The pending lists are held by whoever walks one.** `claim` took `pool[depth]` and `dispatch`
+      decremented at the end of its loop, which assumed claims and releases nest; Roblox resumes
+      remote callbacks in whatever order their waits complete. A free list has no order to get
+      wrong — two overlapping walks hold different lists because neither has returned its own — and
+      the high-water mark is the number of dispatches in flight, which is what the counter was
+      reaching for and could not express.
 
 #### The probes that were never written, which is why the three are there
 
-- [ ] `hostile_runtime` and `fuzz_runtime` mutate the sidecar's **count** and never its
-      **contents**. Add both — a non-Instance entry, and a class mismatch — to the hostile file and
-      as a fuzz mutation.
-- [ ] Nothing compares `codec.maxSize` to what the encoder actually produced.
-      `serdes_runtime:363` round-trips `t.array(t.boolean)` and asserts five bytes; the ceiling says
-      one. A property test over the schema vocabulary — encode at the maximum, assert
-      `actual <= maxSize` — is the shape that would have caught it, and phase 3's ten-schema audit
-      is the shape that did not.
-- [ ] `transport_runtime`'s yielding-handler cases resume in nesting order. Add the interleavings
-      that Roblox actually produces, including a third batch arriving between two parked ones.
+- [x] `hostile_runtime` mutates the sidecar's **contents** now, not only its count: a number where a
+      classed instance was declared, and a string where a bare one was. Both confirmed to raise
+      against the pre-fix reader.
+- [x] `ir_runtime` compares `codec.maxSize` against what the encoder actually wrote, as a property
+      over sixteen schemas chosen to open a scope everywhere one can — and one fixed-length array as
+      the control, because its positions unroll into the enclosing scope and must not move. Six
+      failed before the fix. Phase 3's audit was the same idea as a table of ten examples, and the
+      ten it picked all happened to work.
+- [x] **The stand-ins had to become honest first.** Under lune there are no Instances and the suite
+      stood them in with bare tables, so the strict check would have refused every test that carried
+      one. The lune half of the check now asks the only thing the reader ever asks — *does it answer
+      `:IsA`* — which is the exact precondition rather than an approximation, so a hostile bare table
+      fails in both places instead of only in Studio. `tests/harness.luau` builds them.
+- [x] `transport_runtime` resumes two parked batches out of order with a third arriving between
+      them, and asserts every packet from every batch arrived exactly once. Against the pre-fix code:
+      `Inbound:315: attempt to index nil with 'handler'`, seven of nine delivered, and the two lost
+      ones never reported.
 
 #### The five 위험, each with its own probe first
 
