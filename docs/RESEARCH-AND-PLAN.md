@@ -39,6 +39,60 @@ ReplicaService/Replica, Charm Sync(재귀 델타 압축, 삭제는 `__none` 센�
 
 → 실제 게임은 **이벤트 라이브러리 + 복제 라이브러리를 둘 다** 붙이고 있음. 통합된 게 없음.
 
+#### 실제로 읽고 나서 (M4 페이즈 1, 2026-09-05)
+위 한 줄은 M0 때 이름만 적은 것이었다. `_refsrc/`에 셋을 받아 소스를 읽었고, **세 라이브러리가 서로 다른
+세 가지 일을 한다**는 것이 첫 번째 정정이다. "복제 라이브러리"라는 하나의 범주가 아니다.
+
+| | 무엇을 하는가 | 델타를 만드는가 | 무엇을 전송에 요구하는가 |
+|---|---|---|---|
+| **Charm Sync** | 상태를 들고, **자기가 diff한다** | O — 재귀 구조 diff | 콜백 하나. `connect(onSync)` |
+| **ReplicaService** | 상태를 들고, **게임이 변경을 선언한다** | X — diff 자체가 없다 | RemoteEvent 여섯 개 |
+| **delta-compress** | 상태를 들지 않는다. diff만 | O — 스키마 없는 buffer | 아무것도 |
+
+**Charm Sync** (`charm/packages/charm-sync/`, `b05f3a9`)
+- 페이로드는 `{ type: "init" | "patch", data: {...} }` 둘뿐이다 — `src/types.luau:5-13`.
+- diff는 `src/patch.luau:59-89`. `oldState == newState`면 `nil`, 새 값이 `nil`이면 `None`, 테이블이 아니면
+  새 값 그대로, 테이블이면 재귀. 삭제 센티널은 `None = { __none = "__none" }` — `patch.luau:10`.
+- 서버 seam은 `addSignalsToClient(client, { key = atom })` + `connect(onSync)` — `src/server.luau:284, 381`.
+  **netweave가 붙을 자리는 `onSync`이고, 그건 diff 엔진이 아니라 전송이다.**
+- `Heartbeat` 인터벌로 flush — `server.luau:263`. 배칭이라기보다 폴링이다.
+- `stringifySparseArray` (`patch.luau:32-57`)가 숫자 키를 문자열로 바꾼다. **JSON이 희소 배열의 꼬리 nil을
+  떨어뜨리기 때문**이라고 주석이 직접 말한다. 이건 Roblox 기본 직렬화를 타는 라이브러리만 겪는 문제이고,
+  버퍼 코덱에는 존재하지 않는다.
+
+**ReplicaService** (`ReplicaService/src/ServerScriptService/ReplicaService.lua`, `aaeb1c6`)
+- 델타 압축 라이브러리가 **아니다.** 게임이 변경을 이름으로 선언한다: `SetValue(path, value)`, `SetValues`,
+  `ArrayInsert`, `ArraySet`, `ArrayRemove`, `Write(function_name, ...)` — `:403, 426, 452, 476, 503, 528`.
+- 변경 종류마다 전용 RemoteEvent가 있고 **플레이어마다 한 번씩 발사한다** — `:416`
+  `rev_ReplicaSetValue:FireClient(player, id, path_array, value)`. 배칭이 없다. §3.6-B1의 60Hz 상한과
+  §3.7-E의 "직렬화 1회 + memcpy N회"가 둘 다 해당되지 않는 설계다.
+- 경로가 매번 문자열 배열로 나간다. 유일하게 압축되는 자리는 write lib으로, 함수 이름이 `func_id` 정수가
+  된다 — `:541`.
+- 대상은 생성 시 고정: `Replication = "All" or {[Player] = true, ...} or [Player]` — `:46`.
+
+**delta-compress** (`delta-compress/src/`, `46f0831`)
+- `diffImmutable(old, new) -> buffer?` — `Diff.luau:312`. 변한 게 없으면 `nil`.
+- **스키마가 없어서 값마다 타입 태그를 쓴다.** `TypeId.luau:3-22`에 21개 — `nil/string/number/boolean/
+  Vector2/Vector3/Vector2int16/Vector3int16/CFrame`와 `array/dictionary`, 그리고 `arrayRemovals`,
+  `arrayAdditions`, `arrayChanges`, `dictionaryChanges`, `dictionaryRemovals` 같은 **diff 연산 태그**.
+- 지원 타입이 그 목록으로 닫혀 있다. Color3도 CFrame 배열도 없다.
+
+#### netweave에 대한 함의 — 이게 페이즈 1의 결론이다
+1. **netweave는 store를 감싸는 diff 엔진이 아니라, 복제 라이브러리의 전송이다.** Charm은 이미 diff를
+   하고 콜백만 원하고, Replica는 diff를 아예 안 하고 RemoteEvent 대체를 원한다. 둘 다 "`read()` +
+   `changed()`를 주면 netweave가 diff한다"는 모양이 아니다.
+2. **바이트 우위가 어디 있는지가 분명해졌다.** delta-compress는 값마다 타입 태그를 쓴다 — 스키마가 없으니
+   달리 방법이 없다. netweave는 스키마가 있으므로 **"어떤 필드가 바뀌었는가"를 비트필드로 쓰고 바뀐 값만
+   스키마 순서로** 쓰면 된다. 필드 정체성이 직렬화된 키가 아니라 위치다. 12필드 구조체에서 한 필드가
+   움직이면 delta-compress는 키 + 타입 태그 + 값을 쓰고, netweave는 12비트 + 값을 쓴다.
+3. **삭제 센티널은 netweave에 필요 없다.** Charm이 `__none` 테이블을 쓰는 건 JSON을 타기 때문이다.
+   netweave에는 이미 플래그 스코프가 있으므로 "제거됨"은 1비트다. `PLAN-M4` 페이즈 3의 열린 질문 하나가
+   여기서 닫힌다.
+4. **패치는 상태와 모양이 다르다는 것이 진짜 문제다.** netweave의 코덱은 스키마 구동인데 `PlayerState`의
+   *패치*는 그 스키마가 기술하지 않는다. 상태 스키마에서 **패치 스키마를 파생**해야 한다 — 모든 필드를
+   optional로 만들고 삭제 비트를 더한 것. 이건 `Ir`이 이미 할 수 있는 일이고, 안 하면 패치를 불투명
+   페이로드로 나르게 되어 요점이 사라진다. `PLAN-M4` D-3에 적었다.
+
 ## 2. 플랫폼 제약 (설계 입력값)
 - `UnreliableRemoteEvent` 실제 상한 약 **908바이트**(문서는 900), 초과 시 **조용히 드랍**. 버퍼는 내부 압축까지 되어 사전 크기 예측이 어려움.
 - 리모트를 **60Hz 초과**로 발사하면 서버 네트워크 응답시간이 폭증 → 배칭은 선택이 아니라 필수.

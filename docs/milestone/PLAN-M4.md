@@ -90,13 +90,55 @@ Three shapes, and the cost of each has to be measured rather than argued:
 3. **Periodic snapshots between deltas.** Bounded staleness instead of correctness. Cheap, and the
    staleness window is a number the game has to be told rather than one netweave picks.
 
-### D-3 — what a store adapter has to provide
+### D-3 — what a store adapter has to provide — **answered in phase 1**
 
-The narrowest seam that supports Charm and Replica both. Candidate: `read()`, `changed(callback)`,
+~~The narrowest seam that supports Charm and Replica both. Candidate: `read()`, `changed(callback)`,
 and nothing else — netweave diffs, so an adapter that can only say *that* something changed is
-enough and one that says *what* changed is an optimisation. Verify against both libraries' actual
-APIs in `_refsrc/` before committing to it; `CLAUDE.md` §7 says a claim about a competitor is read,
-not assumed, and there are currently **no state libraries vendored at all**.
+enough and one that says *what* changed is an optimisation.~~
+
+**The candidate was wrong, and wrong in a way that changes the milestone's framing.** Both libraries
+are now in `_refsrc/` and read (`RESEARCH §1`, "실제로 읽고 나서"); neither wants that shape:
+
+- **Charm Sync already diffs.** `patch.diff` is a recursive structural diff
+  (`charm/packages/charm-sync/src/patch.luau:59-89`) and the server seam is
+  `addSignalsToClient(client, { key = atom })` plus `connect(onSync)`
+  (`src/server.luau:284, 381`). What it wants from netweave is `onSync` — **a transport**, not a
+  diff engine.
+- **ReplicaService does not diff at all.** The game declares the mutation by name — `SetValue`,
+  `SetValues`, `ArrayInsert`, `ArraySet`, `ArrayRemove`, `Write`
+  (`ReplicaService/src/ServerScriptService/ReplicaService.lua:403-528`) — and each fires its own
+  RemoteEvent **once per player** (`:416`). What it wants from netweave is the six RemoteEvents,
+  batched.
+
+So the seam is lower than the plan assumed: **netweave is the transport a replication library
+plugs into**, and `Store.luau` describes what netweave needs in order to carry somebody else's
+patches, not what netweave needs in order to compute them. Two functions:
+
+- `changes() -> Patch?` — pull what has changed since the last call, or nil. Charm's adapter drives
+  this from `connect(onSync)`; Replica's builds one from the mutation calls.
+- `snapshot() -> State` — the whole thing, for a client that has no baseline.
+
+netweave still owns the **baseline** (D-4 needs per-client-per-subject state that neither library
+has) and still owns the **encoding**, which is where the argument is.
+
+#### The byte case, which phase 1 also settled
+
+`delta-compress` writes a **type tag per value** — twenty-one ids covering both datatypes and diff
+operations (`delta-compress/src/TypeId.luau:3-22`) — because it has no schema and cannot do
+otherwise. netweave does have one. A patch of a twelve-field struct is **a twelve-bit field saying
+which moved, then the moved values in schema order**: field identity is a position, not a
+serialised key. That is the whole reason L3 belongs in this library rather than beside it.
+
+Two consequences, both of which close open questions elsewhere in this plan:
+
+- **The deletion sentinel question in phase 3 is closed.** Charm needs `None = { __none = "__none" }`
+  (`patch.luau:10`) because it travels over Roblox's default serialisation, where `nil` is
+  indistinguishable from absent. netweave has flag scopes; "removed" is one bit. No magic value.
+- **A patch has a different shape from the state, and that is the real work.** The codec is schema
+  driven and the schema describes `PlayerState`, not a *patch of* `PlayerState`. `Ir` has to derive
+  a patch layout from a state layout — every field optional, plus a removal bit — which is
+  machinery it already has in the optional/flag path. Without that step a patch is an opaque
+  payload and the byte case above evaporates.
 
 ### D-4 — the audience is dynamic, and that is not a diff
 
@@ -159,11 +201,32 @@ moved 76% and Zap's 146%. Tuning against that is tuning against noise.
       Roblox exposes enough to detect that and not enough to correct for it. **Carried to phase 7**,
       which is the only phase that needs that cell.
 
-### Phase 1 — read the neighbours
+### Phase 1 — read the neighbours — **done**
 
-- [ ] Clone Charm, Replica/ReplicaService and DeltaCompress into `_refsrc/`, pinned by commit in `_refsrc/README.md`.
-- [ ] Read each one's store API, change signal and delta format. Append to `RESEARCH-AND-PLAN.md` §1 in the same shape as the event libraries, with file and line citations.
-- [ ] Answer **D-3** in writing, against what they actually expose.
+- [x] Charm `b05f3a9` (charm-v0.11.0), ReplicaService `aaeb1c6`, delta-compress `46f0831`, cloned and
+      pinned in `_refsrc/README.md`. There were **no state libraries vendored at all** before this.
+- [x] Read each one's store API, change signal and delta format. `RESEARCH §1` gains
+      "실제로 읽고 나서", with file and line citations in the same shape as the event libraries.
+
+      **The first correction is that they are not one category.** Charm Sync holds state and diffs
+      it itself; ReplicaService holds state and has no diff, because the game names the mutation;
+      delta-compress holds nothing and only diffs. The roadmap's one line treated all three as
+      "복제 라이브러리".
+- [x] Answer **D-3** — see above. The candidate seam was wrong, and the milestone's framing moved
+      with it: **netweave is the transport a replication library plugs into**, not a diff engine
+      wrapping a store. Charm wants `onSync`; Replica wants its six RemoteEvents batched.
+- [x] **The byte case is now a specific claim rather than a hope.** `delta-compress` writes a type
+      tag per value because it has no schema (`TypeId.luau:3-22`, twenty-one ids). netweave has one,
+      so a patch is a bitfield of which fields moved plus the moved values in schema order — field
+      identity as a position rather than a serialised key.
+- [x] **Two open questions closed early.** Phase 3's deletion sentinel: none needed, a flag scope
+      makes "removed" one bit, where Charm needs a `__none` table because it rides Roblox's default
+      serialisation. And phase 3's real work is now named: `Ir` has to **derive a patch layout from a
+      state layout**, every field optional plus a removal bit, or a patch is an opaque payload and
+      the byte case evaporates.
+- [ ] **Not done, and it belongs to phase 5 rather than here.** ReplicaService is v1 and 2024; the
+      author's newer `Replica` is a rewrite with a different surface. The adapter phase has to
+      decide which it targets, and that decision needs the seam to exist first.
 
 ### Phase 2 — the decisions that gate the code
 
