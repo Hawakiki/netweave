@@ -272,12 +272,16 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
 - `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
 
-**A security-relevant suite counts its own shape.** `tests/harness.luau` tags each section
-failure-path or success-path and refuses to pass when a file declares a floor and falls under it.
-The rule is that a layer with one way to succeed and many ways to fail needs a suite whose ratio
-says so (`PLAN-M3` D-10); the floors live in the files, in the same spirit as `-- netweave:expect N`,
-so a number someone lowered is a number in the diff. Current: `hostile_runtime` 99%,
-`budget_runtime` 100%, `fuzz_runtime` 92%, `transport_runtime` 59%.
+**A security-relevant suite counts its own shape** through `tests/harness.luau`, and refuses to pass
+under the floor it declares. Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
+92%, `transport_runtime` 59%, and the rule behind the number is §9.
+
+Two checks read source off disk rather than running it, which is why they live outside `src/` and
+`tests/` — the analyzer walks those two roots and cannot resolve `@lune/fs`:
+
+- `tools/messages.luau` — every `error(` in `src/api/` names the fix, and the worked example in
+  `docs/DESIGN-API.md` is the same text as the one `tests/example_runtime.luau` runs
+- `bench/check.luau` — everything under `bench/` parses
 
 A rejection file that stops erroring means a guarantee has silently stopped being enforced. That
 is worse than a build break, because nothing announces it — hence the exact count.
@@ -354,3 +358,97 @@ directly.
 `.gitignore` already covers it: build outputs (`netweave.rbxm`, `netweave-test.rbxl`,
 `bench/Benchmark.rbxl`), `sourcemap.json`, and **`_refsrc/`** — 45 MB of vendored competitor
 sources that are read-only research material, not this project's code (§2).
+
+---
+
+## 9. Verification
+
+A security layer has one way to succeed and many ways to fail, so a suite shaped like an ordinary
+one has tested the happy path and stopped. These are the rules M3 arrived at, and each is written
+next to the thing that produced it — because a rule with no incident behind it is a rule the next
+person will read as taste.
+
+### Failure paths outnumber success paths, and the count is in the suite
+
+`tests/harness.luau` tags each section failure-path or success-path and refuses to pass a file that
+declares a floor and falls under it. The floors live in the files, in the same spirit as
+`-- netweave:expect N`: a number someone lowered is a number in the diff.
+
+The tag is per **section**, not per assertion. A hostile case is written as a block — craft the
+bytes, feed them in, then assert the bad packet was refused *and that the ones behind it still
+arrived* — and that second assertion asserts a success while testing a failure. Per section is also
+the granularity at which the ratio cannot be moved by relabelling.
+
+The rule applies to files whose job is refusal. `ir_runtime` sits at 13% and that is not a gap:
+lowering a schema has one correct answer and no adversary, and padding it to reach a number is the
+failure mode of every metric.
+
+### A regression test is confirmed to fail against the pre-fix code
+
+Not reasoned about — run. Break the guard, watch the test fail, put the guard back. Every fix in M3
+was checked this way and two of them turned out to be testing nothing:
+
+- A duplicate-call-id test passed with the guard removed, because the handler returned immediately
+  and gave its slot back before the second request was dispatched. It only bites when the handler
+  yields, which is the whole point of the class.
+- A `maxBytes` rejection test passed for the wrong reason: it tripped the upper-bound guard instead
+  of the one it was written for, so the two covered for each other.
+
+### No security claim without a probe that demonstrates the defect it prevents
+
+If the plan says "this prevents X", something has to have shown X happening. `PLAN-M3` D-3 measures
+39 admissions in ten milliseconds against a declared `rate = 20`; D-4 measures 690x; D-7 reverts the
+hash and watches ten of eleven single-change pairs collapse to the same number.
+
+The corollary is that a claim which cannot be probed is a claim to soften, not to keep. D-5 was
+written as a decode-work counter and the measurement said the hostile packet was *cheaper per byte*
+than the honest one, so the decision changed rather than the wording.
+
+### A probe that finds nothing is written down
+
+Recording an audit's null results is what separates "checked and fine" from "never looked". `PLAN-M3`
+phase 4 lists seven probes that found nothing, in a table, next to the one that found a defect. A
+future reader deciding whether to re-examine the sidecar handling can see that it was examined.
+
+### A rejection count guarding a feature with no positive test guards nothing
+
+`nw.configure` shipped typed so that Luau rejected **every** call, including the example in its own
+docstring. Nothing said so: the only file calling it was `tests/config_reject.luau`, where a
+diagnostic is what success looks like, and nine of its twelve expected diagnostics were the bug. Its
+header explained them as a deliberate two-layer design.
+
+So: **write the `_ok` half.** A guarantee tested only by things that must fail has no evidence that
+the thing which must work does.
+
+### A test that avoids the hard part is a test that was never written
+
+Every `:listen` handler in the suite was written `function(_ctx, ...)`, so nobody noticed that `ctx`
+was typed `unknown` and could be neither read nor annotated. The first handler that wanted
+`ctx.player` was the worked example, in phase 7, three milestones late.
+
+When a parameter is consistently ignored, that is the coverage gap, not the convention.
+
+### A hand-kept list drifts, so the list is tested against what it lists
+
+`Config`'s limit names were spelled out for the analyzer and `pendingPerBatch` was missing: the
+field existed, the runtime honoured it, and the one correct spelling was refused. `Protocol`'s
+attribute list has the same shape, so `tests/protocol_runtime.luau` changes each entry in turn and
+asserts the signature notices.
+
+### Nothing on the receive path is silent
+
+Every refusal reports, whether or not a game attached an observer, and the repeat suppression is
+what makes that affordable. The fuzzer found the last exception — an unknown control kind stepped
+over without a word — and the forward-compatibility argument for staying quiet lost to this rule.
+
+Guarantee G4 is the other half: wire data never reaches `error()`. `tests/fuzz_runtime.luau` runs
+10,000 mutated batches and asserts the receive path never throws, never loses a packet it did not
+report losing, never hands a handler a value its own schema refuses, and leaves the decoder clean
+enough that an honest batch behind it still arrives.
+
+### Errors name the fix, not the rule
+
+Checked, not reviewed: `tools/messages.luau` requires every `error(` in `src/api/` to carry a repair
+marker and to either show the offending value or spend the words explaining a mistake that has none.
+Half of netweave's guarantees are `type function` errors, and those print verbatim at the call site —
+in the declaration file, on the line that is wrong.
