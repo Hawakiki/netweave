@@ -359,6 +359,19 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			the way in. A second budget here would police the server's own answers to questions it
 			had already agreed to answer, and the only way to overrun it would be to have accepted
 			too many requests — which is what `rate` is for.
+
+			**A request the server *refused* is answered too**, and that half the argument above does
+			not cover was found by an external review (M3 phase 9). It is deliberate and it is
+			measured. Three hundred requests a rate budget refused, in one batch:
+
+			  * refused: 1,074 bytes in, **1,074 bytes out**, 0.71 ms
+			  * the same batch admitted and answered: 1,074 in, **2,274 out**, 1.60 ms
+
+			So `Batch.read`'s premise — refusing has to stay cheaper than accepting — holds for this
+			class as well, by a factor of two in both bytes and time, and the outbound never exceeds
+			what the peer spent to provoke it. What the alternative buys is worse than what it costs:
+			dropping the refusal turns a client one packet over its burst into a caller parked for
+			the full `timeout`, which is the failure `D-12` and `Query.abandon` exist to prevent.
 		]]
 		reply = function(channel: any, destination: any, call: number, status: number, value: any?)
 			switchTo(destination)

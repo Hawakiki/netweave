@@ -1477,6 +1477,152 @@ end
 do
 	reset()
 
+	--[[
+		Under a flood the rejection path allocates nothing — which `Observer` and `Budget` both
+		promise in as many words, and which `Inbound` did not keep.
+
+		The queue-full reason carried `dropped {n} so far`, so it was rebuilt for every dropped
+		packet to print a number three times: the repeat suppression caps the console at three lines
+		per stage, and `nw.observe` sees every rejection and can count them itself. An external
+		review measured a 12,000-packet flood producing 11,744 distinct reason strings (M3 phase 9).
+
+		Counted rather than weighed, because a garbage-collector reading is not a number until it
+		survives re-running (`CLAUDE.md` §9) and this property does not need one: a reason built per
+		packet is a reason that *differs* per packet, and a set does not care how fast the collector
+		is. Two thousand refusals across the three stages a peer can provoke, and the answer is how
+		many different strings came out.
+	]]
+	local channel = outboundChannel(48, t.struct({ a = t.u16 }), { class = "signal" })
+	local server = outboundChannel(49, t.struct({ a = t.u16 }), { class = "event" })
+	local listened = outboundChannel(50, t.struct({ a = t.u16 }), { class = "signal" })
+
+	listened.handler = function() end
+
+	byId[48] = channel
+	byId[49] = server
+	byId[50] = listened
+
+	local distinct: { [string]: boolean } = {}
+	local kinds = 0
+	local refused = 0
+
+	Observer.reset()
+	Observer.observe(function(rejection)
+		refused += 1
+
+		if not distinct[rejection.reason] then
+			distinct[rejection.reason] = true
+			kinds += 1
+		end
+	end)
+
+	local inbound = Inbound.new({
+		resolve = function(id: number): any
+			return byId[id]
+		end,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = true,
+	})
+
+	Config.configure({ limits = { pendingPerBatch = 2, queueCapacity = 8 } })
+
+	for index = 1, 1000 do
+		--[[ Queue-full, because nothing is listening on 48, and the pending ceiling behind it. ]]
+		for _ = 1, 2 do
+			Batch.writePacket(channel, { a = index })
+		end
+
+		--[[ And the direction refusal, which is the cheapest one a peer can provoke: anything at
+		     all on a server-to-client id. ]]
+		for _ = 1, 2 do
+			Batch.writePacket(server, { a = index })
+		end
+
+		--[[ Three on a channel somebody is listening to, against a ceiling of two, for the third
+		     reason. Queued packets never reach it — they take no pending slot, which is the answer
+		     phase 9 examined and kept. ]]
+		for _ = 1, 3 do
+			Batch.writePacket(listened, { a = index })
+		end
+
+		inbound.receive(Buffer.take(), nil, alice)
+	end
+
+	check("the flood was refused", refused > 2000)
+	equals("and it took three reasons to say so", kinds, 3)
+
+	Config.reset()
+	listened.handler = nil
+	byId[48] = nil
+	byId[49] = nil
+	byId[50] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		A queue is the one place a packet outlives the connection that carried it.
+
+		`forget` released the budget, the context, the intent and the call slots and left the queues
+		alone, so a `:listen` attached after a player left ran their commands against a `Player` who
+		is gone — and `Context.acquire` built a fresh record for that departed player to run them
+		against, which nothing would forget a second time. Found by an external review; measured
+		here, where before the fix all six arrived and `got` held alice's three.
+	]]
+	local channel = outboundChannel(47, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[47] = channel
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ Interleaved, because the fix compacts a ring in place and the survivors have to come out in
+	     arrival order rather than in whatever order the compaction wrote them. ]]
+	for index = 1, 3 do
+		Batch.writePacket(channel, { a = index * 2 - 1 })
+		inbound.receive(Buffer.take(), nil, alice)
+
+		Batch.writePacket(channel, { a = index * 2 })
+		inbound.receive(Buffer.take(), nil, bob)
+	end
+
+	inbound.forget(alice)
+
+	local got: { number } = {}
+	local senders: { any } = {}
+
+	channel.handler = function(ctx: any, value: any)
+		table.insert(got, value.a)
+		table.insert(senders, ctx.player)
+	end
+
+	inbound.drain(channel)
+
+	equals("only the peer who is still here is delivered", #got, 3)
+	equals("in arrival order", got[1], 2)
+	equals("still", got[2], 4)
+	equals("and still", got[3], 6)
+	check("and every one of them is theirs", senders[1] == bob and senders[3] == bob)
+	equals("the drop is reported once for the channel", #reported, 1)
+	equals("at the queue stage", reported[1], "queue:test.c47")
+
+	--[[ And the survivors' queue is intact: draining again finds nothing, rather than finding the
+	     three slots the compaction moved out from under. ]]
+	inbound.drain(channel)
+	equals("a second drain has nothing to do", #got, 3)
+
+	channel.handler = nil
+	byId[47] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
 	--[[ A client's handler takes the payload alone: its inbound is the server's outbound, and the
 	     server is not a peer to be checked. ]]
 	local channel = outboundChannel(47, t.struct({ a = t.u8 }), { class = "event" })

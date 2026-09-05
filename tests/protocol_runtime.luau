@@ -611,6 +611,24 @@ do
 
 	check("and the peer that agreed is untouched", agreement.verdict(alice) == nil)
 
+	--[[
+		A hello flood, which is the cheapest thing a client can send that makes the server work.
+
+		Id 0 is read before `sink.admit` — resolving it would fail, and that failure would be the
+		unrecoverable one — so nothing charges a hello a rate. Every mismatched one used to build a
+		fresh reason and answer with a hello of this peer's own; an external review measured 300 in
+		one 2,101-byte batch costing 300 replies and 76 KB (M3 phase 9). A peer already known to be
+		wrong is not re-judged now, whether it repeats itself or rotates its hash, because the only
+		thing that lifts a refusal is a hash that agrees.
+	]]
+	for index = 1, 300 do
+		agreement.greet(bob, if index % 2 == 0 then 0x99999999 else 0x12345678 + index)
+	end
+
+	equals("three hundred more hellos are answered no more", #announced, 1)
+	check("and the verdict still stands", agreement.verdict(bob) ~= nil)
+	check("naming the hash they first claimed", string.find(verdict or "", "0x99999999", 1, true) ~= nil)
+
 	--[[ A rejoin on a fixed build. The refusal is per peer and is cleared, not sticky. ]]
 	agreement.greet(bob, mine)
 	check("agreeing later clears the refusal", agreement.verdict(bob) == nil)
@@ -704,7 +722,10 @@ do
 
 	check("the batch did not raise", survived)
 	equals("nothing behind the hello was delivered", #delivered, 0)
-	equals("all three were refused", #reported, 3)
+	--[[ Four, not three: the hello itself is reported now. Until M3 phase 9 a mismatch was recorded
+	     silently and first surfaced on a data packet behind it, so a peer that sent a hello and
+	     nothing else disagreed with this one forever without either console saying so. ]]
+	equals("the hello and all three behind it were refused", #reported, 4)
 	check("at stage protocol", string.find(reported[1], "protocol:", 1, true) ~= nil)
 	check("with both hashes in the reason", string.find(reported[1], Protocol.hex(mine), 1, true) ~= nil)
 

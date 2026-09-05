@@ -156,6 +156,68 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- An observer that detaches itself does not take the next one with it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	Observer.reset()
+	quiet()
+
+	--[[
+		"Warn once, then stop watching" is ordinary game code, and it used to cost the observer
+		registered behind it a rejection: the remover did `table.remove` while `emit` was walking
+		`1..count`, so the third shifted into the second's index — which the loop had already
+		passed — and the last index read `nil`. `xpcall(nil, ...)` does not raise, so nothing said
+		so. Found by an external review (M3 phase 9); before the fix `second` and `third` each saw
+		one where they should each see two.
+	]]
+	local first = 0
+	local second = 0
+	local third = 0
+
+	--[[ Annotated rather than inferred: the closure names it before the assignment, so without a
+	     declared type the solver reads it as optional and refuses the call. ]]
+	local stopFirst: () -> ()
+
+	stopFirst = Observer.observe(function()
+		first += 1
+		stopFirst()
+	end)
+
+	local stopSecond = Observer.observe(function()
+		second += 1
+	end)
+
+	local stopThird = Observer.observe(function()
+		third += 1
+	end)
+
+	Observer.emit("game.move", nil, "budget", "over rate", 10)
+
+	equals("the one that detached still saw the rejection it detached on", first, 1)
+	equals("the one behind it saw it too", second, 1)
+	equals("and so did the one behind that", third, 1)
+
+	Observer.emit("game.move", nil, "budget", "over rate", 10)
+
+	equals("the detached one is gone", first, 1)
+	equals("the others carry on", second, 2)
+	equals("both of them", third, 2)
+
+	--[[ And the list really compacted rather than keeping a hole: removing the rest leaves nothing
+	     for a third rejection to reach. ]]
+	stopSecond()
+	stopThird()
+
+	Observer.emit("game.move", nil, "budget", "over rate", 10)
+
+	equals("nothing is left watching", second + third, 4)
+	equals("and every one of the three was still counted", Observer.diagnostics().total, 3)
+
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- The snapshot is not a way back in
 -- ---------------------------------------------------------------------------------------------
 

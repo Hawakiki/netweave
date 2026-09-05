@@ -110,6 +110,17 @@ end
 	channel ids, and the two peers would disagree — which is silent, and decodes every packet as
 	the wrong type. `nw.protocol()` is what both sides compare to catch that.
 	:::
+
+	:::caution
+	**On a client, "the first packet" is one that *arrives*.** Requiring netweave connects the
+	receive side, and the first batch the server sends seals the numbering — so a client that yields
+	between `require(netweave)` and its namespace modules (a `WaitForChild`, a deferred require) can
+	be sealed by traffic it did not ask for, and the next declaration raises. Require every namespace
+	in one unbroken run, before anything yields.
+
+	This cannot be fixed by deferring the seal: decoding an inbound packet needs the id numbering,
+	and the numbering needs every declaration. See `docs/WIRE-FORMAT.md` §3.
+	:::
 ]=]
 function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 	checkName(name)
@@ -119,10 +130,16 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 	end
 
 	if sealed then
+		--[[ The cause this names last is the one that is hardest to find: on a client, a *received*
+		     packet seals, so a `WaitForChild` between requiring netweave and requiring this module
+		     is enough. Found by an external review (M3 phase 9); it cannot be fixed by sealing
+		     later, because decoding the packet that sealed it needs the numbering. ]]
 		error(
 			`the namespace {name} was declared after the protocol was sealed. Every channel id `
 				.. `depends on every other, so a late declaration renumbers ids the other peer has `
-				.. `already agreed to. Require all namespaces at startup.`,
+				.. `already agreed to. Require all namespaces at startup, in one run — on a client `
+				.. `the first packet to arrive seals the protocol, so a yield before this line is `
+				.. `enough to lose the race.`,
 			2
 		)
 	end

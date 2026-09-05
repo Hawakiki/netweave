@@ -1176,9 +1176,14 @@ function Serdes.build(layout: Ir.Layout): Codec
 			path. The receive path never needs it — a payload that decoded is valid by construction.
 		]]
 		check = function(value: any): string?
-			local parked = Buffer.save()
+			--[[ `mark`/`rollback` rather than `save`/`load`, because only one of the two clears the
+			     sidecar. `load` restores `instanceCount` and leaves the entries the trial write
+			     appended past it, so validating a payload carrying an Instance kept a reference to
+			     it until the next write happened to overwrite that slot — found by an external
+			     review (M3 phase 9). It also stops allocating a record per call. ]]
+			local used, instances = Buffer.mark()
 			local ok, failure = pcall(attempt, value, NO_FLAGS)
-			Buffer.load(parked)
+			Buffer.rollback(used, instances)
 
 			if ok then
 				return nil

@@ -48,6 +48,13 @@ local Inbound = {}
      arithmetic of a queue that already exists. ]]
 local DEFAULT_QUEUE_CAPACITY = 256
 
+--[[ Constant because a flood is exactly when it is said. It used to carry `dropped {n} so far`,
+     which allocated a string per dropped packet to print a number three times — the repeat
+     suppression caps the console at three lines per stage, and `nw.observe` sees every one and can
+     count them itself (M3 phase 9). ]]
+local QUEUE_FULL = "no handler is attached and the queue is full, so the oldest was dropped. "
+	.. "Attach a :listen, or raise the queueCapacity limit"
+
 type Queue = {
 	values: { any },
 	senders: { any },
@@ -500,19 +507,34 @@ function Inbound.new(config: Config): Inbound
 			queue.count -= 1
 			queue.dropped += 1
 
-			report(
-				channel,
-				who,
-				"queue",
-				`no handler is attached and the queue is full; dropped {queue.dropped} so far`,
-				bytes
-			)
+			report(channel, who, "queue", QUEUE_FULL, bytes)
 		end
 
 		local slot = (queue.read + queue.count) % queue.capacity
 		queue.values[slot + 1] = value
 		queue.senders[slot + 1] = who
 		queue.count += 1
+	end
+
+	--[[ One string per class rather than one per packet.
+
+	     This is the reason a hostile peer can provoke most cheaply — send anything at all on a
+	     `state` or `event` id and every packet in the batch lands here — so building it per refusal
+	     would have made the check that stops the flood the thing the flood costs. Six classes, and
+	     `isServer` is fixed for the life of this `Inbound`, so the table cannot grow. ]]
+	local directionReasons: { [string]: string } = {}
+
+	local function directionReason(class: string): string
+		local reason = directionReasons[class]
+
+		if not reason then
+			reason = `{class} is sent by the {if isServer then "server" else "client"}, so nothing `
+				.. `may arrive on it here — netweave guarantee G6, which the declaration enforces at `
+				.. `analysis and this enforces on the wire`
+			directionReasons[class] = reason
+		end
+
+		return reason
 	end
 
 	--[[ The list the read phase is filling. Set for the duration of one `Batch.read`, which cannot
@@ -524,6 +546,37 @@ function Inbound.new(config: Config): Inbound
 	     one's state is restored around it the way `sender` and `filling` are. ]]
 	local full = false
 	local pendingCeiling = Settings.limitOf("pendingPerBatch")
+
+	--[[
+		The two reasons whose only variable is the ceiling, built when it moves rather than per
+		refusal.
+
+		An external review measured a 12,000-packet flood producing 11,744 distinct reason strings,
+		against an `Observer` and a `Budget` whose comments both promise a refused packet allocates
+		nothing (M3 phase 9). The promise was true of them and false here, which is the worst place
+		for it to be false: the flood is the case the limit exists for, so the limit was paying
+		garbage in proportion to the attack it was refusing.
+
+		The ceiling changes only when the game reconfigures, so this is one interpolation per
+		`nw.configure` rather than one per dropped packet.
+	]]
+	local ceilingReason = ""
+	local ceilingReplyReason = ""
+
+	local function refreshCeiling()
+		local limit = Settings.limitOf("pendingPerBatch")
+
+		if limit == pendingCeiling and ceilingReason ~= "" then
+			return
+		end
+
+		pendingCeiling = limit
+		ceilingReason = `batch holds more than {limit} packets; the rest were dropped`
+		ceilingReplyReason = `the answer arrived in a batch holding more than {limit} packets and `
+			.. `was dropped`
+	end
+
+	refreshCeiling()
 
 	--[[ A query request that was refused before it ever reached a handler. The caller is already
 	     parked on a deadline, so the refusal goes back as a code rather than being left for the
@@ -552,13 +605,7 @@ function Inbound.new(config: Config): Inbound
 
 		if count > pendingCeiling then
 			full = true
-			report(
-				channel,
-				sender,
-				"budget",
-				`batch holds more than {pendingCeiling} packets; the rest were dropped`,
-				bytes
-			)
+			report(channel, sender, "budget", ceilingReason, bytes)
 
 			--[[
 				A dropped *reply* is not like a dropped packet, because somebody is waiting for it.
@@ -572,11 +619,7 @@ function Inbound.new(config: Config): Inbound
 			local waiting = queries
 
 			if waiting and channel.class == "query" then
-				waiting.abandon(
-					channel,
-					id,
-					`the answer arrived in a batch holding more than {pendingCeiling} packets and was dropped`
-				)
+				waiting.abandon(channel, id, ceilingReplyReason)
 			end
 
 			return
@@ -603,7 +646,7 @@ function Inbound.new(config: Config): Inbound
 			     rather than decoded and then dropped. Refusing has to stay cheaper than accepting or
 			     the limit becomes the amplifier. ]]
 			if full then
-				return `batch holds more than {pendingCeiling} packets; the rest were dropped`, "budget"
+				return ceilingReason, "budget"
 			end
 
 			--[[
@@ -640,10 +683,7 @@ function Inbound.new(config: Config): Inbound
 				the same place and the same reason as the byte ceiling below.
 			]]
 			if not (if isServer then channel.fromClient else channel.fromServer) then
-				return `{channel.class} is sent by the {if isServer then "server" else "client"}, so `
-					.. `nothing may arrive on it here — netweave guarantee G6, which the declaration `
-					.. `enforces at analysis and this enforces on the wire`,
-					"direction"
+				return directionReason(channel.class), "direction"
 			end
 
 			--[[ The injected `admit` is the rate budget, which has one stage; naming it here rather
@@ -653,9 +693,18 @@ function Inbound.new(config: Config): Inbound
 
 		--[[ A peer announcing its own declarations. Handled here rather than routed onward, because
 		     what it decides is whether the rest of this batch is admitted at all. ]]
-		hello = function(hash: number)
-			if agreement then
-				agreement.greet(sender, hash)
+		hello = function(hash: number, bytes: number)
+			if not agreement then
+				return
+			end
+
+			--[[ `greet` answers a reason only the first time a peer is found to be wrong, so this is
+			     one report per mismatched peer rather than one per hello. Before M3 phase 9 the
+			     mismatch was recorded and nothing was said until a data packet followed it. ]]
+			local disagreement = agreement.greet(sender, hash)
+
+			if disagreement then
+				report(nil, sender, "protocol", disagreement, bytes)
 			end
 		end,
 
@@ -730,13 +779,7 @@ function Inbound.new(config: Config): Inbound
 
 			if count > pendingCeiling then
 				full = true
-				report(
-					channel,
-					sender,
-					"budget",
-					`batch holds more than {pendingCeiling} packets; the rest were dropped`,
-					bytes
-				)
+				report(channel, sender, "budget", ceilingReason, bytes)
 				decline(channel, sender, id, Batch.REFUSED)
 				return
 			end
@@ -789,7 +832,7 @@ function Inbound.new(config: Config): Inbound
 			sender = from
 			filling = list
 			full = false
-			pendingCeiling = Settings.limitOf("pendingPerBatch")
+			refreshCeiling()
 
 			--[[ The same reason as `dispatch`: the read phase calls no game code and should not be
 			     able to raise, and "should not" is what the sidecar was. Restoring the three
@@ -878,6 +921,55 @@ function Inbound.new(config: Config): Inbound
 
 			for _, bytes in coalescedBytes do
 				bytes[who] = nil
+			end
+
+			--[[
+				And whatever they left in a queue, which an external review found still there (M3
+				phase 9).
+
+				A queue holds packets for a channel nobody is listening to yet. Attaching the
+				`:listen` afterwards used to dispatch them all, including the ones sent by a player
+				who has since left — so a command ran for somebody who is gone, with
+				`ctx.character == nil`, and `Context.acquire` built a fresh record for the departed
+				`Player` to run it against, which nothing would ever forget again.
+
+				Compacted in place rather than rebuilt: the ring is walked in arrival order and the
+				survivors are written back from `read`, so the entry being written is always at or
+				behind the entry being read and the order the queue exists to preserve is kept.
+			]]
+			for channel, queue in queues do
+				if queue.count == 0 then
+					continue
+				end
+
+				local kept = 0
+
+				for index = 0, queue.count - 1 do
+					local slot = (queue.read + index) % queue.capacity
+					local from = queue.senders[slot + 1]
+
+					if from ~= who then
+						local target = (queue.read + kept) % queue.capacity
+						queue.values[target + 1] = queue.values[slot + 1]
+						queue.senders[target + 1] = from
+						kept += 1
+					end
+				end
+
+				--[[ The tail the survivors no longer reach. Nil'd rather than left, because a
+				     queued value holds every table and Instance the packet decoded into. ]]
+				for index = kept, queue.count - 1 do
+					local slot = (queue.read + index) % queue.capacity
+					queue.values[slot + 1] = nil
+					queue.senders[slot + 1] = nil
+				end
+
+				local dropped = queue.count - kept
+				queue.count = kept
+
+				if dropped > 0 then
+					report(channel, who, "queue", `dropped {dropped} queued packets; the sender left`, 0)
+				end
 			end
 
 			Context.forget(who)

@@ -161,12 +161,19 @@ local queries = Query.new({
 	clock = clock,
 })
 
+local announced = 0
+
 local agreement = Protocol.new({
 	hash = function(): number
 		return protocol.hash
 	end,
 
-	announce = function() end,
+	--[[ Counted rather than ignored: what a hello flood costs is measured in answers, and an
+	     announce is one packet written into the sender's parked outbound buffer. ]]
+	announce = function()
+		announced += 1
+	end,
+
 	isServer = true,
 })
 
@@ -1092,14 +1099,62 @@ do
 
 	check("a mismatched peer does not raise", survived)
 	equals("nothing behind the hello was delivered", delivered, 0)
-	equals("all three were refused", #reports, 3)
-	equals("at protocol", reportedAt("protocol"), 3)
+	--[[ Four, not three: the hello itself is reported now (M3 phase 9). A peer that sends a
+	     mismatched hello and nothing else used to be refused in silence. ]]
+	equals("the hello and all three behind it were refused", #reports, 4)
+	equals("at protocol", reportedAt("protocol"), 4)
 	check(
 		"with both hashes named",
 		string.find(reports[1].reason, Protocol.hex(protocol.hash), 1, true) ~= nil
 	)
 
 	agreement.forget(mallory)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+	agreement.forget(mallory)
+	announced = 0
+
+	--[[
+		Three hundred hellos in one batch, every one of them wrong, no two alike.
+
+		Id 0 is read before `sink.admit`, because resolving 0 would fail and that failure would be
+		the unrecoverable one — so nothing charges a hello a rate and the pending ceiling never sees
+		it. That made this the cheapest thing a client can send that makes the server work: an
+		external review measured 300 mismatched hellos in one 2,101-byte batch producing 300 replies
+		and 76 KB of garbage, with nothing reported at all (M3 phase 9).
+
+		What bounds it is the verdict, not a limit: a peer already known to be wrong is not
+		re-judged, so the second hello costs a table read.
+	]]
+	for index = 1, 300 do
+		Batch.writeHello(protocol.hash + index)
+	end
+
+	local survived = feed()
+
+	check("a batch of nothing but hellos does not raise", survived)
+	equals("the first one is answered", announced, 1)
+	equals("and reported", #reports, 1)
+	equals("at protocol", reportedAt("protocol"), 1)
+	check("the peer is refused", agreement.verdict(mallory) ~= nil)
+
+	--[[ And the refusal still works: a payload behind them in a later batch does not land. ]]
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+	feed()
+
+	equals("a payload from that peer is still refused", delivered, 0)
+	equals("once", #reports, 1)
+
+	agreement.forget(mallory)
+	announced = 0
 end
 
 -- ---------------------------------------------------------------------------------------------
