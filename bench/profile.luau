@@ -91,11 +91,21 @@ local VALUES = ENTITY_COUNT * FIELD_COUNT
 local REPEATS = 51
 local WARMUP = 5
 
---[[ The Studio numbers this predicts against, from `bench/RESULTS.md` (M3 run B, the second of two
-     back-to-back runs of the same tree). They are constants here so the arithmetic at the bottom is
-     re-runnable rather than done by hand in a commit message. ]]
-local NETWEAVE_FPS = 84
-local RIVAL_FPS = 130
+--[[
+	The Studio numbers, from `bench/runs/2026-09-05-m4p7.json` — the matrix run *after* the fused
+	writer landed. They are constants here so the arithmetic at the bottom is re-runnable rather than
+	done by hand in a commit message.
+
+	They are also the reason that arithmetic no longer predicts anything. See the bottom of the file.
+]]
+local NETWEAVE_FPS = 85
+local RIVAL_FPS = 133
+
+--[[ The same encode, timed inside Studio in the same session (`execute_luau` on the running place),
+     so the ratio between this file's VM and the one the framerate came from is on record rather
+     than assumed. ]]
+local STUDIO_NOW = 29314
+local STUDIO_BEFORE = 38434
 
 --[[ What this file printed for the `netweave` rung on the tree before `Serdes.fusedStructWriter`
      existed — the same script, one commit earlier, which is what makes it a number rather than a
@@ -562,37 +572,41 @@ print(
 )
 
 --[[
-	The bridge from a microbenchmark to the number in `bench/RESULTS.md`, and the only reason this
-	file can say anything about a framerate at all.
+	~~The bridge from a microbenchmark to the number in `bench/RESULTS.md`, and the only reason this
+	file can say anything about a framerate at all.~~
 
-	A frame at the matrix's load is `PACKETS` encodes plus everything the engine does, and the engine
-	half is the same for every library in the same Play. So the *difference* between two libraries'
-	frame times is their encode difference, and that is a quantity this probe measures directly.
+	**Withdrawn, by the run it was written to predict.** The argument was: a frame at the matrix's
+	load is `PACKETS` encodes plus everything the engine does, the engine half is the same for every
+	library in the same Play, so the difference between two libraries' frame times is their encode
+	difference — a quantity this probe measures. It predicted a 4.38 ms gap and Studio had measured
+	4.21 ms, and that was read as corroboration.
 
-	This is a different VM, so agreement is corroboration rather than proof. Disagreement would have
-	been the useful answer: it would have meant something outside the codec was paying for the gap,
-	and every hour spent on `Serdes` would have been spent in the wrong file.
+	Then the fused writer removed 1.8-2.3 ms of that encode, *measured on Studio's own VM*, and the
+	framerate moved by **zero** — 85 against Blink's 133, where it was 84 against 130 before. Two
+	numbers agreeing once is not a model. The caution below the ladder said what a disagreement would
+	mean and that is now the standing answer: **something outside the codec is paying for this gap,
+	and it has not been measured.**
+
+	So this section reports and does not predict. The encode numbers are what this file is for; the
+	framerate is what the matrix is for, and the two are printed side by side rather than joined by
+	an equals sign.
 ]]
-local rivalFrame = 1000 / RIVAL_FPS
-local observedGap = 1000 / NETWEAVE_FPS - rivalFrame
-local beforeGap = (BEFORE - inlineCost) * PACKETS / 1e6
-local afterGap = (netweaveCost - inlineCost) * PACKETS / 1e6
-
 print("")
 print(
-	`        per frame at {PACKETS} packets: netweave spends {string.format(
-		"%.2f",
-		netweaveCost * PACKETS / 1e6
-	)} ` .. `ms encoding, generated code {string.format("%.2f", inlineCost * PACKETS / 1e6)} ms`
+	`        on this VM: {BEFORE} -> {string.format("%.0f", netweaveCost)} ns/packet across phase 7 `
+		.. `({string.format("%.2f", BEFORE / netweaveCost)}x), which at {PACKETS} packets is `
+		.. `{string.format("%.2f", netweaveCost * PACKETS / 1e6)} ms a frame against generated code's `
+		.. `{string.format("%.2f", inlineCost * PACKETS / 1e6)} ms`
 )
 print(
-	`        Studio measured a {string.format("%.2f", observedGap)} ms frame gap ({NETWEAVE_FPS} against `
-		.. `{RIVAL_FPS} FPS); the codec at {BEFORE} ns predicted {string.format("%.2f", beforeGap)} ms`
+	`        the same encode timed inside Studio: {STUDIO_BEFORE} -> {STUDIO_NOW} ns/packet across `
+		.. `phase 7 ({string.format("%.2f", STUDIO_BEFORE / STUDIO_NOW)}x, `
+		.. `{string.format("%.2f", (STUDIO_BEFORE - STUDIO_NOW) * PACKETS / 1e6)} ms a frame removed)`
 )
 print(
-	`        as it is now it predicts {string.format("%.2f", afterGap)} ms, which is `
-		.. `{string.format("%.0f", 1000 / (rivalFrame + afterGap))} FPS against {RIVAL_FPS} — `
-		.. `{string.format("%.2f", (rivalFrame + afterGap) / rivalFrame)}x, against a 1.30x bar`
+	`        and the matrix that followed: {NETWEAVE_FPS} FPS against {RIVAL_FPS} — `
+		.. `{string.format("%.2f", (1000 / NETWEAVE_FPS) / (1000 / RIVAL_FPS))}x, unmoved. `
+		.. `The frame is not encode-bound; see bench/RESULTS.md.`
 )
 
 print("")

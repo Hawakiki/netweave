@@ -434,9 +434,15 @@ end
 	arrays. 25.5 us — slower than doing nothing, because the array reads cost more than the calls
 	they save. That is what makes the unroll below non-negotiable rather than a matter of taste.
 
-	This lands at 12.7 us against 24.0, **1.9x**, and predicts the `ArrayHeavy` framerate gap closing
-	from 1.55x to **1.28x** — inside `PLAN-M1` criterion 5's 1.30x bar, but only just. The prediction
-	is on record in `bench/RESULTS.md` before the Studio run that checks it.
+	This lands at 12.7 us against 24.0 under lune, and 29.3 against 38.4 in Studio — **1.9x and
+	1.31x**, both measured on the VM they are quoted for.
+
+	~~It predicts the `ArrayHeavy` framerate gap closing from 1.55x to 1.28x.~~ **It did not.** The
+	Studio matrix that followed measured 85 FPS against Blink's 133, exactly where it was before
+	(`bench/RESULTS.md`, "the codec got faster and the framerate did not move"). The optimisation is
+	real and worth keeping — 1.8-2.3 ms of a frame at the benchmark's load — and the frame it lives
+	in is bound by something else that has not been measured yet. Do not read this comment as a
+	framerate claim; it is a claim about this function.
 
 	The unroll is eight blocks in one closure with an early return at each boundary, rather than
 	eight builders selected by arity. It is the same code either way; this way it is one thing to

@@ -446,10 +446,73 @@ mostly does not do, 30% one call per value, and **52% a closure per value plus t
 finds the field to hand it** — seven calls for a six-field struct before a byte is written.
 
 **The fix is one claim per struct with the offsets computed at declaration time**, which is
-`Serdes.fusedStructWriter`, taken for any struct whose fields are all fixed-size numbers. 1.9x, and
-the prediction it makes for the matrix is **84 → about 101 FPS, 1.28x of Blink against `PLAN-M1`
-criterion 5's 1.30x bar.** That prediction is recorded here before the Studio run that checks it;
-if the run disagrees, the disagreement is the finding and this table is where it gets written down.
+`Serdes.fusedStructWriter`, taken for any struct whose fields are all fixed-size numbers. 1.9x under
+lune, and ~~the prediction it makes for the matrix is **84 → about 101 FPS, 1.28x of Blink against
+`PLAN-M1` criterion 5's 1.30x bar**~~ — **the run disagreed, and the disagreement is below.** The
+prediction was recorded here before the run that checks it, which is the only reason it can be said
+plainly that it was wrong.
+
+## M4 phase 7, checked: the codec got faster and the framerate did not move
+
+`bench/runs/2026-09-05-m4p7.json`, the same place and load, built from `0cb731d`. The suite ran in
+the same Play: **19 runtime modules, 19 passed.**
+
+| `ArrayHeavy` Up, p50 | M3 run B | predicted | **measured** |
+|---|---|---|---|
+| netweave | 84 | ~101 | **85** <sub>p0..p100 = 84..87</sub> |
+| Blink | 130 | — | 133 |
+| Zap | 116 | — | 112 |
+| ByteNet | 118 | — | 118 |
+| raw | — | — | 30 |
+
+**1.56x of Blink. Criterion 5 is still missed, by the same margin it was missed by before the
+optimisation.** The control group moved 2-4%, so the machine is the same one; netweave's own spread
+is ±1.5 FPS, so 85 against a predicted 101 is not a resolution problem. Delivery is exact in all
+three netweave cells (170,400 / 443,200 / 449,400, `sent == received`) and every cell validated its
+payload. Encode allocation is 1909.76 B, **identical to the decimal** to phase 0 — expected, since
+the fused writer changes no allocation. The flag families are unchanged: 223 and 227 against Blink's
+229 and 222, inside the harness's own 14%.
+
+### What was checked before concluding anything
+
+Three measurements in the same Studio session, on the VM that produced the 85:
+
+| ns per packet, `ArrayHeavy` | lune | Studio |
+|---|---|---|
+| `inline` — the generated-code ceiling | 2,096 | 6,145 |
+| the primitive named at the call site | ~8,700 | 11,042 |
+| the same primitive fetched from a table | ~17,700 | 18,186 |
+| the pre-phase-7 shape, reconstructed | 22,318 | 38,434 |
+| the codec as it now stands | 12,772 | 29,314 |
+
+- **The fastcall finding holds on the real VM.** 1.65x in Studio against 1.60x under lune. The
+  reason `fusedStructWriter` names all five primitives in a branch chain is intact.
+- **The optimisation is real in Studio too**, at 1.31x rather than lune's 1.88x. The reconstruction
+  used for the "before" column reproduces the real pre-phase-7 codec to 7% under lune (22,318
+  against the measured 23,992), so the Studio "before" is trustworthy to about the same.
+- At 200 packets a frame that is **1.8-2.3 ms of frame time removed**, from a frame that measures
+  11.76 ms. It should have shown as ~101 FPS. It showed as 85.
+
+### So the frame is not encode-bound, and the arithmetic that said it was is withdrawn
+
+`bench/profile.luau` predicted a 4.38 ms frame gap against generated code and Studio had measured
+4.21 ms, and that agreement was read as corroboration that the gap was the encode. **It was a
+coincidence**, and this run is what proves it: the encode moved by 1.8-2.3 ms and the frame moved by
+zero. Two numbers agreeing once is not a model.
+
+The probe's own caution said what to do with this outcome — "disagreement would have been the useful
+answer: it would have meant something outside the codec was paying for the gap" — so the useful
+answer is what arrived. **Where the frame actually goes is now an open question with no measurement
+behind it.** The leading candidate, recorded as *inferred* and not as a finding: Studio Play runs
+client and server in one process, the server decodes 200 `ArrayHeavy` packets a frame in that same
+budget, and the decode path never took the block optimisation M2 gave the encode — the M4 security
+report measures decode at 2.5x the encode cost and 4x a hand-rolled reader, and `Buffer.ensure`,
+written for exactly that, has no caller in `src/`. `raw` sitting last at 30 FPS while serialising
+nothing points the same way.
+
+This is the second time on this cell that a cause was named, fixed, and found not to be the cause —
+the first was M1's `allocate`-per-value, struck through above. The pattern is worth stating plainly:
+**a microbenchmark can prove a component got faster and say nothing about the frame it lives in.**
 
 ### The part that was nearly missed
 
@@ -538,11 +601,13 @@ netweave's decode figure also includes the Studio-only `ctx` guard, which was on
 | 2 | Round-trip at every constraint boundary | **met** — `tests/serdes_runtime.luau`, `tests/roblox_runtime.luau` |
 | 3 | No adversarial input reaches `error()` | **met** — adversarial suite plus 4,200-case fuzz |
 | 4 | Bytes equal to Blink and Zap on `ArrayHeavy`, within one byte of Zap on `FlagIdiomatic` | **met** — 601, and 8 against 7 |
-| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.69x of Blink after the re-measurement. Met on both flag families, where every library is inside the harness's own 14% noise |
+| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.69x of Blink at the re-measurement, **1.56x at M4 phase 7** (85 against 133), where the codec was made 1.31x faster on that VM and the framerate did not move at all. Met on both flag families, where every library is inside the harness's own 14% noise |
 | 6 | Decode allocation at or below ByteNet's | **met against ByteNet**, 389 against 520 — see the caveat above |
 | 7 | No allocation on the receive hot path | **receive path met; send path improved, not closed** — the adapter's two tables per send are gone (flag encode 609.3 B to 81.92 B, Zap's figure), but `Serdes` still allocates per field |
 
-Two of seven are open, both on the encode side, both with an identified cause.
+Two of seven are open, both on the encode side. ~~Both with an identified cause.~~ **Neither has
+one now** — M4 phase 7 removed the cause criterion 5 was attributed to, measured the removal, and
+watched the framerate stay where it was.
 
 ## What this fixes about the plan
 
