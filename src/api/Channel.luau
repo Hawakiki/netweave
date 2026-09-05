@@ -137,14 +137,27 @@ type function payloadOf(descriptor, field)
 	local schema = types.copy(descriptor)
 	local name = field:value()
 
+	--[[ The same sentence twice, because the two failures are the same mistake seen from either
+	     side: something that is not a netweave type, and something that is a table but not one. A
+	     reader who hits either has written the same wrong thing. ]]
+	--[[ Concatenated rather than interpolated: the advice has to show `t.struct({ ... })`, and a
+	     brace inside an interpolated string is an interpolation. ]]
+	--[[ `:value()` on a type object is `unknown` to the analyser, and concatenating an unknown is an
+	     error inside netweave's own source — the one place a user cannot act on it. ]]
+	local advice = "`"
+		.. tostring(name)
+		.. "` must be a netweave type. Build one with the type library: local t = nw.types, then "
+		.. "t.struct({ ... }), t.u8, t.string(0, 32) or t.array(t.u16). A plain Luau table is not a "
+		.. "schema — there is nothing in it to serialise from."
+
 	if not schema:is("table") then
-		error(`\`{name}\` must be a netweave type, built with nw.types`)
+		error(advice)
 	end
 
 	local payload = schema:readproperty(types.singleton("__payload"))
 
 	if not payload then
-		error(`\`{name}\` must be a netweave type, built with nw.types`)
+		error(advice)
 	end
 
 	return payload
@@ -154,7 +167,11 @@ type function propertyOf(spec, field)
 	local declaration = types.copy(spec)
 
 	if not declaration:is("table") then
-		error("a channel is declared with a table of fields")
+		error(
+			"a channel is declared with a table of fields, written inline. Use "
+				.. "nw.signal({ data = ..., rate = 20 }) rather than a value built elsewhere and "
+				.. "passed in: the fields have to be visible here for the analyzer to read them."
+		)
 	end
 
 	return declaration:readproperty(types.singleton(field:value()))
@@ -171,7 +188,11 @@ type function requireRate(spec, class)
 	end
 
 	if not rate:is("number") then
-		error("`rate` is a number of packets per second")
+		error(
+			"`rate` is a number of packets per second per player, written as a literal: "
+				.. "nw.signal({ data = ..., rate = 20 }). There is no unlimited and no default — "
+				.. "netweave guarantee G2."
+		)
 	end
 
 	return rate
@@ -358,7 +379,12 @@ export type function OutboundScope(spec)
 	local scope = types.copy(audience):readproperty(types.singleton("scope"))
 
 	if not scope then
-		error("`audience` must come from nw.audience")
+		error(
+			"`audience` must come from nw.audience: use nw.audience.everyone, nw.audience.owner, "
+				.. "nw.audience.nearby(studs) or nw.audience.select(fn). A plain table will not do, "
+				.. "because the scope has to be a singleton in the type for `broadcast` to exist only "
+				.. "where it is safe (guarantee G3)."
+		)
 	end
 
 	return scope

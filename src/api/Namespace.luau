@@ -65,19 +65,32 @@ local sealed = false
 
 local function checkName(name: string)
 	if type(name) ~= "string" or name == "" then
-		error(`a namespace needs a name, got {typeof(name)}`, 3)
+		error(
+			`nw.namespace takes the name first and the channels second, got {typeof(name)}. Write it `
+				.. `as nw.namespace("combat", \{ fireWeapon = nw.command(\{ ... }) }) — the name is half `
+				.. `of every channel id on the wire, so it cannot be left out.`,
+			3
+		)
 	end
 
 	--[[ The name is half of every qualified id, and a dot in it would make `combat.fire.weapon`
 	     ambiguous about where the namespace ends. ]]
 	if string.find(name, ".", 1, true) then
-		error(`a namespace name cannot contain a dot: {name}`, 3)
+		error(
+			`the namespace name "{name}" contains a dot, and a channel id is namespace .. "." .. key. `
+				.. `Rename it without one — nw.namespace("combatRanged", ...) rather than `
+				.. `"combat.ranged" — or "combat.ranged.fire" would be ambiguous about where the `
+				.. `namespace ends.`,
+			3
+		)
 	end
 
 	if namespaces[name] then
 		error(
 			`the namespace {name} is already declared. Two namespaces with one name would collide `
-				.. `on the wire, because a channel id is derived from namespace .. "." .. key.`,
+				.. `on the wire, because a channel id is derived from namespace .. "." .. key. Give `
+				.. `this one a different name, or require the existing module instead of declaring a `
+				.. `second copy — nw.namespace is called once per namespace, at load.`,
 			3
 		)
 	end
@@ -118,7 +131,13 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 
 	for key, channel in channels do
 		if type(key) ~= "string" then
-			error(`{name} has a non-string channel key; ids come from the keys`, 2)
+			error(
+				`{name} has a non-string channel key, and ids come from the keys. Write the channels `
+					.. `as named fields — \{ fireWeapon = nw.command(\{ ... }) } — rather than as an `
+					.. `array, because a positional list would renumber the wire every time one is `
+					.. `inserted.`,
+				2
+			)
 		end
 
 		if not Channel.isChannel(channel) then
@@ -132,7 +151,9 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 		if channel.qualified ~= "" then
 			error(
 				`{name}.{key} is already declared as {channel.qualified}. A channel belongs to one `
-					.. `namespace; sharing the record would give it two ids and two budgets.`,
+					.. `namespace; sharing the record would give it two ids and two budgets. Declare a `
+					.. `second one with its own nw.command(\{...}), or move the shared *schema* into `
+					.. `a local and build both from it — a schema is reusable, a channel is not.`,
 				2
 			)
 		end
@@ -143,7 +164,12 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 	end
 
 	if count == 0 then
-		error(`the namespace {name} declares no channels`, 2)
+		error(
+			`the namespace {name} declares no channels, so nothing about it can reach the wire. Add `
+				.. `the ones it is for — nw.namespace("{name}", \{ fireWeapon = nw.command(\{ ... }) }) `
+				.. `— or delete the declaration.`,
+			2
+		)
 	end
 
 	local namespace: Namespace = {

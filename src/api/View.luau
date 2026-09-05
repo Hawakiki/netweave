@@ -67,8 +67,9 @@ end
 type function channelView(channel, side)
 	if not channel:is("table") then
 		error(
-			"a namespace holds channels, declared with nw.command, nw.intent, nw.signal, nw.query, "
-				.. "nw.state or nw.event"
+			"a namespace holds channels, and this field is not one. Declare it with nw.command, "
+				.. "nw.intent, nw.signal, nw.query, nw.state or nw.event — a schema on its own is "
+				.. "not a channel, and neither is a function."
 		)
 	end
 
@@ -90,9 +91,36 @@ type function channelView(channel, side)
 		return types.newfunction({ head = parameters }, { head = {} })
 	end
 
+	--[[
+		The context, shaped rather than left as `unknown`.
+
+		It was `types.unknown`, and that made `ctx` **unreadable**: a handler could not annotate it —
+		`Ctx` is not a supertype of `unknown`, so `function(ctx: nw.Ctx, shot)` was rejected — and it
+		could not read through it either. Every handler in the suite was written `function(_ctx, ...)`
+		and nobody noticed, because none of them wanted the context. Writing the worked example was
+		what noticed: `ctx.player` is the first thing a real handler reaches for.
+
+		The fields that can be named are named, so `ctx.now` is a number and `ctx.playr` is a typo the
+		analyser catches. The three Roblox-typed ones stay `unknown`, because a type function body has
+		no way to reach `Player`, `Model` or `Humanoid` — they pass through anywhere `unknown` is
+		accepted, which includes `publish`, and take a cast anywhere it is not. That limitation is
+		written down in `DESIGN-API.md` §8 rather than left to be discovered.
+	]]
+	local function context()
+		local ctx = types.newtable()
+
+		ctx:setproperty(types.singleton("player"), types.unknown)
+		ctx:setproperty(types.singleton("channel"), types.string)
+		ctx:setproperty(types.singleton("character"), types.optional(types.unknown))
+		ctx:setproperty(types.singleton("humanoid"), types.optional(types.unknown))
+		ctx:setproperty(types.singleton("now"), types.number)
+
+		return ctx
+	end
+
 	local function listener(seen, withContext)
 		local handler = if withContext
-			then types.newfunction({ head = { types.unknown, seen } }, { head = {} })
+			then types.newfunction({ head = { context(), seen } }, { head = {} })
 			else types.newfunction({ head = { seen } }, { head = {} })
 
 		view:setproperty(types.singleton("listen"), returns({ types.unknown, handler }))
@@ -115,7 +143,7 @@ type function channelView(channel, side)
 	elseif class == "query" then
 		if server then
 			local handler = types.newfunction(
-				{ head = { types.unknown, brandedAs(payload, "__nwTrusted") } },
+				{ head = { context(), brandedAs(payload, "__nwTrusted") } },
 				{ head = { response } }
 			)
 
@@ -169,7 +197,12 @@ export type function ServerView(declaration)
 		local channel = property.read
 
 		if not channel then
-			error("a channel in this namespace has no readable type")
+			error(
+				"a channel in this namespace has no readable type, which means it was declared "
+					.. "write-only. Write the namespace as a plain table literal: "
+					.. 'nw.namespace("combat", { fireWeapon = nw.command({ ... }) }), with no '
+					.. "`write` or `read` modifiers on the fields."
+			)
 		end
 
 		result:setproperty(key, channelView(channel, types.singleton("server")))
@@ -191,7 +224,12 @@ export type function ClientView(declaration)
 		local channel = property.read
 
 		if not channel then
-			error("a channel in this namespace has no readable type")
+			error(
+				"a channel in this namespace has no readable type, which means it was declared "
+					.. "write-only. Write the namespace as a plain table literal: "
+					.. 'nw.namespace("combat", { fireWeapon = nw.command({ ... }) }), with no '
+					.. "`write` or `read` modifiers on the fields."
+			)
 		end
 
 		result:setproperty(key, channelView(channel, types.singleton("client")))
@@ -230,7 +268,12 @@ export type Views<D> = {
 ]]
 local function attach(channel: any, handler: any, what: string)
 	if type(handler) ~= "function" then
-		error(`{what} needs a function, got {typeof(handler)}`, 3)
+		error(
+			`:{what}() takes the function that runs per packet, got {typeof(handler)}. Write it `
+				.. `inline — combat.server.fireWeapon:{what}(function(ctx, shot) ... end) — with the `
+				.. `colon, so the channel is the receiver.`,
+			3
+		)
 	end
 
 	if channel.handler ~= nil then

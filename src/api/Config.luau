@@ -202,7 +202,11 @@ export type function CheckedSettings(spec, snapshot)
 	local settings = types.copy(spec)
 
 	if not settings:is("table") then
-		error("nw.configure takes a table of settings: rules, limits, contextGuard")
+		error(
+			"nw.configure takes a table of settings, written inline: "
+				.. 'nw.configure({ rules = { budget = "warn" }, limits = { queueCapacity = 512 } }). '
+				.. "The three fields are rules, limits and contextGuard, and every one is optional."
+		)
 	end
 
 	local sections = { rules = true, limits = true, contextGuard = true }

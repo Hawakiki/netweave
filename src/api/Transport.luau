@@ -56,7 +56,13 @@ local driver: Driver? = nil
 ]=]
 function Transport.install(installed: Driver)
 	if driver ~= nil then
-		error("a transport is already installed", 2)
+		error(
+			"a transport is already installed. Requiring netweave installs it once, from "
+				.. "src/netweave.luau, and a second install would leave half the channels writing "
+				.. "into a buffer the other half never flushes. If this is a test swapping the "
+				.. "transport out, call Transport.uninstall() first.",
+			2
+		)
 	end
 
 	driver = installed
@@ -85,10 +91,14 @@ function Transport.driver(operation: string): Driver
 
 	if not installed then
 		error(
-			`{operation} needs a transport, and none is installed. The declaration surface is `
-				.. `netweave M1; batching, budgets and audience evaluation are M2. Until then a `
-				.. `channel can be declared, its schema exercised and its handlers attached, but `
-				.. `nothing crosses the wire.`,
+			--[[ The message named unfinished milestones until M3 phase 7, which was true when it was
+			     written and became a lie the moment the transport landed. What is left is the one
+			     case that can still reach here: netweave required somewhere `game` does not exist. ]]
+			`{operation} needs a transport, and none is installed. Requiring netweave inside Roblox `
+				.. `installs it; outside Roblox — under lune, or in a plain Luau host — there are no `
+				.. `remotes to install, so a channel can be declared, its schema exercised and its `
+				.. `handlers attached, and nothing crosses the wire. In a test, install a loopback `
+				.. `with Transport.install(...).`,
 			3
 		)
 	end

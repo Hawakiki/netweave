@@ -221,6 +221,8 @@ lune run tests/query_runtime
 lune run tests/protocol_runtime
 lune run tests/hostile_runtime
 lune run tests/fuzz_runtime
+lune run tests/example_runtime
+lune run tools/messages       # every error( in src/api names the fix, not the rule
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike

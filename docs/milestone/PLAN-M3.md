@@ -524,14 +524,29 @@ evidence the claim is not merely unexamined:
 
 ### Phase 7 — the learning curve
 
-- [ ] Every `error(` in `src/api/` names the fix, not the rule: what was written, what was
-      expected, and the one line that repairs it
-- [ ] The M1/M2 `type function` errors get the same treatment — they surface verbatim at the call
-      site, which is exactly where a beginner reads them
-- [ ] `docs/DESIGN-API.md` gains a "the whole surface on one page" table: six classes, what each
-      requires, and the one thing each forbids
-- [ ] One worked example that declares, sends, authorizes, refuses and observes — under 60 lines,
-      and executed by the test suite so it cannot rot
+- [x] Every `error(` in `src/api/` names the fix, not the rule. Seventy of them, twenty rewritten,
+      and `tools/messages.luau` is the check acceptance 13 asks for: a message must carry a **repair
+      marker** — a netweave spelling to write, or an imperative naming an action — and must either
+      show the offending value or spend eighty characters explaining a mistake that has none.
+- [x] The `type function` errors got the same treatment. They print verbatim at the call site, in
+      the declaration file, next to the line that is wrong, which is exactly where somebody learning
+      the library is looking — so "`rate` is a number of packets per second" was the worst message
+      in the repository rather than a small one.
+- [x] `docs/DESIGN-API.md` §2.1: six classes with what each requires and what each forbids, then a
+      second table for everything else on the surface, one row each with the one thing to know.
+- [x] One worked example that declares, sends, authorizes, refuses and observes, in sixty lines.
+      `tests/example_runtime.luau` runs it against the real `Outbound`, `Inbound`, budget and
+      policy; `tools/messages.luau` asserts the code in the document is the same text, character for
+      character, and that check was verified to fail against a deliberately drifted copy.
+- [x] **Found by writing the example:** a `:listen` handler's `ctx` was `types.unknown`, which made
+      it unreadable *and* un-annotatable — `Ctx` is not a supertype of `unknown`, so even
+      `function(ctx: nw.Ctx, shot)` was rejected. Nothing caught it because every handler in the
+      suite is written `function(_ctx, ...)` and none of them wanted the context. The view builds a
+      shaped table now: `ctx.now` is a number, `ctx.playr` is a diagnostic, and the three
+      Roblox-typed fields stay `unknown` because a type function body cannot name `Player`.
+- [x] **Found by the same pass:** two stale messages. `Transport` told the reader that batching was
+      M2 and nothing crossed the wire yet, which was true when it was written and a lie once the
+      transport shipped, and `tests/api_runtime.luau` asserted on the word "M2".
 
 ### Phase 8 — repository policy
 
