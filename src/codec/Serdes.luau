@@ -1208,4 +1208,38 @@ function Serdes.fromSchema(descriptor: Types.Descriptor): Codec
 	return Serdes.build(Ir.lower(descriptor))
 end
 
+--[=[
+	@within Serdes
+	@function nodeCodec
+	@param node Node -- a node from a lowered layout, with its bits already assigned
+	@return (value: any, flags: { number }) -> ()
+	@return (flags: { number }) -> any
+	@private
+
+	The writer and reader for **one node**, for a caller that is assembling a payload this module
+	does not know the shape of.
+
+	`src/replication/Delta.luau` is the only such caller: a patch interleaves its own decisions —
+	did this field change, is it there now — with ordinary values, so it walks the tree itself and
+	asks for a codec at each leaf rather than reimplementing fourteen kinds.
+
+	:::caution
+	The block optimisation is **off** for these. `Serdes.build` turns it on when a layout is
+	statically sized, because then one `allocate` covers the whole payload and every writer below it
+	can skip its own bounds check. A patch is never statically sized — that is what a patch is — so
+	a node built here uses the growth-checked writers, and mixing one built here into a blocked
+	layout would write past the block.
+	:::
+]=]
+function Serdes.nodeCodec(node: Ir.Node): (Writer, Reader)
+	local outer = blocked
+	blocked = false
+
+	local write = writerFor(node)
+	local read = readerFor(node)
+
+	blocked = outer
+	return write, read
+end
+
 return Serdes
