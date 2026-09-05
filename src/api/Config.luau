@@ -79,12 +79,13 @@ export type Severity = "off" | "warn" | "error"
 	.queue Severity? -- a channel with no listener overflowed its queue
 	.send Severity? -- an outgoing payload was refused before it left
 	.protocol Severity? -- a peer joined on a different set of channel definitions
+	.query Severity? -- a call came back without an answer
 	.rateUnbounded Severity? -- a `rate` so large it cannot bind, declared as if it were a limit
 
-	Seven of the eight are the stages of [Observer.Stage], because a rejection already carries the
-	stage it happened at and inventing a second vocabulary for the same six things would only make
-	them drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the
-	game's own code, and is the only rule here that raises at `"error"`.
+	Eight of the nine are the stages of [Observer.Stage], because a rejection already carries the
+	stage it happened at and inventing a second vocabulary for the same things would only make them
+	drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the game's own
+	code, and is the only rule here that raises at `"error"`.
 ]=]
 export type Rules = {
 	parse: Severity?,
@@ -94,6 +95,7 @@ export type Rules = {
 	queue: Severity?,
 	send: Severity?,
 	protocol: Severity?,
+	query: Severity?,
 	rateUnbounded: Severity?,
 }
 
@@ -104,6 +106,7 @@ export type Rules = {
 	.pendingPerBatch number? -- decoded packets held live while a batch is read, before any is dispatched
 	.unreliableBytes number? -- the largest unreliable payload that will be sent
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
+	.callsInFlight number? -- unanswered `nw.query` calls one player may hold at once
 
 	Numbers, not severities, and kept in their own field so that a limit can never be mistaken for a
 	switch.
@@ -116,6 +119,7 @@ export type Rules = {
 	| `pendingPerBatch` | at the start of every batch |
 	| `unreliableBytes` | on every unreliable send, so it takes effect immediately and can only *lower* the ceiling — 908 is Roblox's limit, not netweave's |
 	| `repeatsPerDiagnostic` | on every report |
+	| `callsInFlight` | on every `invoke` and on every request the server accepts, so it takes effect immediately |
 
 	Configuring before the first channel is declared makes all three behave the same way, which is
 	why that is the advice rather than the rule.
@@ -125,6 +129,7 @@ export type Limits = {
 	pendingPerBatch: number?,
 	unreliableBytes: number?,
 	repeatsPerDiagnostic: number?,
+	callsInFlight: number?,
 }
 
 --[=[
@@ -209,9 +214,21 @@ export type function CheckedSettings(spec, snapshot)
 		queue = true,
 		send = true,
 		protocol = true,
+		query = true,
 		rateUnbounded = true,
 	}
-	local limitNames = { queueCapacity = true, unreliableBytes = true, repeatsPerDiagnostic = true }
+	--[[ Every key of `Limits`, and it has to be spelled out because a type function body cannot read
+	     a type alias's properties back out as strings. `pendingPerBatch` was missing here until M3
+	     phase 4: the field existed, the runtime honoured it, and the analyzer refused the one
+	     spelling that worked. A list that has to be kept in step by hand is exactly the kind of thing
+	     that drifts, which is why `tests/config_runtime.luau` now sets every limit by name. ]]
+	local limitNames = {
+		queueCapacity = true,
+		pendingPerBatch = true,
+		unreliableBytes = true,
+		repeatsPerDiagnostic = true,
+		callsInFlight = true,
+	}
 
 	--[[ Annotated `any` throughout: inside a type function the values are the analyzer's own type
 	     objects, and letting it infer them produces a cyclic type it then cannot print. ]]
@@ -237,21 +254,110 @@ export type function CheckedSettings(spec, snapshot)
 		end
 	end
 
-	reject(settings, "setting", sections)
+	--[[
+		The value layer, and it lives here rather than in the parameter's type.
 
-	--[[ A section that is absent, or is not a table, is left to the value layer: `Settings` already
-	     makes `rules = "off"` a type error, and repeating it here would produce two diagnostics for
-	     one mistake. ]]
-	local function section(name: any, field: any, allowed: any)
-		local declared = settings:readproperty(types.singleton(name))
+		`nw.configure` was typed `<S>(settings: S & Settings)` until M3 phase 4. That reads correctly
+		and does not work: Luau binds `S` to the argument's own type and then requires the
+		intersection to be exactly that type, so `{ limits = { queueCapacity = 512 } }` was refused
+		for not also carrying the four limits it had not set. **Every** call in the documented shape
+		was a type error, including the one in this module's own docstring, and nothing said so
+		because no `*_ok` file had ever configured anything — the mirror image of the failure
+		`tests/*_reject.luau` exists to catch. It surfaced when a phase 4 test needed to raise
+		`callsInFlight` and could not.
 
-		if declared and (declared :: any):is("table") then
-			reject(declared, field, allowed)
+		Checking here costs the eight-line wall of union explanations Luau prints for a failed
+		intersection and buys one message per mistake that names what to write instead.
+		`tests/config_ok.luau` is what keeps it honest.
+	]]
+	local severities = { off = true, warn = true, error = true }
+
+	local function named(value: any): string
+		if value:is("singleton") then
+			return `\`{tostring(value:value())}\``
+		end
+
+		if value:is("string") then
+			return "a string"
+		end
+
+		if value:is("number") then
+			return "a number"
+		end
+
+		if value:is("boolean") then
+			return "a boolean"
+		end
+
+		if value:is("table") then
+			return "a table"
+		end
+
+		return "that"
+	end
+
+	--[[
+		A severity is checked for being *a string* here, and for being one of the three at runtime.
+
+		The narrower check is not available: with the parameter typed as a bare `S` there is no
+		expected type to hold `"warn"` at its singleton, so a config block's severities reach this
+		function widened to `string` and there is no literal left to compare. Restoring the expected
+		type is what the intersection above did, and what it cost was every call.
+
+		Nothing is lost that matters. `Config.configure` refuses `"loud"` with the same message, and
+		it refuses it at startup where the configure call is, not at the first packet — a misspelled
+		severity is loud either way. The case D-11 is actually about is a misspelled rule *name*,
+		which reads as "I configured this" while the default stays in force, and that is still caught
+		here by `reject`.
+	]]
+	local function isSeverity(value: any): boolean
+		if value:is("singleton") then
+			return severities[value:value()] == true
+		end
+
+		return value:is("string") or value:is("union")
+	end
+
+	local function isNumber(value: any): boolean
+		return value:is("number")
+	end
+
+	local function values(container: any, field: any, ok: any, expected: any)
+		for key, property in container:properties() do
+			local value: any = property.read
+
+			if value and not ok(value) then
+				local name: any = (key :: any):value()
+				error(`nw.configure: {field} \`{name}\` takes {expected}, got {named(value)}`)
+			end
 		end
 	end
 
-	section("rules", "rule", ruleNames)
-	section("limits", "limit", limitNames)
+	reject(settings, "setting", sections)
+
+	local function section(name: any, field: any, allowed: any, ok: any, expected: any)
+		local declared: any = settings:readproperty(types.singleton(name))
+
+		if not declared then
+			return
+		end
+
+		if not declared:is("table") then
+			error(`nw.configure: \`{name}\` takes a table of {field}s, got {named(declared)}`)
+		end
+
+		reject(declared, field, allowed)
+		values(declared, field, ok, expected)
+	end
+
+	section("rules", "rule", ruleNames, isSeverity, `a severity: "off", "warn" or "error"`)
+	section("limits", "limit", limitNames, isNumber, "a number")
+
+	local guard: any = settings:readproperty(types.singleton("contextGuard"))
+
+	if guard and not guard:is("boolean") then
+		error(`nw.configure: \`contextGuard\` takes a boolean, got {named(guard)}`)
+	end
 
 	return types.copy(snapshot)
 end
@@ -327,6 +433,12 @@ local RULES: { [string]: Rule } = {
 		wire = true,
 		summary = "an outgoing payload was refused before it left",
 	},
+	query = {
+		default = "warn",
+		floor = "off",
+		wire = true,
+		summary = "a call came back without an answer",
+	},
 	rateUnbounded = {
 		default = "warn",
 		floor = "off",
@@ -341,6 +453,11 @@ local LIMITS: { [string]: { default: number, min: number, max: number } } = {
 	pendingPerBatch = { default = 256, min = 1, max = 65536 },
 	unreliableBytes = { default = 908, min = 1, max = 908 },
 	repeatsPerDiagnostic = { default = 3, min = 1, max = 1000 },
+	--[[ Both sides of a query read this one. On the server it bounds the threads a single player
+	     can have parked inside slow handlers; on the client it bounds the calls one game can leave
+	     outstanding. They are the same number because they are the same player counted from either
+	     end (`PLAN-M3` D-13). ]]
+	callsInFlight = { default = 16, min = 1, max = 4096 },
 }
 table.freeze(LIMITS)
 

@@ -43,6 +43,8 @@ local Recipients = require("./Recipients")
 ]]
 local attempt: (...any) -> ...any = Batch.writeBody
 local attemptPacket: (...any) -> ...any = Batch.writePacket
+local attemptRequest: (...any) -> ...any = Batch.writeRequest
+local attemptReply: (...any) -> ...any = Batch.writeReply
 
 local Outbound = {}
 
@@ -92,6 +94,8 @@ export type Outbound = {
 	push: (channel: any, destination: any, value: any) -> (),
 	publish: (channel: any, subject: any, value: any) -> (),
 	broadcast: (channel: any, value: any) -> (),
+	request: (channel: any, call: number, value: any) -> (),
+	reply: (channel: any, destination: any, call: number, status: number, value: any?) -> (),
 	flush: () -> (),
 	forget: (destination: any) -> (),
 }
@@ -172,9 +176,9 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 
 		The rewind is two numbers rather than a saved record, so the guard costs no allocation.
 	]]
-	local function guarded(channel: any, value: any)
+	local function guarded(writer: (...any) -> ...any, ...: any)
 		local used, instances = Buffer.mark()
-		local ok, failure = pcall(attemptPacket, channel, value)
+		local ok, failure = pcall(writer, ...)
 
 		if not ok then
 			Buffer.rollback(used, instances)
@@ -245,7 +249,7 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			end
 
 			switchTo(destination)
-			guarded(channel, value)
+			guarded(attemptPacket, channel, value)
 		end,
 
 		--[[ A publish resolves its audience and fans out. `everyone` takes the one-call path;
@@ -320,7 +324,31 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			end
 
 			switchTo(EVERYONE)
-			guarded(channel, value)
+			guarded(attemptPacket, channel, value)
+		end,
+
+		--[[
+			A query going out from the client. There is one destination and it is not addressable, so
+			this is `push` with a call id — batched with the frame's other traffic rather than sent
+			alone, because a request that leaves early still waits a frame for the answer.
+		]]
+		request = function(channel: any, call: number, value: any)
+			switchTo(SERVER)
+			guarded(attemptRequest, channel, call, value)
+		end,
+
+		--[[
+			The answer, back to the one player who asked.
+
+			It is not budgeted, and that is an argument rather than an omission: a reply is
+			one-for-one with a request, and the request already spent that player's rate budget on
+			the way in. A second budget here would police the server's own answers to questions it
+			had already agreed to answer, and the only way to overrun it would be to have accepted
+			too many requests — which is what `rate` is for.
+		]]
+		reply = function(channel: any, destination: any, call: number, status: number, value: any?)
+			switchTo(destination)
+			guarded(attemptReply, channel, call, status, value)
 		end,
 
 		--[[ Once a frame. Everything accumulated goes out as one call per destination, which is the

@@ -3,6 +3,10 @@
 Frozen by PLAN-M1 phase 2. Changing anything here after M1 ships is a breaking change, so the
 reasoning is recorded alongside each decision.
 
+The query correlation in §2 is the one addition since the freeze, and it is a gap being filled
+rather than a change: `nw.query` had no implementation until M3 phase 4, so no query packet had
+ever crossed the wire and there was nothing yet to break.
+
 Everything is little-endian, matching Roblox's `buffer` accessors. There are no alignment
 requirements.
 
@@ -30,7 +34,7 @@ packet, and it is what lets this document have a v2.
 ## 2. Packet
 
 ```
-packet := id:varint  frame  payload
+packet := id:varint  [correlation if query]  frame  payload
 ```
 
 `frame` depends on the channel's **framing mode**, which is a static property of its schema and
@@ -85,6 +89,47 @@ It is not free, and the cost is not hidden:
 `static` schemas pay nothing — the framing guarantee is free for them. `counted` schemas pay one
 byte, which on a 6-byte payload is 14%. That is the price of G5, stated plainly rather than
 buried; §7 describes how to get it back for the common case.
+
+### Request and response
+
+A `query` is `C→S→C` on **one** wire id. The request and the reply travel in opposite directions
+over the same number, because the side reading the packet already knows which of the two it can be:
+a server never receives a reply and a client never receives a request. Spending a byte to say which
+would be spending it to repeat something both peers know from the id alone.
+
+```
+request := id:varint  call:varint  frame(args)     args
+reply   := id:varint  call:varint  status:u8  [ frame(returns)  returns  if status == 0 ]
+```
+
+**The call id is framing, not payload.** It sits ahead of the length prefix, so a `counted`
+channel's length still counts exactly the bytes the schema produced — which keeps the derived byte
+ceiling (`DESIGN-API.md` §3) a statement about the schema rather than a number that has to be
+adjusted by however many bytes this particular call id took to write.
+
+It is a **varint**. Blink (`Generator/init.luau:723-745`) and Zap (`client.rs:1329`) both use a
+`u8`, so 256 unanswered calls is a hard ceiling and the 257th is dropped with a raise
+(`RESEARCH §3.7-G`). netweave wraps at 16,383 and skips ids that are still outstanding, so two live
+calls can never collide and the only bound is the one the game declares.
+
+| Status | Name | Meaning |
+|---|---|---|
+| 0 | `OK` | the answer follows |
+| 1 | `REFUSED` | a policy said no, or the rate budget did |
+| 2 | `FAILED` | the handler raised, or its answer did not encode |
+| 3 | `UNHANDLED` | nothing is attached to answer this channel |
+| 4 | `BUSY` | this player already holds every call slot the server will |
+
+**A non-zero status ends the packet.** There is no frame and no payload behind it. The alternative
+— a zero-length payload — is expressible on a `counted` schema and not on a `static` one, where a
+refused reply would have had to carry the schema's full fixed size in bytes of nothing. Ending at
+the status byte is uniform across both framings and stays resynchronisable, because by the time the
+reader has the status it has already read everything that tells it where the packet ends.
+
+**A status is a code and never the server's reason.** A refusal's reason names the policy, the
+field and sometimes the player; it is written for the game that owns the server. Sending it back
+would publish the authorization model to the machine that model exists to distrust, one denied
+request at a time. The reason goes to the observer on the server; the client gets the code.
 
 ## 3. Channel ids
 

@@ -117,6 +117,21 @@ says that out loud so nobody mistakes it for an RPC.
 **`signal`** carries no authority. `authorize` is *forbidden* here so the class stays honest:
 if you need to approve it, it was a `command`. Its payload arrives branded `Untrusted<T>`.
 
+**`query`** is a `command` that answers, and the differences all follow from the answer. `timeout`
+is required and has no unlimited value, because a request that never resolves is a leak
+(`RESEARCH §3.7-G`). `returns` may not be a top-level `t.optional`, because `invoke` reports failure
+as `nil` and an answer that may itself be nil would be indistinguishable from a call that never came
+back (§7). Its reply gets a derived ceiling of its own from `returns`, which is not declarable —
+`maxBytes` exists to police a peer, and on a query the peer is the client asking the question, not
+the server answering it.
+
+It is also **the one class whose handler may yield**, which is what a query is for: a datastore
+read, a `WaitForChild`, an HTTP call. Three things follow. The handler runs on its own thread, so
+the rest of the batch is not waiting on it. It receives a context of its own rather than the shared
+per-player one, which is refreshed out from under anything that yields (§8). And a player's parked
+handlers are a resource they can spend, so `callsInFlight` bounds how many of them one player may
+hold at once.
+
 **`state`** and **`event`** must name their audience. Broadcasting everything to everyone is how
 positional data leaks to wallhacks; making the recipient set a declaration rather than a call
 site turns that into a reviewable line of code.
@@ -382,6 +397,51 @@ combat.playerState:listen(function(state) end)
 local loadout, failure = combat.getLoadout:invoke(0)
 ```
 
+### What `invoke` returns
+
+`(R?, string?)` — the answer, or `nil` and a reason. Decided in M3 phase 4, against a shared plan
+that asked for `nil` not to mean failure.
+
+The objection to `nil` is real in general: it conflates "failed" with "returned nothing". It does
+not apply here, because **a query's `returns` may not be a top-level `t.optional`**. That is
+refused at the declaration, where the fix is one line the author writes once:
+
+```lua
+returns = t.struct({ found = t.boolean, value = t.optional(...) })
+```
+
+With that rule in force `nil` is unambiguous, and the alternatives cost more than they buy:
+
+| Shape | Cost |
+|---|---|
+| `(R?, string?)` | none; `R?` cannot be used without a nil check under the solver netweave requires |
+| `{ ok, value } \| { ok, reason }` | a table per call, to buy narrowing that `if not answer then` already gives |
+| raise on failure | a refused query is an ordinary outcome, not an exception (G4) |
+| `(boolean, R \| string)` | the caller cannot narrow a union off a separate boolean, so every call site casts |
+
+The failure cannot be ignored, and the type system is what enforces that rather than a convention:
+`local loadout = getLoadout:invoke(0)` types `loadout` as `Loadout?`, and reading a field off it is
+a diagnostic. That is the same bargain §7 makes for direction — a guarantee that is a type error or
+it is nothing.
+
+**The reason is netweave's own words, never the server's.** A refusal's reason names the policy and
+sometimes the player, and it goes to the observer on the server. What crosses the wire is a status
+code (`WIRE-FORMAT.md` §2), and the caller sees a sentence built from that code plus, for a
+timeout, the deadline it missed. Sending the real reason back would publish the authorization model
+to the machine it exists to distrust, one denied request at a time.
+
+**Every way a call can end resolves the caller.** A refusal, a raising policy, a raising handler, an
+answer that will not encode, a missing handler, a full call budget, a rate refusal, an answer the
+pending-set ceiling discarded, and a deadline — nine failure paths, each of which resumes the parked
+thread, and each with a reason describing what actually happened rather than defaulting to the
+timeout's wording. Blink and Zap resolve none of them: they have no timeout at all, so a peer that
+does not answer parks the caller for the session (`RESEARCH §3.7-G`).
+
+**How many calls may be open** is `callsInFlight`, and it is one number read from both ends. On the
+server it bounds the threads one player can have parked inside slow handlers; on the caller it
+bounds the answers one game may be waiting for. They are the same number because they count the
+same player from either side.
+
 ~~`.server` and `.client` need to map each key of the declaration to a different channel type,
 and Luau has no mapped types, so one of two fallbacks is required.~~
 
@@ -447,9 +507,15 @@ and the failure Warp demonstrates by silently blackholing players (`§3.7-K`).
 ```lua
 nw.observe(function(rejection)
     -- channel, player, stage, reason, bytes
-    -- stage: "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol"
+    -- stage: "parse" | "budget" | "authorize" | "handler"
+    --      | "queue" | "send" | "protocol" | "query"
 end)
 ```
+
+`query` is the caller's side of a request that produced no answer — a timeout, or a refusal the
+server sent back as a code. It is not a duplicate of the stage that made the refusal: that one
+fired on the server with the real reason, and this one fires on the end that was waiting, which is
+the end that has to decide what to do next.
 
 ### 9.1 Observed by default
 
@@ -480,16 +546,29 @@ nw.configure({
         handler = "error",    -- default: the game's own bug, so every occurrence
         queue = "warn",
         send = "warn",
+        protocol = "error",
+        query = "warn",       -- a call that came back without an answer
         rateUnbounded = "warn",
     },
     limits = {
         queueCapacity = 256,
+        pendingPerBatch = 256,
         unreliableBytes = 908,
         repeatsPerDiagnostic = 3,
+        callsInFlight = 16,   -- unanswered queries one player may hold
     },
     contextGuard = nil,       -- nil means Studio-only, as before
 })
 ```
+
+:::note
+Every field is optional and a call that sets one leaves the rest alone. That was not true until M3
+phase 4: `nw.configure` was typed `<S>(settings: S & Settings)`, which Luau rejects for every
+argument, and no test called it with settings that should work — so the example above did not
+compile and the rejection file's count was counting the bug. `tests/config_ok.luau` is the missing
+half, and the name and value checks now both live in the `CheckedSettings` type function, one
+message per mistake.
+:::
 
 **A severity governs output and never enforcement.** A packet refused at `budget` is refused
 whatever `budget` is set to. There is no setting anywhere in netweave that makes a refused packet

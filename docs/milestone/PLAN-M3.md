@@ -231,6 +231,66 @@ declaration, which is the shape the rule exists to produce: a considered excepti
 
 **What this does not do yet.** The counters in phase 1 are not built; `nw.config.snapshot()` reports
 settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
+### D-12 — A refusal crosses the wire as a code, never as a reason
+
+A query has to tell the caller it was refused, or the caller waits out the timeout for something the
+server knew instantly. What it must not tell them is *why*.
+
+A refusal's reason is written for the game that owns the server. It names the policy, often the
+field, sometimes the player — `"not in guild 7"`, `"cooldown, 2.1s left"`. Sending that back turns
+every denied request into a probe: an exploiter learns the shape of the authorization model by
+being refused by it, which is a cheaper way in than reading the client bundle.
+
+So the reply carries one of five codes (`WIRE-FORMAT.md` §2) and the reason goes to the observer on
+the server, where the game can read it. The codes are chosen so each implies a different response
+from the caller — retry later, do not retry, report a bug, wire up a handler, back off — which is
+everything a caller can act on and nothing it can learn from.
+
+### D-13 — `callsInFlight` is one number, read from both ends
+
+A query handler is the only handler netweave lets yield, and that permission is a resource. A player
+whose handler blocks on a datastore holds a thread until it returns, and `rate` does not bound that:
+`rate` counts arrivals, and a handler that takes five seconds at `rate = 20` is a hundred threads.
+
+`callsInFlight` bounds the threads one player may have parked. The same number bounds the answers
+one caller may be waiting for, because it counts the same player from the other side — so a game
+that trips one is about to trip the other and is told so in whichever place it happens first.
+
+The bound is per **player**, not per channel. The resource is a parked thread and a thread does not
+become cheaper for being parked in a different handler; a per-channel bound would let one player
+multiply their budget by the number of query channels the game happens to declare.
+
+**What it does not do is cancel anything.** A yielded Luau coroutine cannot be resumed from
+outside into a failure, so a handler wedged on something that never returns holds its slot until it
+returns or the player leaves. That is self-denial — a player can only wedge their own slots — and it
+is stated in `Query.forget` rather than papered over.
+
+### D-14 — `nw.configure` never type-checked, and the reject file was counting the bug
+
+Found in phase 4, by needing to raise `callsInFlight` in a test.
+
+`nw.configure` was typed `<S>(settings: S & Config.Settings)`. That reads correctly — capture the
+literal in `S` for the name check, require it to satisfy `Settings` — and Luau rejects **every**
+argument to it: it binds `S` to the argument's own type and then requires the intersection to be
+exactly that type, so a settings table that omits any optional field fails, and all of them are
+optional. The example in the function's own docstring did not compile.
+
+Nothing said so, and the reason is the interesting half. The only file calling `nw.configure` was
+`tests/config_reject.luau`, where a diagnostic is what success looks like. Nine of its twelve
+expected diagnostics were this bug, and its header comment explained them as a deliberate two-layer
+design. **A rejection count guarding a feature that has no positive test is guarding nothing.**
+
+The fix moves both halves — names and value types — into the `CheckedSettings` type function, which
+now says what is wrong in one line instead of eight lines of union explanation. `config_reject` is
+8, one per mistake. `tests/config_ok.luau` is the half that was missing.
+
+One check did not survive: a severity that is a string but not one of the three. With the parameter
+typed as a bare `S` there is no expected type to hold `"warn"` at its singleton, so severities
+arrive widened to `string` and there is no literal left to compare. `Config.configure` refuses
+`"loud"` at startup with the same message, which is loud and immediate; and the case D-11 is
+actually about — a misspelled rule *name*, which reads as "I configured this" while the default
+stays in force — is still caught at analysis.
+
 ## 6. Tasks
 
 ### Phase 0 — the five defects that were live in this tree — **done**
@@ -333,15 +393,48 @@ settings, not rejection totals. `nw.diagnostics()` remains phase 1's.
 
 ### Phase 4 — `query`, with the timeout the field does not have
 
-- [ ] `src/transport/Query.luau`: varint call ids, so there is no 256 ceiling (`RESEARCH §3.7-G`)
-- [ ] A declared timeout per channel, required, with no unlimited option — the same shape as `rate`
-- [ ] A timed-out call resolves as a failure value, never a hung thread
-- [ ] Every pending call for a leaving player is cancelled in `PlayerRemoving`, alongside M2's
-      three existing forgets
-- [ ] The reply path is a channel like any other: budgeted, observed, and unable to throw
-- [ ] Reconcile the failure shape — `invoke` currently returns `(R?, string?)` and the shared plan
-      forbids `nil` as failure. Decide, and write it into `DESIGN-API.md` §7
-- [ ] Delete the hole at `Driver.luau:120` and the comment that promises this milestone
+- [x] `src/transport/Query.luau`: varint call ids, so there is no 256 ceiling (`RESEARCH §3.7-G`).
+      Wrapping at 16,383 and skipping ids that are still outstanding, so a collision is impossible
+      by construction rather than by being unlikely. Demonstrated at **300 concurrent calls**, which
+      is past the point where Blink and Zap raise.
+- [x] A declared timeout per channel, required, with no unlimited option — the same shape as `rate`
+- [x] A timed-out call resolves as a failure value, never a hung thread
+- [x] Every pending call for a leaving player is cancelled in `PlayerRemoving`, alongside M2's
+      three existing forgets. **With one correction written into the code:** a handler already
+      parked inside a yield is *not* cancelled, because a yielded Luau coroutine cannot be. What is
+      released is the accounting; the thread returns when it returns, finds its slot gone, and
+      writes no reply.
+- [x] The reply path is a channel like any other: budgeted, observed, and unable to throw
+- [x] Reconcile the failure shape — `invoke` currently returns `(R?, string?)` and the shared plan
+      forbids `nil` as failure. **Decided: `(R?, string?)` stays**, and the ambiguity is closed at
+      the declaration instead — a query's `returns` may not be a top-level `t.optional`. Written
+      into `DESIGN-API.md` §7 with the three alternatives and what each costs.
+- [x] Delete the hole at `Driver.luau:120` and the comment that promises this milestone
+- [x] `docs/WIRE-FORMAT.md` §2 gains the query correlation, which was never specified because no
+      query had ever crossed the wire
+- [x] `tests/query_runtime.luau`: two peers in one process, over the real envelope. Eight failure
+      paths against one success path, and the three bounds confirmed to fail without their guards
+- [x] **Found and fixed while writing the tests:** `nw.configure` did not type-check at all. See
+      D-14.
+- [x] **Found by the phase audit:** an answer the pending-set ceiling discards left its caller
+      parked for the whole timeout and then told it `no answer within 5s` — about a packet that had
+      arrived, decoded, and been dropped a frame earlier. `Query.abandon` moves the deadline into
+      the past and records what actually happened, so the caller gives up on the next tick with the
+      real reason. Reaching it needs `callsInFlight` above `pendingPerBatch`, which is a
+      misconfiguration rather than a peer, and it is still the rule the rest of the phase keeps.
+
+**The rest of the audit found nothing.** Recorded because a probe that finds nothing is the only
+evidence the claim is not merely unexamined:
+
+| Probe | Result |
+|---|---|
+| Instances through a query, both directions | args and returns each carry one; request 4 B / sidecar 1, answer 5 B / sidecar 1 |
+| A refused reply in front of an answered one, both on an instance-carrying channel | the answer reads its own instance; a status-only packet advances the sidecar by zero |
+| Hostile call ids — 0, 127, 128, 16383, 16384, 2^32-1 | every one round-trips and is echoed back; no raise, no report |
+| `replyMaxBytes` | consulted: a reply claiming 500 on a 201-byte `returns` refuses at `budget` |
+| The `query` stage in `nw.diagnostics()` | counted, with zero bytes, which is what a timeout weighs |
+| `maxBytes` on a query — static args, below the derived, above it | refused, accepted, refused |
+| A request that fails decode with an instance behind it | the packet behind it gets its *own* instance, and both calls are answered |
 
 ### Phase 5 — the protocol handshake
 

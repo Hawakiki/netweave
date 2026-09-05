@@ -29,7 +29,7 @@ local Config = require("./Config")
 local Observer = {}
 
 --[=[
-	@type Stage "parse" | "budget" | "authorize" | "handler" | "queue" | "send"
+	@type Stage "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol" | "query"
 	@within Observer
 
 	How far a packet got before it was refused.
@@ -43,6 +43,7 @@ local Observer = {}
 	| `queue` | nothing is listening on that channel yet, and the backlog is full |
 	| `send` | netweave refused to put a packet on the wire |
 	| `protocol` | the peer is on a different set of channel definitions |
+	| `query` | a `nw.query` call came back without an answer |
 
 	The first three are worth separating because they mean different things about the sender.
 	`parse` is a stale client or an attacker; `budget` is a flood; `authorize` is a player asking
@@ -59,8 +60,13 @@ local Observer = {}
 	`protocol` is the odd one: it fires once when a peer joins on a hash that does not match, not per
 	packet. No surveyed library checks this at all, so the failure it replaces is a stale client that
 	connects successfully and is then refused on every packet forever, with nothing saying why.
+
+	`query` is the caller's side of a request that produced no answer — a timeout, or a refusal the
+	server sent back as a code. The refusal itself was already reported on the server at whichever
+	stage made it, so this is not a duplicate: it is the same event seen from the end that was
+	waiting, which is the end that has to decide what to do about it.
 ]=]
-export type Stage = "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol"
+export type Stage = "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol" | "query"
 
 --[=[
 	@interface Rejection

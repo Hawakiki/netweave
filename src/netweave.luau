@@ -174,8 +174,13 @@ nw.diagnostics = Observer.diagnostics
 	which is the failure `RESEARCH §3.7-K` documents in Warp and the reason these defaults are on.
 	:::
 ]=]
-nw.configure = function<S>(settings: S & Config.Settings): Config.CheckedSettings<S, Config.Snapshot>
-	Config.configure(settings)
+--[[ `S` alone, not `S & Config.Settings`. The intersection reads correctly and rejects every call:
+     Luau binds `S` to the argument's own type and then wants the intersection to be exactly that,
+     so a settings table that omits any optional field — which is all of them — fails. The names and
+     the value types are both checked by `CheckedSettings`, which says what is wrong in one line
+     rather than eight. ]]
+nw.configure = function<S>(settings: S): Config.CheckedSettings<S, Config.Snapshot>
+	Config.configure(settings :: any)
 
 	--[[
 		`contextGuard` is applied here rather than read inside `Context` because the guard is

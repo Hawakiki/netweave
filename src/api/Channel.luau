@@ -782,6 +782,26 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 
 	local returns = requireType(raw, "returns", "query")
 
+	--[[
+		`invoke` reports failure as `nil`, so an answer that can legitimately *be* nil would make the
+		two indistinguishable: a handler returning nothing and a server that never replied would
+		reach the caller as the same value, and the caller's `if answer then` would be right about
+		one of them by accident.
+
+		Refused at the declaration rather than papered over at the call site, because the fix is a
+		line the author writes once — wrap it in a struct, and "no loadout" becomes a field that says
+		so (`DESIGN-API.md` §7).
+	]]
+	if returns.kind == "optional" then
+		error(
+			"nw.query cannot return an optional at the top level. invoke() reports failure by "
+				.. "returning nil, so an answer that may itself be nil cannot be told apart from a "
+				.. "call that never came back. Wrap it, and the absence becomes a field that says "
+				.. "so: returns = t.struct({ found = t.boolean, value = t.optional(...) }).",
+			2
+		)
+	end
+
 	local channel = make("query", "AuthorizedInbound", requireType(raw, "args", "query"), {
 		rate = rate,
 		burst = checkedBurst(raw, "query", rate),
@@ -791,6 +811,17 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 		returns = returns,
 		responseCodec = Serdes.fromSchema(returns),
 	})
+
+	--[[
+		The reply gets a ceiling of its own, derived the same way `make` derives the request's.
+
+		Not declarable, and that asymmetry is the point: `maxBytes` exists to police a *peer*, and
+		the peer on a query is the client asking the question. The answer is this server's own bytes,
+		so the number here is a check on netweave and on the game's handler rather than on anyone
+		else — which is exactly what a derived bound is good at and what a declared one would only
+		make configurable.
+	]]
+	channel.replyMaxBytes = channel.responseCodec.maxSize
 
 	return channel
 end
