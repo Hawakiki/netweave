@@ -370,6 +370,7 @@ do
 		class = "BasePart",
 		lengthStorage = "u16",
 		count = 42,
+		step = 0.25,
 	}
 
 	local function channelWith(mutate: ((Ir.Node) -> ())?): any
@@ -870,6 +871,38 @@ do
 	})
 
 	equals("and the same declarations still hash the same", again, base)
+
+	--[[
+		**Two quantised fields that lower identically and mean different things.**
+
+		`t.quantized(-1, 1, 2 / 254)` and `t.quantized(-1, 1, 2 / 200)` both take one byte, both
+		declare `-1..1`, and both lower to `storage = u8`. Every attribute the signature described
+		before phase 8 was the same for the two, and every byte on the wire meant something different
+		— a peer decoding with the wrong step gets a plausible number, silently, for ever.
+
+		That is the `subject` failure in a third place, and it is why the walk above gained `step`.
+		This is the end-to-end half: through `t.quantized` rather than by poking a node, so a `step`
+		that stopped reaching the lowered node would fail here too.
+	]]
+	local coarse = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.quantized(-1, 1, 2 / 200) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local fine = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.quantized(-1, 1, 2 / 254) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("two steps in the same byte and the same bounds hash differently", fine, coarse)
 
 	--[[ The patch layout is derived from `data`, so it cannot move on its own — what it earns is a
 	     cross-check: two peers whose data schemas somehow agreed while their derivations did not

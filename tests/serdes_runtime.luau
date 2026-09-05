@@ -1294,6 +1294,187 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A float carried as a count of steps
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`t.quantized(min, max, step)` is the one range on a fractional value that narrows the storage.
+	`t.f32(-1, 1)` is four bytes whatever the range, because a float is never re-encoded; this is
+	the declaration that says how much precision the author needs, and the layout then spends it.
+
+	It never round-trips exactly, which is the point and is why `trip` cannot express any of this:
+	the value that comes back is the nearest step, so every assertion here is about **how far** it
+	came back rather than whether it is identical.
+]]
+
+local function within(a: any, b: number, tolerance: number): boolean
+	return type(a) == "number" and math.abs(a - b) <= tolerance
+end
+
+do
+	local STEP = 2 / 254
+	local normal = Serdes.fromSchema(t.quantized(-1, 1, STEP))
+
+	local function roundTrip(value: number): (any, number)
+		Buffer.take()
+		Buffer.load(nil)
+		normal.write(value)
+
+		local packed = (Buffer.take())
+		Buffer.beginRead(packed, nil)
+
+		return (normal.read()), buffer.len(packed)
+	end
+
+	local mid, size = roundTrip(0.5)
+
+	equals("a quantised normal is one byte, where t.f32 is four", size, 1)
+	check(`and comes back within half a step: {tostring(mid)}`, within(mid, 0.5, STEP / 2))
+
+	--[[ Both ends, because the bottom is the offset and the top is the last level — and the top is
+	     the one an f32-style bound would have refused, since `254 * (2 / 254)` is not exactly 2. ]]
+	local bottom = roundTrip(-1)
+	local top = roundTrip(1)
+
+	check("the declared minimum is exact", bottom == -1)
+	check(`and the maximum arrives: {tostring(top)}`, within(top, 1, 1e-12))
+
+	--[[ Two bytes buys 1,441 levels of a full turn, which is the case the docstring names. ]]
+	local yaw = Serdes.fromSchema(t.quantized(-180, 180, 0.25))
+
+	Buffer.take()
+	Buffer.load(nil)
+	yaw.write(90.3)
+
+	local turned = (Buffer.take())
+	Buffer.beginRead(turned, nil)
+
+	equals("a quarter-degree turn is two bytes", buffer.len(turned), 2)
+	check("and lands on the nearest quarter", within((yaw.read()), 90.25, 1e-9))
+end
+
+do
+	--[[
+		**The branch chain carries three more arms rather than the arithmetic being folded into every
+		field.** Folding it — one multiply and one add above the chain — was measured at 6.7% on
+		`bench/profile.luau`'s whole packet with the control group flat, which is a tax on every
+		struct in the library for a type most of them do not use. So a quantised field takes an arm
+		of its own and a plain one never reaches it.
+
+		Which means the two have to be checked *mixed*, in one struct, through the fused path.
+	]]
+	local STEP = 2 / 254
+
+	local mixed = Serdes.fromSchema(t.struct({
+		a = t.u8,
+		b = t.quantized(-1, 1, STEP),
+		c = t.u16,
+		d = t.quantized(-180, 180, 0.25),
+	}))
+
+	Buffer.take()
+	Buffer.load(nil)
+	mixed.write({ a = 200, b = -0.5, c = 40000, d = -90 })
+
+	local packed = (Buffer.take())
+	Buffer.beginRead(packed, nil)
+
+	local back = mixed.read()
+
+	equals("a mixed struct is 1 + 1 + 2 + 2 bytes", buffer.len(packed), 6)
+	equals("the plain byte is untouched", back.a, 200)
+	equals("and the plain u16", back.c, 40000)
+	check(`the quantised normal came back: {tostring(back.b)}`, within(back.b, -0.5, STEP / 2))
+	check("and the quantised angle", within(back.d, -90, 1e-9))
+end
+
+do
+	--[[ Past `FUSED_MAX`, where the loop writer and the loop reader take over. Two implementations
+	     of one contract again, and this is the seam between them for the new arms. ]]
+	local STEP = 0.5
+
+	local shape: { [string]: any } = {}
+	local value: { [string]: number } = {}
+
+	for index = 1, 9 do
+		shape[`f{index}`] = t.quantized(0, 10, STEP)
+		value[`f{index}`] = index * 0.5
+	end
+
+	local wide = Serdes.fromSchema(t.struct(shape))
+
+	Buffer.take()
+	Buffer.load(nil)
+	wide.write(value)
+
+	local packed = (Buffer.take())
+	Buffer.beginRead(packed, nil)
+
+	local back = wide.read()
+	local agree = true
+
+	for index = 1, 9 do
+		if not within(back[`f{index}`], index * 0.5, STEP / 2) then
+			agree = false
+		end
+	end
+
+	equals("nine quantised fields are nine bytes", buffer.len(packed), 9)
+	check("and the loop path carries every one of them", agree)
+end
+
+do
+	--[[ And the wire, which is where the count of steps is a number a peer chose. 254 levels fit in
+	     a byte that holds 255, so the last raw value is one nobody can honestly write. ]]
+	local STEP = 2 / 254
+	local normal = Serdes.fromSchema(t.quantized(-1, 1, STEP))
+
+	local last = buffer.create(1)
+	buffer.writeu8(last, 0, 254)
+
+	local top, refused = decode(normal, last)
+
+	check(`the last honest level is accepted: {tostring(refused)}`, refused == nil)
+	check("and is the declared maximum", within(top, 1, 1e-12))
+
+	local past = buffer.create(1)
+	buffer.writeu8(past, 0, 255)
+
+	local value, failure = decode(normal, past)
+
+	check("one step past it is refused", failure ~= nil)
+	equals("and nothing is handed up", value, nil)
+end
+
+do
+	--[[
+		**A schema refusing its own maximum**, which is the f32 bound incident in a third encoding.
+
+		The reader reconstructs `raw * step + min`, and for some ranges that lands a rounding *above*
+		the declared maximum. Measured over 2,400 (min, max, step) triples that divide evenly: **67 of
+		them**, 2.8%. `t.quantized(0, 100, 100 / 11)` is one — eleven steps, and the eleventh
+		reconstructs to 100.00000000000001. A reader bounded by the declaration would refuse the value
+		its own writer had just accepted, on the value a game sends most: the top of the range.
+
+		`Ir.lowerNumber` bounds the node by the arithmetic that produces the value instead of by the
+		declaration, which is the same fix `numberReader` carries for `f32` and for the same reason.
+	]]
+	local eleven = Serdes.fromSchema(t.quantized(0, 100, 100 / 11))
+
+	Buffer.take()
+	Buffer.load(nil)
+	eleven.write(100)
+
+	local packed = (Buffer.take())
+	Buffer.beginRead(packed, nil)
+
+	local top, refused = eleven.read()
+
+	check(`the top level is accepted: {tostring(refused)}`, refused == nil)
+	check(`and is the declared maximum: {tostring(top)}`, within(top, 100, 1e-9))
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- A key that is not there, and a repeated thing that costs nothing (M4 report, 2 and 3)
 -- ---------------------------------------------------------------------------------------------
 

@@ -74,6 +74,7 @@ export type Kind =
 	.encoding Encoding? -- numbers, and vector components
 	.min number? -- value range for numbers, length range for strings, buffers and arrays
 	.max number?
+	.step number? -- `quantized`: the size of one wire level
 	.class string? -- `instance`: the class an arrival must be, or nil for any
 	.variants { string }? -- `enum`: variant names, sorted. Wire index is the position here
 	.unit boolean? -- `vector3`: the magnitude must be 1
@@ -92,6 +93,7 @@ export type Descriptor = {
 	encoding: Encoding?,
 	min: number?,
 	max: number?,
+	step: number?,
 	class: string?,
 	variants: { string }?,
 	unit: boolean?,
@@ -128,6 +130,7 @@ export type Type<T> = {
 	encoding: Encoding?,
 	min: number?,
 	max: number?,
+	step: number?,
 	class: string?,
 	variants: { string }?,
 	unit: boolean?,
@@ -477,6 +480,84 @@ t.f32 = number("f32") :: Ranged<number>
 	currency balance a game will hold.
 ]=]
 t.f64 = number("f64") :: Ranged<number>
+
+--[=[
+	@within Types
+	@function quantized
+	@param min number -- the lowest value the field carries
+	@param max number -- the highest
+	@param step number -- the smallest difference the wire keeps
+	@return Type<number>
+
+	A fractional value carried as **the number of steps from `min`** — the one range on a float that
+	narrows the storage.
+
+	```lua
+	normal = t.quantized(-1, 1, 2 / 254),    -- one byte, where t.f32 is four
+	yaw    = t.quantized(-180, 180, 0.25),   -- 1440 levels, two bytes
+	```
+
+	`t.f32` costs four bytes whatever range you declare, because subtracting a lower bound from a
+	float and storing it smaller changes which values are representable — so a range on a float
+	validates and nothing more. This is the declaration that says how much precision you actually
+	need, and the layout then spends what that precision costs: one byte up to 256 levels, two up to
+	65,536, four beyond.
+
+	:::caution
+	**The value comes back rounded to the nearest step**, and that is the trade rather than a defect
+	— it is written into the declaration instead of hidden in the encoding. `t.quantized(-1, 1,
+	2 / 254)` sent `0.5` returns `0.49606…`. Use `t.f32` where the exact bits matter, or a smaller
+	step where they nearly do.
+	:::
+
+	:::note
+	The range has to divide into a whole number of steps. `t.quantized(0, 100, 3)` is 33.3 of them
+	and is refused here rather than rounded silently, because which end moves is the author's call
+	and not netweave's.
+	:::
+]=]
+function t.quantized(min: number, max: number, step: number): Type<number>
+	check(type(min) == "number", "quantized needs a numeric minimum")
+	check(type(max) == "number", "quantized needs a numeric maximum")
+	check(type(step) == "number", "quantized needs a numeric step")
+	check(min < max, `quantized range has min {min} at or above max {max}. Put the smaller one first`)
+	check(
+		step > 0,
+		`quantized step {step} is not above zero. The step is how far apart two `
+			.. `neighbouring values are, so it is a positive number smaller than the range`
+	)
+	check(
+		step <= max - min,
+		`quantized step {step} is wider than the {max - min} it divides. One step across the whole `
+			.. `range is the coarsest this gets; anything wider carries no information`
+	)
+
+	local levels = (max - min) / step
+	local whole = math.floor(levels + 0.5)
+
+	--[[ Relative, because `2 / (2 / 254)` is 254.00000000000003 and the declaration that produced it
+	     is exactly the one this is for. What it refuses is a range genuinely off a step boundary. ]]
+	check(
+		math.abs(levels - whole) <= 1e-9 * math.max(1, whole),
+		`quantized range {min}..{max} is {levels} steps of {step}, which is not a whole number of `
+			.. `them. Move a bound or change the step so it divides evenly — netweave will not pick `
+			.. `which one for you`
+	)
+
+	check(
+		whole <= 4294967295,
+		`quantized range {min}..{max} in steps of {step} is {whole} levels, past the 4294967295 a `
+			.. `four-byte count holds. Use a larger step, or t.f64 if the value really needs that `
+			.. `much precision`
+	)
+
+	return descriptor({
+		kind = "number" :: Kind,
+		min = min,
+		max = max,
+		step = step,
+	})
+end
 
 --[=[
 	@prop boolean Type<boolean>

@@ -106,6 +106,7 @@ export type Field = {
 	.instances number? -- instances always consumed, or nil when it depends on the data
 	.storage Encoding? -- the narrowed encoding a number is actually written at
 	.offset number? -- subtracted before writing, added back on read
+	.step number? -- the size of one wire level, when the number is quantised
 	.min number? -- a value bound for numbers, a length bound for strings, arrays and maps
 	.max number? -- the same, and what the decoder rejects against
 	.unit boolean?
@@ -135,6 +136,7 @@ export type Node = {
 	instances: number?,
 	storage: Encoding?,
 	offset: number?,
+	step: number?,
 	min: number?,
 	max: number?,
 	unit: boolean?,
@@ -295,9 +297,41 @@ end
 local lower: (descriptor: Descriptor) -> Node
 
 local function lowerNumber(descriptor: Descriptor): Node
-	local encoding = descriptor.encoding :: Encoding
 	local min = descriptor.min :: number
 	local max = descriptor.max :: number
+	local step = (descriptor :: any).step
+
+	--[[
+		A quantised number is an integer count of steps, so it lowers to whichever unsigned encoding
+		holds the count — which is the whole point: it is the only range on a fractional value that
+		narrows the storage, because it says how much precision the author actually needs rather than
+		how large the number gets.
+
+		`max` is the reconstructed top rather than the declared one. `t.quantized` already refuses a
+		range that is not a whole number of steps, so the two agree to within a rounding of the
+		division — and `levels * step + min` is what the *reader* will produce at the top level, so
+		comparing it against anything smaller would refuse the schema's own maximum. That is the f32
+		bound incident (`Serdes.numberReader`) in a second encoding, avoided by deriving the bound
+		from the arithmetic that produces the value rather than from the declaration.
+	]]
+	if step then
+		local levels = math.floor((max - min) / step + 0.5)
+		local storage = storageFor(levels)
+
+		return {
+			kind = "number",
+			bits = 0,
+			fixedSize = ENCODING_SIZE[storage],
+			instances = 0,
+			storage = storage,
+			offset = min,
+			step = step,
+			min = min,
+			max = math.max(max, min + levels * step),
+		}
+	end
+
+	local encoding = descriptor.encoding :: Encoding
 
 	--[[
 		Floats are validated against the range but never re-encoded. Subtracting a lower bound from
