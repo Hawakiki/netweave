@@ -223,4 +223,51 @@ local world = nw.namespace("world", {
 
 world.server.inventory:publish(1, { hp = 1 })
 
+-- ---------------------------------------------------------------------------------------------
+-- The canary: two diagnostics this file expects and does not get
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	**Everything below this line should error and does not, and the header count says so by not
+	counting it.**
+
+	`local ns: nw.Views<D> = <a namespace>` — an annotated local with a value assigned into it —
+	makes the whole file stop reporting anything about `ns`, retroactively. The two statements below
+	are copies of cases 3 and 11 above; on their own they are two diagnostics, and after the
+	annotation they are none.
+
+	It is specifically that shape. Measured against the same declarations, at
+	`--flag:LuauSolverV2=true`:
+
+	  | written as | diagnostics |
+	  |---|---|
+	  | no annotation at all | 2 |
+	  | `type V = nw.Views<D>`, never assigned through | 2 |
+	  | `local v = ns :: nw.Views<D>` | 2 |
+	  | `local v: nw.Views<D>` with no value | 2 |
+	  | `local v: typeof(ns) = ns` | 2 |
+	  | a parameter typed `nw.Views<D>`, called with `ns` | 2 |
+	  | **`local v: nw.Views<D> = ns`** | **0** |
+
+	So the working spellings outnumber the broken one and are the ones `tests/api_ok.luau` pins.
+	What this section pins is the hazard itself: it is here because M4's security report found it,
+	and because nothing in `tests/` had ever written `Views<` — the erasure removes diagnostics, so
+	no rejection count could see it and no `_ok` file could either.
+
+	**If the count moves to 25, the hazard is gone**: delete this section, raise the header, and take
+	the caution off `View.Views` and `DESIGN-API.md` §7. That is the only way this file is allowed to
+	hold code that does not error.
+]]
+local canary = nw.namespace("canary", {
+	fire = nw.command({ data = t.struct({ x = t.u8 }), rate = 10, authorize = allow }),
+})
+
+local _erased: nw.Views<typeof(canary.channels)> = canary
+
+canary.server.fire:send({ x = 1 })
+
+canary.server.fire:listen(function(_ctx, payload)
+	local _mistyped: string = payload.x
+end)
+
 return nil
