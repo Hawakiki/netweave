@@ -116,6 +116,7 @@ local READ_CHUNK: { [number]: () -> number } = {
 	[4] = Buffer.readU32,
 }
 
+local claim = Buffer.claim
 local reserve = Buffer.reserve
 local reject = Buffer.reject
 local remaining = Buffer.remaining
@@ -408,9 +409,401 @@ local function enumWriter(node: Node): Writer
 	end
 end
 
+-- -------------------------------------------------------------------------------------------------
+-- A struct of numbers, written in one claim
+-- -------------------------------------------------------------------------------------------------
+
+--[[
+	`PLAN-M4` phase 7, and the only optimisation in this file that came from a measurement rather
+	than from reading the generated output of a competitor.
+
+	`bench/profile.luau` takes one `ArrayHeavy` packet — 100 entities of six `u8` — apart rung by
+	rung. The ceiling, what Blink and Zap emit, is 2.1 us. netweave was 24.0 us, and the attribution
+	is not subtle: 10% is the range and whole-number checks the schema promises, 30% is one call per
+	value, and **52% is the closure per value and the struct walk that finds the field to hand it**.
+	A field of a six-field struct costs seven calls before a byte is written: the struct's, the
+	writer's, and the primitive's under that.
+
+	netweave cannot answer this the way they do. `loadstring` is off in Roblox and a build step is
+	the thing this library exists not to need, so there is no generated source to fall back on. What
+	is left is to **make the primitive wider rather than the loop shorter**: claim the struct's bytes
+	once and write them all, with the offsets computed at declaration time.
+
+	One other shape was priced first and lost outright, and it is written down so it is not tried
+	again: claim once but **keep the loop**, reading each field's offset and bounds out of parallel
+	arrays. 25.5 us — slower than doing nothing, because the array reads cost more than the calls
+	they save. That is what makes the unroll below non-negotiable rather than a matter of taste.
+
+	This lands at 12.7 us against 24.0, **1.9x**, and predicts the `ArrayHeavy` framerate gap closing
+	from 1.55x to **1.28x** — inside `PLAN-M1` criterion 5's 1.30x bar, but only just. The prediction
+	is on record in `bench/RESULTS.md` before the Studio run that checks it.
+
+	The unroll is eight blocks in one closure with an early return at each boundary, rather than
+	eight builders selected by arity. It is the same code either way; this way it is one thing to
+	read and one thing to get right.
+]]
+--[[
+	**A storage as a number, so the write below can be a literal.**
+
+	This is the whole reason the unrolled body reads the way it does, and it took the probe three
+	tries to find it. `buffer.writeu8(out, offset, value)` written out is compiled to a *fastcall*:
+	the VM performs it inline, without building a call frame. The same function reached through a
+	table — held in an upvalue, which is what a schema-driven builder reaches for first — is an
+	ordinary call. `bench/profile.luau` keeps that version as its `dispatched` rung, identical in
+	every other respect, and prices the difference at **1.6x on the whole packet**: more than every
+	other layer of the encode put together, and the reason the first implementation of this returned
+	10% against a probe promising 170%.
+
+	So the call site has to name the function, and the schema has to be a branch. Five branches, in
+	the order the encodings actually occur, and each of them a fastcall.
+
+	That is also the honest answer to why a code generator wins here at all, and it is checkable
+	rather than folklore: Blink's output writes `buffer.writeu8(...)` in as many words
+	(`bench/vendor/blink/Client.luau:187`) and so does Zap's (`bench/vendor/zap/Client.luau:1140`).
+	It is not that they avoid closures — netweave can too, and `fusedStructWriter` does. It is that a
+	generator emits the *name* of the primitive, and until this file did the same, netweave could
+	not (`RESEARCH §3.11-GG`).
+]]
+local STORAGE_CODE: { [string]: number } = {
+	u8 = 1,
+	u16 = 2,
+	u32 = 3,
+	f32 = 4,
+	f64 = 5,
+}
+
+--[[ Beyond this the unroll below stops and the general loop takes over. Eight covers an entity, a
+     transform, a stat block and an inventory row; a forty-field struct is a different shape of
+     problem and pays one call per field as it always did. ]]
+local FUSED_MAX = 8
+
+type Row = {
+	name: string,
+	at: number,
+	min: number,
+	max: number,
+	offset: number,
+	integral: boolean,
+	storage: string,
+	code: number,
+}
+
+local BLANK: Row = {
+	name = "",
+	at = 0,
+	min = 0,
+	max = 0,
+	offset = 0,
+	integral = false,
+	storage = "u8",
+	code = 1,
+}
+
+--[[ Every field, or nothing. A struct with one string in it is not half fusable — the offsets after
+     that field are not known until it is written — so the test is over the whole struct. ]]
+local function rowsOf(fields: { Field }): ({ Row }?, number)
+	local count = #fields
+
+	if count == 0 or count > FUSED_MAX then
+		return nil, 0
+	end
+
+	local rows: { Row } = sized(count)
+	local at = 0
+
+	for index, field in fields do
+		local node = field.node
+		local size = node.fixedSize
+		local storage = node.storage
+		local code = if storage then STORAGE_CODE[storage] else nil
+
+		--[[ `bits ~= 0` is the flag-carrying case — a boolean, an enum, an optional's presence bit —
+		     and those are written into a scope rather than into bytes, so their position here is not
+		     a byte offset at all.
+
+		     A storage with no code is one the branch chain below cannot name, and the fallback is
+		     the general writer rather than a guess: `Ir.lowerNumber` produces five of the eight, and
+		     a sixth arriving later must be added there deliberately or it keeps today's speed. ]]
+		if node.kind ~= "number" or size == nil or size == 0 or node.bits ~= 0 or code == nil then
+			return nil, 0
+		end
+
+		rows[index] = {
+			name = field.name,
+			at = at,
+			min = node.min :: number,
+			max = node.max :: number,
+			offset = node.offset :: number,
+			integral = not FRACTIONAL[storage :: string],
+			storage = storage :: string,
+			code = code,
+		}
+
+		at += size
+	end
+
+	return rows, at
+end
+
+--[[
+	The cold half of every check below, so the hot half is one branch that is almost always false.
+
+	It re-asks the question rather than being told which test failed, because getting here at all
+	means an `error` is about to be raised and the answer is a string built from an interpolation.
+	The messages are `numberWriter`'s, word for word: a schema that refuses a value has to say the
+	same thing whichever writer refused it.
+]]
+local function refuseField(row: Row, value: any): ()
+	if value == nil then
+		error(`[netweave] field "{row.name}" is missing`)
+	end
+
+	if not (value >= row.min and value <= row.max) then
+		error(`[netweave] {value} is outside the declared range {row.min}..{row.max}`)
+	end
+
+	error(`[netweave] {value} is not a whole number, and this field is stored as {row.storage}`)
+end
+
+local function fusedStructWriter(fields: { Field }): Writer?
+	local rows, size = rowsOf(fields)
+
+	if rows == nil then
+		return nil
+	end
+
+	local count = #rows
+
+	local r1, r2 = rows[1], rows[2] or BLANK
+	local r3, r4 = rows[3] or BLANK, rows[4] or BLANK
+	local r5, r6 = rows[5] or BLANK, rows[6] or BLANK
+	local r7, r8 = rows[7] or BLANK, rows[8] or BLANK
+
+	local n1, a1, i1, o1, s1, lo1, hi1 = r1.name, r1.at, r1.integral, r1.offset, r1.code, r1.min, r1.max
+	local n2, a2, i2, o2, s2, lo2, hi2 = r2.name, r2.at, r2.integral, r2.offset, r2.code, r2.min, r2.max
+	local n3, a3, i3, o3, s3, lo3, hi3 = r3.name, r3.at, r3.integral, r3.offset, r3.code, r3.min, r3.max
+	local n4, a4, i4, o4, s4, lo4, hi4 = r4.name, r4.at, r4.integral, r4.offset, r4.code, r4.min, r4.max
+	local n5, a5, i5, o5, s5, lo5, hi5 = r5.name, r5.at, r5.integral, r5.offset, r5.code, r5.min, r5.max
+	local n6, a6, i6, o6, s6, lo6, hi6 = r6.name, r6.at, r6.integral, r6.offset, r6.code, r6.min, r6.max
+	local n7, a7, i7, o7, s7, lo7, hi7 = r7.name, r7.at, r7.integral, r7.offset, r7.code, r7.min, r7.max
+	local n8, a8, i8, o8, s8, lo8, hi8 = r8.name, r8.at, r8.integral, r8.offset, r8.code, r8.min, r8.max
+
+	--[[
+		The claim happens before the first check, so a struct that raises half way through has moved
+		the cursor past bytes it never wrote. That is the same contract `Serdes.build` already
+		documents — a write that raises leaves the buffer where it left it and the caller rewinds —
+		and every caller on the send path does exactly that (`Batch.writeBody`, `Serdes.check`).
+	]]
+	return function(value: any, _flags: Flags)
+		local out, at = claim(size)
+
+		local v1 = value[n1]
+
+		if v1 == nil or not (v1 >= lo1 and v1 <= hi1) or (i1 and v1 % 1 ~= 0) then
+			refuseField(r1, v1)
+		end
+
+		local to1 = at + a1
+		local raw1 = v1 - o1
+
+		if s1 == 1 then
+			buffer.writeu8(out, to1, raw1)
+		elseif s1 == 2 then
+			buffer.writeu16(out, to1, raw1)
+		elseif s1 == 3 then
+			buffer.writeu32(out, to1, raw1)
+		elseif s1 == 4 then
+			buffer.writef32(out, to1, raw1)
+		else
+			buffer.writef64(out, to1, raw1)
+		end
+
+		if count < 2 then
+			return
+		end
+
+		local v2 = value[n2]
+
+		if v2 == nil or not (v2 >= lo2 and v2 <= hi2) or (i2 and v2 % 1 ~= 0) then
+			refuseField(r2, v2)
+		end
+
+		local to2 = at + a2
+		local raw2 = v2 - o2
+
+		if s2 == 1 then
+			buffer.writeu8(out, to2, raw2)
+		elseif s2 == 2 then
+			buffer.writeu16(out, to2, raw2)
+		elseif s2 == 3 then
+			buffer.writeu32(out, to2, raw2)
+		elseif s2 == 4 then
+			buffer.writef32(out, to2, raw2)
+		else
+			buffer.writef64(out, to2, raw2)
+		end
+
+		if count < 3 then
+			return
+		end
+
+		local v3 = value[n3]
+
+		if v3 == nil or not (v3 >= lo3 and v3 <= hi3) or (i3 and v3 % 1 ~= 0) then
+			refuseField(r3, v3)
+		end
+
+		local to3 = at + a3
+		local raw3 = v3 - o3
+
+		if s3 == 1 then
+			buffer.writeu8(out, to3, raw3)
+		elseif s3 == 2 then
+			buffer.writeu16(out, to3, raw3)
+		elseif s3 == 3 then
+			buffer.writeu32(out, to3, raw3)
+		elseif s3 == 4 then
+			buffer.writef32(out, to3, raw3)
+		else
+			buffer.writef64(out, to3, raw3)
+		end
+
+		if count < 4 then
+			return
+		end
+
+		local v4 = value[n4]
+
+		if v4 == nil or not (v4 >= lo4 and v4 <= hi4) or (i4 and v4 % 1 ~= 0) then
+			refuseField(r4, v4)
+		end
+
+		local to4 = at + a4
+		local raw4 = v4 - o4
+
+		if s4 == 1 then
+			buffer.writeu8(out, to4, raw4)
+		elseif s4 == 2 then
+			buffer.writeu16(out, to4, raw4)
+		elseif s4 == 3 then
+			buffer.writeu32(out, to4, raw4)
+		elseif s4 == 4 then
+			buffer.writef32(out, to4, raw4)
+		else
+			buffer.writef64(out, to4, raw4)
+		end
+
+		if count < 5 then
+			return
+		end
+
+		local v5 = value[n5]
+
+		if v5 == nil or not (v5 >= lo5 and v5 <= hi5) or (i5 and v5 % 1 ~= 0) then
+			refuseField(r5, v5)
+		end
+
+		local to5 = at + a5
+		local raw5 = v5 - o5
+
+		if s5 == 1 then
+			buffer.writeu8(out, to5, raw5)
+		elseif s5 == 2 then
+			buffer.writeu16(out, to5, raw5)
+		elseif s5 == 3 then
+			buffer.writeu32(out, to5, raw5)
+		elseif s5 == 4 then
+			buffer.writef32(out, to5, raw5)
+		else
+			buffer.writef64(out, to5, raw5)
+		end
+
+		if count < 6 then
+			return
+		end
+
+		local v6 = value[n6]
+
+		if v6 == nil or not (v6 >= lo6 and v6 <= hi6) or (i6 and v6 % 1 ~= 0) then
+			refuseField(r6, v6)
+		end
+
+		local to6 = at + a6
+		local raw6 = v6 - o6
+
+		if s6 == 1 then
+			buffer.writeu8(out, to6, raw6)
+		elseif s6 == 2 then
+			buffer.writeu16(out, to6, raw6)
+		elseif s6 == 3 then
+			buffer.writeu32(out, to6, raw6)
+		elseif s6 == 4 then
+			buffer.writef32(out, to6, raw6)
+		else
+			buffer.writef64(out, to6, raw6)
+		end
+
+		if count < 7 then
+			return
+		end
+
+		local v7 = value[n7]
+
+		if v7 == nil or not (v7 >= lo7 and v7 <= hi7) or (i7 and v7 % 1 ~= 0) then
+			refuseField(r7, v7)
+		end
+
+		local to7 = at + a7
+		local raw7 = v7 - o7
+
+		if s7 == 1 then
+			buffer.writeu8(out, to7, raw7)
+		elseif s7 == 2 then
+			buffer.writeu16(out, to7, raw7)
+		elseif s7 == 3 then
+			buffer.writeu32(out, to7, raw7)
+		elseif s7 == 4 then
+			buffer.writef32(out, to7, raw7)
+		else
+			buffer.writef64(out, to7, raw7)
+		end
+
+		if count < 8 then
+			return
+		end
+
+		local v8 = value[n8]
+
+		if v8 == nil or not (v8 >= lo8 and v8 <= hi8) or (i8 and v8 % 1 ~= 0) then
+			refuseField(r8, v8)
+		end
+
+		local to8 = at + a8
+		local raw8 = v8 - o8
+
+		if s8 == 1 then
+			buffer.writeu8(out, to8, raw8)
+		elseif s8 == 2 then
+			buffer.writeu16(out, to8, raw8)
+		elseif s8 == 3 then
+			buffer.writeu32(out, to8, raw8)
+		elseif s8 == 4 then
+			buffer.writef32(out, to8, raw8)
+		else
+			buffer.writef64(out, to8, raw8)
+		end
+	end
+end
+
 local function structWriter(node: Node): Writer
 	local fields = node.fields :: { Field }
 	local count = #fields
+
+	local fused = fusedStructWriter(fields)
+
+	if fused then
+		return fused
+	end
 
 	local names: { string } = sized(count)
 	local writers: { Writer } = sized(count)
