@@ -115,7 +115,7 @@ export type Rules = {
 	@interface Limits
 	@within Config
 	.queueCapacity number? -- packets held for a channel whose listener has not attached yet
-	.pendingPerBatch number? -- decoded packets held live while a batch is read, before any is dispatched
+	.pendingPerBatch number? -- decoded packets held live while a batch is read, before any is dispatched. **Server only**
 	.unreliableBytes number? -- the largest unreliable payload that will be sent
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
 	.callsInFlight number? -- unanswered `nw.query` calls one player may hold at once
@@ -129,7 +129,7 @@ export type Rules = {
 	| Limit | Read |
 	|---|---|
 	| `queueCapacity` | when a channel's queue is first created, which is its first refusal to a missing listener. A queue that already exists keeps the depth it was made with |
-	| `pendingPerBatch` | at the start of every batch |
+	| `pendingPerBatch` | at the start of every batch, **on a server**. A client does not apply it: the batch's size is chosen by an untrusted peer only when the peer is a client, and enforcing it against the server drops traffic the game asked for — on a replicated channel, permanently (`src/transport/Inbound.luau`, `refreshCeiling`) |
 	| `unreliableBytes` | on every unreliable send, so it takes effect immediately and can only *lower* the ceiling — 908 is Roblox's limit, not netweave's |
 	| `repeatsPerDiagnostic` | on every report |
 	| `callsInFlight` | on every `invoke` and on every request the server accepts, so it takes effect immediately |
