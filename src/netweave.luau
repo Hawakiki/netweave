@@ -80,6 +80,26 @@ end
 local nw = {}
 
 --[=[
+	@prop milestone string
+	@within netweave
+
+	Which milestone this build is. `"M3"`.
+
+	netweave has no release versions yet, so this is the coarsest true thing it can say about
+	itself, and it exists because something else needed it to be true: the benchmark writes the
+	subject of every run into the run document, and it wrote `"M2"` for the whole of M3, because the
+	string was typed into the harness rather than read from the library. A results file that
+	misattributes its own subject is worse than one with no attribution — it is evidence for the
+	wrong thing (`CLAUDE.md` §5). Read this instead of typing it.
+
+	:::note
+	The wire format has its own version, which is not this one and moves for different reasons. See
+	`docs/WIRE-FORMAT.md` and `nw.protocol()`.
+	:::
+]=]
+nw.milestone = "M3"
+
+--[=[
 	@prop types Types
 	@within netweave
 
