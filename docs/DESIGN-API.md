@@ -289,6 +289,63 @@ three, and the fourth was `query`'s response, which is not a separate primitive 
 that `query` already owns. Corrected in M1 phase 5. The public surface is where meaning lives; the
 implementation stays small.
 
+### Replication is a seventh class, not `state` growing up
+
+`PLAN-M4` D-1, answered in phase 2 before any of L3 was written, because everything else in that
+milestone depends on it.
+
+**`nw.state` is not misnamed, and the plan was unfair to it.** "State" means the current state of a
+subject, sent to whoever should see it, and that is exactly what it does. What it never promised was
+delta compression. What was missing was a docstring saying which of the two it is.
+
+Replication is `nw.replicate`, and three things make it a different declaration rather than a flag
+on this one. Any one of them would be enough; the first is the plainest.
+
+**They have no method in common.** `nw.state` is `publish(subject, value)` — the game holds the
+value and hands it over each tick. `nw.replicate` takes a **store** at declaration and the game
+never calls netweave again; netweave reads the store and decides what each client is missing. Two
+surfaces with no call in common are not one class with an option.
+
+**They sit on opposite sides of the reliability trade, and G6's argument applies exactly.** A
+dropped `state` packet costs one tick of staleness and the next packet corrects it, which is why
+`unreliable` is legal there and why positional data belongs on it. A dropped *delta* leaves that
+client permanently and silently wrong, because every later delta is relative to a baseline it does
+not have. `unreliable` is therefore **forbidden** on `replicate` — and a single class with a flag
+that means "fine" on one setting and "silently wrong forever" on the other is precisely the shape
+this design exists to make unwritable.
+
+**They cost different memory on the server, and the declaration has to carry the limit.** `state`
+holds one coalesced value per player per channel and releases it at the tick. `replicate` holds a
+**baseline per client per subject** for as long as that client is connected — memory proportional to
+players times state size, chosen by how many people join, which is `PLAN-M3` D-6 territory and needs
+a declared ceiling that `state` has no use for.
+
+| Class | Direction | Required | Forbidden | Handler receives |
+|---|---|---|---|---|
+| `replicate` | S→C | `data`, `audience`, `store` | `rate`, `burst`, `maxBytes`, `authorize`, `unreliable` | `T` |
+
+The one thing they do share is the receiving end: `:listen(function(value) end)` hands the client
+the whole value, because a client that has to know whether it was sent a snapshot or a patch is a
+client the library has failed.
+
+#### Reliable delivery is the answer to D-2, and netweave's own limits are the hole in it
+
+`PLAN-M4` D-2 offered three shapes — reliable deltas, acknowledged baselines, periodic snapshots —
+as though loss were possible on the reliable path. **It is not.** netweave's reliable path is a
+`RemoteEvent`, which Roblox delivers reliably and in order, so a delta that netweave hands to the
+engine arrives. Acknowledgements and periodic re-snapshots are answers to a problem the transport
+does not have, and both cost what `PLAN-M3` spent a milestone bounding.
+
+What *can* drop a delta is **netweave itself**. `pendingPerBatch` drops the tail of an oversized
+batch and reports it; on a `signal` that is one lost packet and on a `replicate` it is a client
+that will never be right again. So the design is reliable deltas **plus a break detector**: a
+sequence per client per subject, and a client that sees a gap is sent a snapshot rather than
+another delta.
+
+That same path answers D-4 for free. A client entering a `nearby` audience has no baseline, which
+is the same condition as a gap, so "you are out of sync, here is everything" is one mechanism
+serving a join, a drop and an audience transition alike.
+
 ## 4. Declaration
 
 Configuration objects, not builder chains. A required field in the spec type enforces a
