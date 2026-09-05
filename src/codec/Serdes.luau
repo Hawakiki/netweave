@@ -1068,6 +1068,36 @@ function buildWriter(node: Node): Writer
 		local writeLength = lengthWriter(node)
 		local bytes: (value: string, length: number) -> () = if blocked then putString else writeString
 
+		--[[
+			A string that says what it may contain gets a second closure. Built at declaration and
+			only when something was declared, so a plain `t.string` is exactly what it was — the same
+			trade `numberWriter` makes for an offset of zero.
+
+			The pattern is anchored here rather than stored anchored, so the descriptor and the
+			protocol signature carry what the author wrote.
+		]]
+		local anchored = if node.pattern then `^{node.pattern}$` else nil
+		local unicode = node.utf8
+
+		if anchored or unicode then
+			return function(value: any, _flags: Flags)
+				local length = #value
+
+				if unicode and utf8.len(value) == nil then
+					error(`[netweave] this string is not valid UTF-8, and the schema says it must be`)
+				end
+
+				if anchored and not string.find(value, anchored :: string) then
+					error(
+						`[netweave] "{value}" does not match the pattern {node.pattern} the schema declares`
+					)
+				end
+
+				writeLength(length, "string")
+				bytes(value, length)
+			end
+		end
+
 		return function(value: any, _flags: Flags)
 			local length = #value
 			writeLength(length, "string")
@@ -1826,6 +1856,37 @@ function buildReader(node: Node): Reader
 		return numberReader(node)
 	elseif kind == "string" then
 		local readLength = lengthReader(node)
+
+		--[[ The half the finding is actually about: a *peer's* string is the one that reaches
+		     `SetAsync`, `Instance.Name` and chat, and invalid UTF-8 or a control character surfaces
+		     there as an error in game code with no packet to point at. Refused rather than raised —
+		     it is wire data (G4). ]]
+		local anchored = if node.pattern then `^{node.pattern}$` else nil
+		local unicode = node.utf8
+
+		if anchored or unicode then
+			return function(_flags: Flags): any
+				local length = readLength()
+
+				if length < 0 then
+					return ""
+				end
+
+				local value = readString(length)
+
+				if unicode and utf8.len(value) == nil then
+					reject("string is not valid UTF-8")
+					return ""
+				end
+
+				if anchored and not string.find(value, anchored :: string) then
+					reject("string does not match the declared pattern")
+					return ""
+				end
+
+				return value
+			end
+		end
 
 		return function(_flags: Flags): any
 			local length = readLength()

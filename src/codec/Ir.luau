@@ -108,6 +108,8 @@ export type Field = {
 	.offset number? -- subtracted before writing, added back on read
 	.step number? -- the size of one wire level, when the number is quantised
 	.whole boolean? -- whether a number must be an integer, asked on both sides
+	.utf8 boolean? -- `string`: the bytes must decode as UTF-8
+	.pattern string? -- `string`: a Lua pattern the whole value must match
 	.min number? -- a value bound for numbers, a length bound for strings, arrays and maps
 	.max number? -- the same, and what the decoder rejects against
 	.unit boolean?
@@ -139,6 +141,8 @@ export type Node = {
 	offset: number?,
 	step: number?,
 	whole: boolean?,
+	utf8: boolean?,
+	pattern: string?,
 	min: number?,
 	max: number?,
 	unit: boolean?,
@@ -617,6 +621,14 @@ function lower(descriptor: Descriptor): Node
 		local node: Node = { kind = kind, bits = 0, instances = 0 }
 		lowerLength(node, descriptor.min :: number, descriptor.max :: number)
 		node.fixedSize = node.count
+
+		--[[ Carried through rather than derived: what a string is *allowed to say* is not a property
+		     of its length, and the codec is where it has to be asked. `buffer` never has them —
+		     `t.buffer` is opaque bytes by definition — but the two share this branch and copying nil
+		     costs nothing. ]]
+		node.utf8 = (descriptor :: any).utf8
+		node.pattern = (descriptor :: any).pattern
+
 		return node
 	elseif kind == "vector2" then
 		return { kind = kind, bits = 0, fixedSize = 8, instances = 0 }

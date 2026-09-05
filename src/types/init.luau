@@ -75,6 +75,8 @@ export type Kind =
 	.min number? -- value range for numbers, length range for strings, buffers and arrays
 	.max number?
 	.step number? -- `quantized`: the size of one wire level
+	.utf8 boolean? -- `string`: the bytes must decode as UTF-8
+	.pattern string? -- `string`: a Lua pattern the whole value must match
 	.class string? -- `instance`: the class an arrival must be, or nil for any
 	.variants { string }? -- `enum`: variant names, sorted. Wire index is the position here
 	.unit boolean? -- `vector3`: the magnitude must be 1
@@ -95,6 +97,8 @@ export type Descriptor = {
 	max: number?,
 	step: number?,
 	class: string?,
+	utf8: boolean?,
+	pattern: string?,
 	variants: { string }?,
 	unit: boolean?,
 	inner: Descriptor?,
@@ -132,6 +136,8 @@ export type Type<T> = {
 	max: number?,
 	step: number?,
 	class: string?,
+	utf8: boolean?,
+	pattern: string?,
 	variants: { string }?,
 	unit: boolean?,
 	inner: Descriptor?,
@@ -269,6 +275,36 @@ export type Ranged<T> = typeof(setmetatable(
 ))
 
 --[=[
+	@interface TextOptions
+	@within Types
+	.utf8 boolean? -- the bytes must decode as UTF-8
+	.pattern string? -- a Lua pattern the whole value must match, anchored by netweave
+
+	What [Types.string] accepts after its length bounds.
+]=]
+export type TextOptions = {
+	utf8: boolean?,
+	pattern: string?,
+}
+
+--[=[
+	@type Text Type<string>
+	@within Types
+
+	A string type: callable to bound the length, and to say what the bytes may contain.
+
+	```lua
+	t.string(1, 20)                                 -- a length, as before
+	t.string(1, 20, { utf8 = true })                -- and valid UTF-8
+	t.string(1, 20, { pattern = "[%w_]+" })         -- and word characters, whole-string
+	```
+]=]
+export type Text = typeof(setmetatable(
+	{} :: Type<string>,
+	{} :: { __call: (self: any, min: number, max: number, options: TextOptions?) -> Type<string> }
+))
+
+--[=[
 	@type Classed Type<Instance>
 	@within Types
 
@@ -353,7 +389,76 @@ end
 	Bare and callable share one descriptor, so `t.u8` and `t.u8(0, 10)` describe the same kind. The
 	constrained form is a fresh frozen copy; nothing is mutated after definition.
 ]]
-local function ranged(base: { [string]: any }, label: string): any
+--[[
+	What `t.string`'s third argument may say, checked at declaration rather than ignored.
+
+	The report's own row for this asks for it because client strings reach `SetAsync` keys,
+	`Instance.Name` and chat, where invalid UTF-8 or a control character surfaces as an error in game
+	code with no packet to point at. A length bound cannot say any of that.
+
+	`pattern` is anchored by netweave rather than by the author, so a pattern that already carries an
+	anchor is refused: `"^" .. "^%w+$" .. "$"` matches a literal caret, and silently. Anchoring is the
+	whole difference between "the name is word characters" and "the name contains a word character
+	somewhere", and the unanchored reading is the one that lets anything through.
+]]
+local TEXT_OPTIONS: { [string]: boolean } = { utf8 = true, pattern = true }
+table.freeze(TEXT_OPTIONS)
+
+local function refineText(constrained: any, options: any)
+	if options == nil then
+		return
+	end
+
+	check(
+		type(options) == "table",
+		`t.string's options come as a table: t.string(0, 24, \{ utf8 = true \}). Got {typeof(options)}`
+	)
+
+	for key in options do
+		check(
+			TEXT_OPTIONS[key] == true,
+			`t.string has no option \`{tostring(key)}\`. The two are utf8 and pattern — check the `
+				.. `spelling, because an option that is ignored looks exactly like one that passed`
+		)
+	end
+
+	local wantsUtf8 = options.utf8
+
+	if wantsUtf8 ~= nil then
+		check(type(wantsUtf8) == "boolean", `t.string's \`utf8\` takes a boolean, got {typeof(wantsUtf8)}`)
+
+		--[[ `false` records nothing. A descriptor that carries the default is a descriptor two peers
+		     can spell differently and hash differently for no reason. ]]
+		constrained.utf8 = wantsUtf8 or nil
+	end
+
+	local pattern = options.pattern
+
+	if pattern ~= nil then
+		check(type(pattern) == "string", `t.string's \`pattern\` takes a string, got {typeof(pattern)}`)
+		check(
+			pattern ~= "",
+			"t.string's `pattern` is empty, which matches only an empty string. Use a length of 0..0 if that is what you meant"
+		)
+
+		check(
+			string.sub(pattern, 1, 1) ~= "^" and string.sub(pattern, -1) ~= "$",
+			`t.string's \`pattern\` "{pattern}" carries its own anchor, and netweave adds one — the `
+				.. `two together match a literal ^ or $. Write the pattern for the whole value and `
+				.. `leave the anchors off`
+		)
+
+		check(
+			(pcall(string.find, "", pattern)),
+			`t.string's \`pattern\` "{pattern}" is not a Lua pattern. A '%' has to be followed by a `
+				.. `class or a literal, and a '[' has to close`
+		)
+
+		constrained.pattern = pattern
+	end
+end
+
+local function ranged(base: { [string]: any }, label: string, refine: ((any, any) -> ())?): any
 	local self = table.clone(base)
 
 	--[[
@@ -373,7 +478,7 @@ local function ranged(base: { [string]: any }, label: string): any
 	local callable = setmetatable(
 		self,
 		table.freeze({
-			__call = function(_self: any, min: number, max: number): any
+			__call = function(_self: any, min: number, max: number, extra: any): any
 				check(type(min) == "number", `{label} range needs a numeric minimum`)
 				check(type(max) == "number", `{label} range needs a numeric maximum`)
 				check(min <= max, `{label} range has min {min} above max {max}`)
@@ -390,6 +495,20 @@ local function ranged(base: { [string]: any }, label: string): any
 				local constrained = table.clone(base)
 				constrained.min = min
 				constrained.max = max
+
+				--[[ Only `t.string` takes a third argument, and everything else refuses one rather
+				     than dropping it. `t.u8(0, 10, { utf8 = true })` is a mistake with an obvious
+				     cause and no symptom, which is the shape this repository keeps finding. ]]
+				if refine then
+					refine(constrained, extra)
+				else
+					check(
+						extra == nil,
+						`{label} takes a minimum and a maximum and nothing after them. Only t.string `
+							.. `has options, and they are utf8 and pattern`
+					)
+				end
+
 				return descriptor(constrained)
 			end,
 		})
@@ -605,17 +724,37 @@ end
 t.boolean = descriptor({ kind = "boolean" :: Kind }) :: Type<boolean>
 
 --[=[
-	@prop string Ranged<string>
+	@prop string Text
 	@within Types
 
 	A length-prefixed string, up to 65535 bytes. `t.string(0, 64)` bounds the length and shrinks
 	the prefix.
+
+	A third argument says what the bytes may **contain**:
+
+	```lua
+	name = t.string(1, 20, { utf8 = true, pattern = "[%w_]+" }),
+	```
+
+	  * `utf8` — the bytes decode as UTF-8. Roblox's own text APIs assume this, and invalid bytes
+	    surface later as an error in game code with no packet to point at.
+	  * `pattern` — a Lua pattern the **whole** value must match. netweave anchors it, so
+	    `"[%w_]+"` means the entire string is word characters rather than "contains one".
+
+	Both are checked on the way out *and* on the way in: a value the schema forbids is a raise at
+	the `:send` that wrote it, and a peer's is a refused packet.
+
+	:::caution
+	A pattern is a promise about shape, not about safety. It cannot make a string safe to
+	concatenate into a query or a rich-text label — it only means the string is the shape you said.
+	Escaping is still the caller's job.
+	:::
 ]=]
 t.string = ranged({
 	kind = "string" :: Kind,
 	min = 0,
 	max = MAX_LENGTH,
-}, "string") :: Ranged<string>
+}, "string", refineText) :: Text
 
 --[=[
 	@prop buffer Ranged<buffer>

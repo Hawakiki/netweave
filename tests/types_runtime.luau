@@ -212,6 +212,69 @@ rejects("a fractional u53 bound", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- What a string may contain, not only how long it is
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Client strings reach `SetAsync` keys, `Instance.Name` and chat, where invalid UTF-8 or a control
+	character surfaces as an error in game code with no packet to point at. A length bound cannot
+	say any of that.
+]]
+local named = t.string(1, 20, { utf8 = true, pattern = "[%w_]+" })
+check("a constrained string keeps its bounds", named.min == 1 and named.max == 20)
+check("and records the utf8 flag", named.utf8 == true)
+check("and the pattern as written", named.pattern == "[%w_]+")
+
+--[[ `false` records nothing: a descriptor carrying its own default is one two peers can spell
+     differently and hash differently for no reason. ]]
+check("utf8 = false records nothing", t.string(0, 8, { utf8 = false }).utf8 == nil)
+check("and no options at all records nothing", t.string(0, 8).pattern == nil)
+
+rejects("an unknown option", function()
+	t.string(0, 8, { utf8 = true, patern = "%d+" } :: any)
+end)
+
+rejects("options that are not a table", function()
+	t.string(0, 8, "utf8" :: any)
+end)
+
+rejects("a utf8 flag that is not a boolean", function()
+	t.string(0, 8, { utf8 = "yes" } :: any)
+end)
+
+rejects("a pattern that is not a string", function()
+	t.string(0, 8, { pattern = 5 } :: any)
+end)
+
+rejects("an empty pattern", function()
+	t.string(0, 8, { pattern = "" })
+end)
+
+--[[ netweave anchors the pattern, so one that carries its own anchor would match a literal caret.
+     Refused rather than stripped, because stripping is a silent rewrite of what the author wrote. ]]
+rejects("a pattern anchored at the front", function()
+	t.string(0, 8, { pattern = "^%w+" })
+end)
+
+rejects("a pattern anchored at the back", function()
+	t.string(0, 8, { pattern = "%w+$" })
+end)
+
+rejects("a pattern that is not a pattern", function()
+	t.string(0, 8, { pattern = "%" })
+end)
+
+--[[ And the third argument nothing else takes. `t.u8(0, 10, { utf8 = true })` used to be accepted
+     and ignored, which looks exactly like an option that worked. ]]
+rejects("a third argument on a number", function()
+	(t.u8 :: any)(0, 10, { utf8 = true })
+end)
+
+rejects("and on a buffer", function()
+	(t.buffer :: any)(0, 10, { utf8 = true })
+end)
+
+-- ---------------------------------------------------------------------------------------------
 -- Wire order never comes from table iteration
 -- ---------------------------------------------------------------------------------------------
 

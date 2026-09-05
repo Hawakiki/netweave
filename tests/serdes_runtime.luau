@@ -1593,6 +1593,84 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- What a string may contain, on both sides of the wire
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ The honest path first, because a constraint that refuses everything passes every rejection
+	     test it has. Same bytes as a plain string — the checks are validation, not framing. ]]
+	trip("a constrained string still round trips", t.string(1, 20, { utf8 = true }), "hello", 6)
+	trip("and one with a pattern", t.string(1, 20, { pattern = "[%w_]+" }), "player_1", 9)
+	trip("and multibyte text under a utf8 flag", t.string(1, 20, { utf8 = true }), "한국어", 10)
+
+	refuses("a value the pattern does not match", t.string(1, 20, { pattern = "[%w_]+" }), "no spaces here")
+	refuses("and one that is not valid UTF-8", t.string(1, 20, { utf8 = true }), "\xff\xfe")
+
+	--[[ **Anchored, which is the whole difference.** An unanchored pattern accepts a string that
+	     merely contains a match, so `"[%w_]+"` would pass `"<script>a"` — the reading that lets
+	     anything through, and the reason netweave adds the anchors rather than the author. ]]
+	refuses("a value that only contains a match", t.string(1, 20, { pattern = "[%w_]+" }), "<script>a")
+	refuses("or one that begins with a match", t.string(1, 20, { pattern = "[%w_]+" }), "abc!!")
+end
+
+do
+	--[[
+		The half the finding is about: a **peer's** string is the one that reaches `SetAsync`,
+		`Instance.Name` and chat. Refused rather than raised, because it is wire data (G4), and the
+		bytes are written by hand because no netweave writer will produce them.
+	]]
+	local name = Serdes.fromSchema(t.string(1, 20, { utf8 = true, pattern = "[%w_]+" }))
+
+	--[[ The length prefix is narrowed like any other range: `t.string(1, 20)` writes `length - 1` in
+	     one byte, because the declared minimum is the offset. Getting that wrong here is how a
+	     hand-built packet ends up testing the truncation path instead of the one it meant to. ]]
+	local function wire(text: string): buffer
+		local packed = buffer.create(1 + #text)
+		buffer.writeu8(packed, 0, #text - 1)
+		buffer.writestring(packed, 1, text)
+		return packed
+	end
+
+	local honest, allowed = decode(name, wire("player_1"))
+
+	check(`an honest name arrives: {tostring(allowed)}`, allowed == nil)
+	equals("intact", honest, "player_1")
+
+	local spaced, refusedPattern = decode(name, wire("player one"))
+
+	check("one the pattern forbids is refused", refusedPattern ~= nil)
+	equals("with nothing handed up", spaced, nil)
+
+	--[[
+		**Through a schema that declares `utf8` and nothing else**, because the pattern above refuses
+		`"\xff\xfe"` too — a word-character pattern refuses every byte that is not one — so asserting
+		the UTF-8 case against `name` would pass with the UTF-8 check deleted. Confirmed: it did.
+
+		That is the two-guards-covering-for-each-other shape `CLAUDE.md` §9 records from M3's
+		`maxBytes` test, and it is why every mutation in this file is run rather than reasoned about.
+	]]
+	local text = Serdes.fromSchema(t.string(1, 20, { utf8 = true }))
+
+	local fine, ok = decode(text, wire("한국어"))
+
+	check(`multibyte text arrives: {tostring(ok)}`, ok == nil)
+	equals("intact", fine, "한국어")
+
+	local broken, refusedUtf8 = decode(text, wire("\xff\xfe"))
+
+	check("and bytes that are not valid UTF-8 are refused", refusedUtf8 ~= nil)
+	equals("nothing there either", broken, nil)
+
+	--[[ The control: the same bytes through a plain `t.string`, which promises a length and nothing
+	     else. A schema that refused these would be refusing what its own docstring describes. ]]
+	local plain = Serdes.fromSchema(t.string(1, 20))
+	local through, unrefused = decode(plain, wire("\xff\xfe"))
+
+	check("a plain string takes the same bytes", unrefused == nil)
+	equals("and hands them over", through, "\xff\xfe")
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- A key that is not there, and a repeated thing that costs nothing (M4 report, 2 and 3)
 -- ---------------------------------------------------------------------------------------------
 
