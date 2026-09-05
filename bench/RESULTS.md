@@ -493,26 +493,80 @@ Three measurements in the same Studio session, on the VM that produced the 85:
 - At 200 packets a frame that is **1.8-2.3 ms of frame time removed**, from a frame that measures
   11.76 ms. It should have shown as ~101 FPS. It showed as 85.
 
-### So the frame is not encode-bound, and the arithmetic that said it was is withdrawn
+### ~~So the frame is not encode-bound~~ — corrected an hour later by the instrument that was missing
 
 `bench/profile.luau` predicted a 4.38 ms frame gap against generated code and Studio had measured
-4.21 ms, and that agreement was read as corroboration that the gap was the encode. **It was a
-coincidence**, and this run is what proves it: the encode moved by 1.8-2.3 ms and the frame moved by
-zero. Two numbers agreeing once is not a model.
+4.21 ms, and that agreement was read as corroboration that the gap was the encode. When the encode
+then moved by ~2 ms and the frame moved by zero, the conclusion written here was that the agreement
+had been a coincidence and the frame was bound by something else.
 
-The probe's own caution said what to do with this outcome — "disagreement would have been the useful
-answer: it would have meant something outside the codec was paying for the gap" — so the useful
-answer is what arrived. **Where the frame actually goes is now an open question with no measurement
-behind it.** The leading candidate, recorded as *inferred* and not as a finding: Studio Play runs
-client and server in one process, the server decodes 200 `ArrayHeavy` packets a frame in that same
-budget, and the decode path never took the block optimisation M2 gave the encode — the M4 security
-report measures decode at 2.5x the encode cost and 4x a hand-rolled reader, and `Buffer.ensure`,
-written for exactly that, has no caller in `src/`. `raw` sitting last at 30 FPS while serialising
-nothing points the same way.
+**That conclusion was drawn from two instruments that could not see a frame, and it is wrong.** The
+third instrument — `Config.FRAME_PROBE`, a clock around the send loop in the same place, the same
+load and the same server — says the frame is dominated by exactly what phase 7 optimised:
 
-This is the second time on this cell that a cause was named, fixed, and found not to be the cause —
-the first was M1's `allocate`-per-value, struck through above. The pattern is worth stating plainly:
-**a microbenchmark can prove a component got faster and say nothing about the frame it lives in.**
+| ArrayHeavy Up | frame | send loop | everything else | server |
+|---|---|---|---|---|
+| idle (nothing sent) | 4.31 ms <sub>232 FPS</sub> | — | 4.31 ms | — |
+| blink | 7.32 ms <sub>137 FPS</sub> | 1.03 ms <sub>14%</sub> | 6.29 ms | 137 FPS |
+| bytenet | 8.56 ms <sub>117 FPS</sub> | 5.43 ms <sub>64%</sub> | 3.12 ms | 117 FPS |
+| **netweave** | **11.58 ms** <sub>86 FPS</sub> | **6.27 ms** <sub>54%</sub> | **5.30 ms** | 86 FPS |
+| raw | 33.38 ms <sub>30 FPS</sub> | 18.09 ms <sub>54%</sub> | 15.28 ms | 30 FPS |
+
+**The whole gap is in the send loop.** netweave's frame is 4.26 ms longer than Blink's and its send
+loop is 5.24 ms longer — more than the entire gap, which Blink gives back outside the loop. And
+6.27 ms over 200 packets is 31.4 ns per packet against the 29.1 µs the codec measures on its own,
+so the cell is running the fused writer and the framing costs the difference.
+
+### And the codec really did get 1.34x faster on that VM
+
+Measured with the *real* code rather than a stand-in, by walking the arity at which
+`fusedStructWriter` hands back to the loop that preceded it:
+
+| fields | ns per packet | ns per value | path |
+|---|---|---|---|
+| 6 | 29,136 | 48.6 | fused |
+| 8 | 36,469 | 45.6 | fused |
+| 9 | 58,891 | 65.4 | loop — the pre-phase-7 writer |
+| 12 | 77,277 | 64.4 | loop |
+
+The loop costs 64.9 ns a value, so a six-field struct on it is **38,940 ns** — and the hand-built
+reconstruction this file quoted earlier said 38,434, faithful to 1.3%. So phase 7 took the encode
+from 38.9 to 29.1 µs a packet in Studio: **1.34x, and 1.96 ms out of an 11.6 ms frame.**
+
+### What is left is one inconsistency, and it is not going to be closed by reasoning
+
+Two measurements, both from the real code on the same machine in the same session:
+
+- the codec is **1.96 ms a frame cheaper** than before phase 7;
+- the frame is **0.3 ms shorter** than before phase 7 (84 → 85 in the matrix, 86.4 in the probe),
+  while the control group moved 2-5%.
+
+They do not add up, and the reason cannot be inferred from either — which is the whole lesson of
+this phase, arrived at twice. The probe that settles it is the one that now exists: check out
+`ab5541e`, build the place, and run `FRAME_PROBE` on the tree phase 7 was applied to. If the send
+loop there is ~8.2 ms and `everything else` is ~3.7 ms, then something outside the codec grew by the
+same amount phase 7 removed. If the send loop there is ~6.5 ms, then the arity ladder above is
+measuring something the bench's channel does not do.
+
+### The independent finding, which needs no such caveat
+
+**bytenet spends 5.43 ms in its send loop against netweave's 6.27, and 3.12 ms outside it against
+netweave's 5.30.** At a comparable encode cost it runs 30 FPS faster, and the difference is entirely
+outside the send call: the flush, and — because Studio Play runs both peers in one process — the
+server decoding that batch. `docs/SECURITY-REPORT-M4.md` measures netweave's decode at **2.5x its
+own encode and 4x a hand-rolled reader**, with `Buffer.ensure` written for exactly that optimisation
+and no caller in `src/`. M2's block claim and M4's fused writer are both encode-side only.
+
+That is a target with a number on it before any work starts, which is more than either previous
+attempt on this cell had.
+
+~~This is the second time on this cell that a cause was named, fixed, and found not to be the
+cause.~~ It is the second time a cause was named, fixed, and **the fix could not be seen in the
+frame** — M1's `allocate`-per-value was the first. The rule those two produce is not "a component
+benchmark lies"; it is narrower and more useful: **a component benchmark cannot tell you what
+fraction of a frame it owns, and until something measures that fraction, an optimisation's effect on
+the frame is a prediction.** The instrument that answers it is `Config.FRAME_PROBE`, and this
+milestone is the reason it exists.
 
 ### The part that was nearly missed
 
@@ -605,9 +659,11 @@ netweave's decode figure also includes the Studio-only `ctx` guard, which was on
 | 6 | Decode allocation at or below ByteNet's | **met against ByteNet**, 389 against 520 — see the caveat above |
 | 7 | No allocation on the receive hot path | **receive path met; send path improved, not closed** — the adapter's two tables per send are gone (flag encode 609.3 B to 81.92 B, Zap's figure), but `Serdes` still allocates per field |
 
-Two of seven are open, both on the encode side. ~~Both with an identified cause.~~ **Neither has
-one now** — M4 phase 7 removed the cause criterion 5 was attributed to, measured the removal, and
-watched the framerate stay where it was.
+Two of seven are open, both on the encode side. ~~Both with an identified cause.~~ **And the cause
+is located again, more precisely than before**: M4 phase 7's frame probe puts 54% of netweave's
+`ArrayHeavy` frame inside the send loop and the whole gap against Blink there. What is not
+explained is why removing 1.96 ms of that loop moved the frame by 0.3 ms; that is one probe away
+and the probe exists.
 
 ## What this fixes about the plan
 

@@ -101,11 +101,19 @@ local WARMUP = 5
 local NETWEAVE_FPS = 85
 local RIVAL_FPS = 133
 
---[[ The same encode, timed inside Studio in the same session (`execute_luau` on the running place),
-     so the ratio between this file's VM and the one the framerate came from is on record rather
-     than assumed. ]]
+--[[
+	The same encode, timed inside Studio in the same session, so the ratio between this file's VM and
+	the one the framerate came from is on record rather than assumed.
+
+	`STUDIO_BEFORE` is measured with the **real** pre-phase-7 writer rather than a stand-in: past
+	eight fields `fusedStructWriter` hands back to the loop `structWriter` that preceded it, and the
+	loop costs 64.9 ns a value there (58,891 ns at nine fields, 77,277 at twelve). Six fields of it
+	is 38,940. The hand-built reconstruction that first answered this said 38,434 — faithful to 1.3%,
+	which is worth recording because the reconstruction was the part of this file most likely to be
+	wrong and turned out not to be.
+]]
 local STUDIO_NOW = 29314
-local STUDIO_BEFORE = 38434
+local STUDIO_BEFORE = 38940
 
 --[[ What this file printed for the `netweave` rung on the tree before `Serdes.fusedStructWriter`
      existed — the same script, one commit earlier, which is what makes it a number rather than a
@@ -581,15 +589,20 @@ print(
 	difference — a quantity this probe measures. It predicted a 4.38 ms gap and Studio had measured
 	4.21 ms, and that was read as corroboration.
 
-	Then the fused writer removed 1.8-2.3 ms of that encode, *measured on Studio's own VM*, and the
-	framerate moved by **zero** — 85 against Blink's 133, where it was 84 against 130 before. Two
-	numbers agreeing once is not a model. The caution below the ladder said what a disagreement would
-	mean and that is now the standing answer: **something outside the codec is paying for this gap,
-	and it has not been measured.**
+	Then the fused writer removed 1.96 ms of that encode, *measured on Studio's own VM*, and the
+	framerate moved by **zero** — 85 against Blink's 133, where it was 84 against 130 before.
 
-	So this section reports and does not predict. The encode numbers are what this file is for; the
-	framerate is what the matrix is for, and the two are printed side by side rather than joined by
-	an equals sign.
+	~~So something outside the codec is paying for the gap.~~ **No**: `Config.FRAME_PROBE`, written
+	afterwards because neither this file nor the matrix could answer it, puts **54% of that frame
+	inside the send loop** and the whole gap against Blink there. The frame is encode-bound and the
+	1.96 ms is real; what does not add up is that the frame moved 0.3 ms, and that is open
+	(`bench/RESULTS.md`, M4 phase 7).
+
+	The rule this file now carries is the narrow one those two mistakes produced: **a component
+	benchmark cannot say what fraction of a frame it owns.** So this section reports and does not
+	predict. The encode numbers are what this file is for; the fraction is what `FRAME_PROBE` is for;
+	the framerate is what the matrix is for, and the three are printed rather than joined by an
+	equals sign.
 ]]
 print("")
 print(
@@ -606,7 +619,7 @@ print(
 print(
 	`        and the matrix that followed: {NETWEAVE_FPS} FPS against {RIVAL_FPS} — `
 		.. `{string.format("%.2f", (1000 / NETWEAVE_FPS) / (1000 / RIVAL_FPS))}x, unmoved. `
-		.. `The frame is not encode-bound; see bench/RESULTS.md.`
+		.. `The frame probe puts 54% of that frame in the send loop; see bench/RESULTS.md.`
 )
 
 print("")
