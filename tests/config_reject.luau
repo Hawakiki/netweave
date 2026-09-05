@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 12
+-- netweave:expect 8
 
 --[[
 	Settings that must not type-check.
@@ -10,9 +10,15 @@
 	the case that matters: it reads as "I configured this" while the default stays in force, and
 	the author finds out from a support thread rather than from the analyzer.
 
-	Twelve diagnostics for nine mistakes: three of them fail the value layer (`Settings`) and the
-	name layer (`CheckedSettings`) at once, and both are worth keeping — the first says what the
-	field should hold, the second says the field does not exist.
+	~~Twelve diagnostics for nine mistakes: three of them fail the value layer (`Settings`) and the
+	name layer (`CheckedSettings`) at once.~~ **One per mistake, since M3 phase 4.**
+
+	The doubling was not a design; it was a bug wearing one. `nw.configure` was typed
+	`<S>(settings: S & Settings)`, and Luau rejects *every* argument to that — so nine of the twelve
+	were the value layer refusing correct settings, and this file counted them as evidence that its
+	own cases worked. Both halves of the check now live in `CheckedSettings`, which says what is
+	wrong in one line (`src/api/Config.luau`), and `tests/config_ok.luau` is the positive half that
+	was missing and that would have caught it.
 ]]
 
 local nw = require("../src/netweave")
@@ -20,10 +26,12 @@ local nw = require("../src/netweave")
 -- A rule that does not exist.
 nw.configure({ rules = { handlers = "warn" } })
 
--- A severity that is not one of the three.
-nw.configure({ rules = { parse = "loud" } })
+--[[ A severity that is not one of the three is *not* here, and that is the one thing the analyzer
+     cannot see. A bare `S` parameter gives a config block's severities no expected type, so
+     `"loud"` reaches `CheckedSettings` widened to `string` with no literal left to compare.
+     `Config.configure` refuses it at startup instead, and `tests/config_runtime.luau` pins that. ]]
 
--- A severity that is not a string.
+-- A severity that is not a string at all.
 nw.configure({ rules = { parse = 2 } })
 
 -- A limit that does not exist.

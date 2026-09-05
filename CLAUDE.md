@@ -215,6 +215,9 @@ lune run tests/serdes_runtime
 lune run tests/api_runtime
 lune run tests/transport_runtime
 lune run tests/budget_runtime
+lune run tests/config_runtime
+lune run tests/observer_runtime
+lune run tests/query_runtime
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike
@@ -257,7 +260,10 @@ still mapped through `tests/` — that runs the whole suite twice.
 
 Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *must fail* is a test:
 
-- `tests/*_ok.luau` — must produce zero diagnostics
+- `tests/*_ok.luau` — must produce zero diagnostics. **A feature whose only test is a rejection file
+  has no test.** `nw.configure` shipped in M3 phase 0 typed so that Luau rejected every call, and
+  `tests/config_reject.luau` counted nine of those rejections as its own cases passing. Write the
+  `_ok` half.
 - `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
 

@@ -68,7 +68,14 @@ for _, channel in { Fixed, Counted, Big, Bounded } do
 end
 
 --[[ A sink that records, so a test can assert on order as well as content. ]]
-type Record = { channel: string?, stage: string?, value: any, bytes: number }
+type Record = {
+	channel: string?,
+	stage: string?,
+	value: any,
+	bytes: number,
+	call: number?,
+	status: number?,
+}
 
 local seen: { Record } = {}
 local denyOn: { [string]: string } = {}
@@ -78,20 +85,35 @@ local sink: Batch.Sink = {
 		return byId[id]
 	end,
 
+	--[[ These envelope tests are all request-shaped, so this sink reads like a server. The reply
+	     direction has its own file: `tests/query_runtime.luau`. ]]
+	answers = true,
+
 	admit = function(channel: any, _bytes: number): string?
 		return denyOn[channel.qualified]
 	end,
 
-	deliver = function(channel: any, value: any, bytes: number)
-		table.insert(seen, { channel = channel.qualified, value = value, bytes = bytes })
+	deliver = function(channel: any, value: any, bytes: number, call: number?)
+		table.insert(seen, { channel = channel.qualified, value = value, bytes = bytes, call = call })
 	end,
 
-	refuse = function(channel: any?, stage: string, reason: string, bytes: number)
+	reply = function(channel: any, call: number, status: number, value: any?, bytes: number)
+		table.insert(seen, {
+			channel = channel.qualified,
+			value = value,
+			bytes = bytes,
+			call = call,
+			status = status,
+		})
+	end,
+
+	refuse = function(channel: any?, stage: string, reason: string, bytes: number, call: number?)
 		table.insert(seen, {
 			channel = if channel then channel.qualified else nil,
 			stage = stage,
 			value = reason,
 			bytes = bytes,
+			call = call,
 		})
 	end,
 }

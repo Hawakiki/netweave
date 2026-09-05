@@ -27,6 +27,7 @@ local Batch = require("./Batch")
 local Settings = require("../api/Config")
 local Context = require("../api/Context")
 local Observer = require("../api/Observer")
+local Query = require("./Query")
 
 local Inbound = {}
 
@@ -62,6 +63,10 @@ export type Config = {
 	admit: (channel: any, sender: any?, bytes: number) -> string?,
 	--[[ Server-side handlers receive a context; client-side ones receive the payload alone. ]]
 	isServer: boolean,
+	--[[ Request/response, when this endpoint does any. One record rather than four callbacks: an
+	     endpoint either serves queries or refuses them, and there is no half of it that makes
+	     sense on its own. Absent, a query packet is reported and dropped. ]]
+	queries: Query.Queries?,
 }
 
 export type Inbound = {
@@ -96,16 +101,37 @@ end
 	still being consumed. Each pending entry carries its own sender, so nothing is attributed by
 	timing.
 ]]
+--[[
+	`calls` and `statuses` carry the query correlation through the same wait.
+
+	A reply is delivered on the caller's side by resuming a parked thread, and that thread is game
+	code that may yield — so resuming it during the read phase would reintroduce the exact bug this
+	structure exists to prevent, one packet later. A reply waits its turn in the pending list like
+	everything else.
+
+	`statuses` is `-1` for anything that is not a reply, never nil: a stale positive left over from
+	a previous batch would make an ordinary packet dispatch as somebody's answer.
+]]
 type Pending = {
 	channels: { any },
 	senders: { any },
 	values: { any },
 	sizes: { number },
+	calls: { number },
+	statuses: { number },
 	count: number,
 }
 
 local function emptyPending(): Pending
-	return { channels = {}, senders = {}, values = {}, sizes = {}, count = 0 }
+	return {
+		channels = {},
+		senders = {},
+		values = {},
+		sizes = {},
+		calls = {},
+		statuses = {},
+		count = 0,
+	}
 end
 
 --[=[
@@ -118,6 +144,7 @@ function Inbound.new(config: Config): Inbound
 	local resolve = config.resolve
 	local admit = config.admit
 	local isServer = config.isServer
+	local queries = config.queries
 
 	--[[
 		The sender of the batch currently being **read**.
@@ -157,7 +184,127 @@ function Inbound.new(config: Config): Inbound
 		Observer.emit(if channel then channel.qualified else "?", who, stage, reason, bytes)
 	end
 
-	local function call(channel: any, who: any?, value: any, bytes: number)
+	--[[
+		The policy, and whether it said yes.
+
+		Factored out of `call` because `serveQuery` needs the identical decision on a different
+		thread, and D-1 and D-2 are exactly the kind of rule that gets one of its two copies fixed.
+		The narrowed value is returned rather than assigned through, so neither caller can forget
+		which of the two things a verdict carries.
+	]]
+	local function decide(channel: any, who: any?, ctx: any, value: any, bytes: number): (boolean, any)
+		--[[ Annotated because it is read off an `any` channel and truth-tested, which narrows to a
+		     type that is not callable. ]]
+		local authorize: ((any, any) -> any)? = channel.authorize
+
+		if not authorize then
+			return true, nil
+		end
+
+		--[[
+			A policy is game code, and game code does not get the batch.
+
+			M2 wrapped the handler and left this call bare, which made the authorization layer a
+			denial-of-service surface: one input that trips a game's policy takes every packet
+			batched behind it, and the queue drain crosses senders, so those packets are not
+			necessarily the same player's. `RESEARCH §3.8-R` is this failure at the codec layer,
+			which netweave already avoids; `PLAN-M3` D-1 is the same discipline applied to the
+			game's own code.
+
+			`xpcall` with the module-level `traceback` handler allocates no closure per call.
+		]]
+		local ran, verdict = xpcall(authorize, traceback, ctx, value)
+
+		if not ran then
+			report(channel, who, "authorize", `the policy raised: {tostring(verdict)}`, bytes)
+			return false, nil
+		end
+
+		--[[
+			`ok == true`, not truthy, and only off a table.
+
+			A policy that returns nothing is a policy someone forgot to finish, and the safe
+			reading of an unfinished policy is "no" — this is the one place in netweave where a
+			shrug must not mean yes. The pre-fix check was `if not allowed`, which admitted
+			`ok = "yes"` and raised outright on `nil` (`PLAN-M3` D-2).
+
+			Read out of the shared verdict record before anything else can overwrite it
+			(`src/api/Policy.luau`).
+		]]
+		local shaped = if type(verdict) == "table" then verdict else nil
+
+		if shaped == nil or shaped.ok ~= true then
+			local reason = if shaped then shaped.reason else nil
+
+			report(
+				channel,
+				who,
+				"authorize",
+				reason
+					or (if shaped then "denied" else `the policy returned {typeof(verdict)}, not a verdict`),
+				bytes
+			)
+
+			return false, nil
+		end
+
+		return true, shaped.value
+	end
+
+	--[[
+		One request, from the policy to the answer, on a thread of its own.
+
+		`nw.query` is the only class whose handler is allowed to yield, and that permission forces
+		everything unusual here. It runs off the dispatch loop, so a datastore read does not hold up
+		the rest of the batch or the frame's flush; it gets a detached context, because the shared
+		per-player one is refreshed out from under a handler that yields; and every exit writes a
+		reply, because the caller is parked on a deadline and silence costs it the whole timeout.
+
+		The query record is a parameter rather than an upvalue so that the non-nil narrowing survives
+		into it — this is spawned from a place where the field is still `Queries?`.
+	]]
+	local function serveQuery(
+		serving: Query.Queries,
+		channel: any,
+		who: any,
+		value: any,
+		bytes: number,
+		id: number
+	)
+		local ctx = Context.detached(who, channel.qualified)
+		local allowed, narrowed = decide(channel, who, ctx, value, bytes)
+
+		if not allowed then
+			serving.answer(channel, who, id, Batch.REFUSED, nil)
+			return
+		end
+
+		if narrowed ~= nil then
+			value = narrowed
+		end
+
+		local handler: (...any) -> ...any = channel.handler
+
+		--[[ Attached when the packet was read and gone by the time this ran. `:handle` cannot be
+		     detached, but a namespace can be reset out from under an in-flight call, and calling nil
+		     here would raise on a thread with nobody to catch it. ]]
+		if not handler then
+			serving.answer(channel, who, id, Batch.UNHANDLED, nil)
+			return
+		end
+
+		local ok, result = xpcall(handler, traceback, ctx, value)
+
+		if not ok then
+			report(channel, who, "handler", tostring(result), bytes)
+			serving.answer(channel, who, id, Batch.FAILED, nil)
+			return
+		end
+
+		serving.answer(channel, who, id, Batch.OK, result)
+	end
+
+	local function call(channel: any, who: any?, value: any, bytes: number, id: number)
 		--[[ Annotated so `xpcall` resolves: a handler read off an `any` channel is narrowed to "not
 		     false or nil" by the caller's check, which is not a callable type. ]]
 		local handler: (...any) -> ...any = channel.handler
@@ -174,69 +321,33 @@ function Inbound.new(config: Config): Inbound
 			return
 		end
 
+		if channel.class == "query" then
+			local serving = queries
+
+			if not serving then
+				report(channel, who, "handler", "this endpoint does not serve queries", bytes)
+				return
+			end
+
+			--[[ The slot is taken here, synchronously, rather than on the spawned thread. Taking it
+			     there would run the check after the thread it exists to prevent. ]]
+			if serving.enter(channel, who, id) then
+				serving.spawn(serveQuery, serving, channel, who, value, bytes, id)
+			end
+
+			return
+		end
+
 		local ctx = Context.acquire(who, channel.qualified)
+		local allowed, narrowed = decide(channel, who, ctx, value, bytes)
 
-		--[[ Annotated for the same reason as `handler`: read off an `any` channel and truth-tested,
-		     which narrows to a type that is not callable. ]]
-		local authorize: ((any, any) -> any)? = channel.authorize
+		if not allowed then
+			Context.release(who)
+			return
+		end
 
-		if authorize then
-			--[[
-				A policy is game code, and game code does not get the batch.
-
-				M2 wrapped the handler and left this call bare, which made the authorization layer a
-				denial-of-service surface: one input that trips a game's policy takes every packet
-				batched behind it, and the queue drain crosses senders, so those packets are not
-				necessarily the same player's. `RESEARCH §3.8-R` is this failure at the codec layer,
-				which netweave already avoids; `PLAN-M3` D-1 is the same discipline applied to the
-				game's own code.
-
-				`xpcall` with the module-level `traceback` handler allocates no closure per call.
-			]]
-			local ran, verdict = xpcall(authorize, traceback, ctx, value)
-
-			if not ran then
-				report(channel, who, "authorize", `the policy raised: {tostring(verdict)}`, bytes)
-				Context.release(who)
-				return
-			end
-
-			--[[
-				`ok == true`, not truthy, and only off a table.
-
-				A policy that returns nothing is a policy someone forgot to finish, and the safe
-				reading of an unfinished policy is "no" — this is the one place in netweave where a
-				shrug must not mean yes. The pre-fix check was `if not allowed`, which admitted
-				`ok = "yes"` and raised outright on `nil` (`PLAN-M3` D-2).
-
-				Read out of the shared verdict record before anything else can overwrite it
-				(`src/api/Policy.luau`).
-			]]
-			local shaped = if type(verdict) == "table" then verdict else nil
-			local allowed = shaped ~= nil and shaped.ok == true
-			local narrowed = if shaped then shaped.value else nil
-			local reason = if shaped then shaped.reason else nil
-
-			if not allowed then
-				report(
-					channel,
-					who,
-					"authorize",
-					reason
-						or (
-							if shaped
-								then "denied"
-								else `the policy returned {typeof(verdict)}, not a verdict`
-						),
-					bytes
-				)
-				Context.release(who)
-				return
-			end
-
-			if narrowed ~= nil then
-				value = narrowed
-			end
+		if narrowed ~= nil then
+			value = narrowed
 		end
 
 		local ok, failure = xpcall(handler, traceback, ctx, value)
@@ -274,6 +385,8 @@ function Inbound.new(config: Config): Inbound
 		local senders = list.senders
 		local values = list.values
 		local sizes = list.sizes
+		local calls = list.calls
+		local statuses = list.statuses
 		local count = list.count
 
 		list.count = 0
@@ -282,12 +395,24 @@ function Inbound.new(config: Config): Inbound
 			local channel = channels[index]
 			local who = senders[index]
 			local value = values[index]
+			local id = calls[index]
+			local status = statuses[index]
 
 			channels[index] = nil
 			senders[index] = nil
 			values[index] = nil
 
-			call(channel, who, value, sizes[index])
+			--[[ A status of zero or more is a reply, and a reply resumes a thread instead of calling
+			     a handler. Anything else — including a query *request* — goes to `call`. ]]
+			if status >= 0 then
+				local waiting = queries
+
+				if waiting then
+					waiting.answered(channel, id, status, value)
+				end
+			else
+				call(channel, who, value, sizes[index], id)
+			end
 		end
 
 		--[[
@@ -357,8 +482,78 @@ function Inbound.new(config: Config): Inbound
 	local full = false
 	local pendingCeiling = Settings.limitOf("pendingPerBatch")
 
+	--[[ A query request that was refused before it ever reached a handler. The caller is already
+	     parked on a deadline, so the refusal goes back as a code rather than being left for the
+	     timeout to discover — the difference between a call that fails in a frame and one that
+	     fails in five seconds.
+
+	     Writing during the read phase is safe: `src/codec/Buffer.luau` keeps the incoming cursor and
+	     the outgoing buffer in separate state, and nothing here calls game code. ]]
+	local function decline(channel: any, who: any?, id: number?, status: number)
+		local serving = queries
+
+		if serving and id and isServer and channel and channel.class == "query" then
+			serving.refuse(channel, who, id, status)
+		end
+	end
+
+	--[[
+		An answer, on the side that asked, held until dispatch.
+
+		Resuming the parked thread here would run game code inside the read phase, and the thread it
+		resumes is free to yield — which is the corruption the read-then-dispatch split exists to
+		prevent, arriving through the one path that did not go through a handler.
+	]]
+	local function holdReply(channel: any, id: number, status: number, value: any?, bytes: number)
+		local count = filling.count + 1
+
+		if count > pendingCeiling then
+			full = true
+			report(
+				channel,
+				sender,
+				"budget",
+				`batch holds more than {pendingCeiling} packets; the rest were dropped`,
+				bytes
+			)
+
+			--[[
+				A dropped *reply* is not like a dropped packet, because somebody is waiting for it.
+
+				Reaching here needs `callsInFlight` above `pendingPerBatch`, which is a
+				misconfiguration rather than a hostile peer — but what it produced before M3 phase 4's
+				audit was a five second stall ending in "no answer within 5s", said about an answer
+				that had arrived, decoded, and been thrown away one frame earlier. The caller is told
+				what happened instead, on the next tick, which is later in this same frame.
+			]]
+			local waiting = queries
+
+			if waiting and channel.class == "query" then
+				waiting.abandon(
+					channel,
+					id,
+					`the answer arrived in a batch holding more than {pendingCeiling} packets and was dropped`
+				)
+			end
+
+			return
+		end
+
+		filling.count = count
+		filling.channels[count] = channel
+		filling.senders[count] = sender
+		filling.values[count] = value
+		filling.sizes[count] = bytes
+		filling.calls[count] = id
+		filling.statuses[count] = status
+	end
+
 	local sink: Batch.Sink = {
 		resolve = resolve,
+
+		--[[ The endpoint's side of a query, not the packet's. A server reads requests, a client
+		     reads replies, and neither ever reads the other (`src/transport/Batch.luau`). ]]
+		answers = isServer,
 
 		admit = function(channel: any, bytes: number): string?
 			--[[ Once the pending set is full the rest of the batch is refused here, before decode,
@@ -371,8 +566,22 @@ function Inbound.new(config: Config): Inbound
 			return admit(channel, sender, bytes)
 		end,
 
-		deliver = function(channel: any, value: any, bytes: number)
+		deliver = function(channel: any, value: any, bytes: number, id: number?)
 			if not channel.handler then
+				--[[
+					A query nobody is answering is refused, not queued.
+
+					The queue exists so a handler attached one frame late does not lose the traffic
+					that arrived first, and for a fire-and-forget class late is better than never. A
+					request is the opposite: the caller is holding a thread against a deadline, so
+					keeping the request until a handler appears converts an immediate, legible
+					"nothing is listening" into a timeout that says nothing at all.
+				]]
+				if isServer and id and channel.class == "query" then
+					decline(channel, sender, id, Batch.UNHANDLED)
+					return
+				end
+
 				enqueue(channel, sender, value, bytes)
 				return
 			end
@@ -419,6 +628,7 @@ function Inbound.new(config: Config): Inbound
 					`batch holds more than {pendingCeiling} packets; the rest were dropped`,
 					bytes
 				)
+				decline(channel, sender, id, Batch.REFUSED)
 				return
 			end
 
@@ -427,10 +637,32 @@ function Inbound.new(config: Config): Inbound
 			filling.senders[count] = sender
 			filling.values[count] = value
 			filling.sizes[count] = bytes
+			filling.calls[count] = id or 0
+			filling.statuses[count] = -1
 		end,
 
-		refuse = function(channel: any?, stage: string, reason: string, bytes: number)
+		reply = holdReply,
+
+		refuse = function(channel: any?, stage: string, reason: string, bytes: number, id: number?)
 			report(channel, sender, stage :: Observer.Stage, reason, bytes)
+
+			--[[
+				A refused query is answered rather than left hanging, in both directions.
+
+				On the server the caller is told its request was thrown away; on the client a reply
+				that would not decode resolves the parked thread as a failure instead of costing it
+				the whole timeout. The rule is the same from either end: a call that cannot be
+				answered gets an answer saying so.
+			]]
+			if not id or not channel or channel.class ~= "query" then
+				return
+			end
+
+			if isServer then
+				decline(channel, sender, id, Batch.REFUSED)
+			else
+				holdReply(channel, id, Batch.FAILED, nil, bytes)
+			end
 		end,
 	}
 
@@ -479,6 +711,10 @@ function Inbound.new(config: Config): Inbound
 				list.senders[count] = queue.senders[slot + 1]
 				list.values[count] = queue.values[slot + 1]
 				list.sizes[count] = 0
+				--[[ Never a query: a request with no handler is refused rather than queued, so
+				     nothing in a queue was ever waiting on an answer. ]]
+				list.calls[count] = 0
+				list.statuses[count] = -1
 
 				queue.values[slot + 1] = nil
 				queue.senders[slot + 1] = nil
@@ -506,6 +742,9 @@ function Inbound.new(config: Config): Inbound
 					list.senders[count] = who
 					list.values[count] = value
 					list.sizes[count] = bytes[who] or 0
+					--[[ Intents only, and an intent is not a query. ]]
+					list.calls[count] = 0
+					list.statuses[count] = -1
 
 					bytes[who] = nil
 				end

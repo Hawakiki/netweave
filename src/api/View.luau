@@ -121,9 +121,16 @@ type function channelView(channel, side)
 
 			view:setproperty(types.singleton("handle"), returns({ types.unknown, handler }))
 		else
-			--[[ Two returns, both optional: a query that timed out has no answer, and one that was
-			     refused has a reason. Neither is an error the caller may ignore, which is why the
-			     failure is a second value rather than something thrown. ]]
+			--[[
+				Two returns, both optional: a query that timed out has no answer, and one that was
+				refused has a reason. The failure is a value rather than something thrown because a
+				refused query is an ordinary outcome, and it cannot be ignored because `R?` is not
+				usable without a nil check under the solver netweave requires.
+
+				`nil` is unambiguous here only because `nw.query` refuses a top-level `t.optional`
+				`returns`, which is the one shape that would make "no answer" and "the answer is
+				nothing" the same value (`DESIGN-API.md` §7, `src/api/Channel.luau`).
+			]]
 			view:setproperty(
 				types.singleton("invoke"),
 				types.newfunction(

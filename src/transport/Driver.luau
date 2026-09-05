@@ -26,6 +26,7 @@ local Inbound = require("./Inbound")
 local Link = require("./Link")
 local Namespace = require("../api/Namespace")
 local Outbound = require("./Outbound")
+local Query = require("./Query")
 local Recipients = require("./Recipients")
 local Transport = require("../api/Transport")
 
@@ -49,10 +50,30 @@ function Driver.install()
 	local outbound = Outbound.new(link, roster)
 	local budget = Budget.new()
 
+	--[[
+		`task.spawn` is passed in rather than reached for inside `Query`, which keeps that module
+		loadable under lune where `task` does not exist — the same shape as `Budget`'s injectable
+		clock. It is the right primitive for both jobs it does here: it starts a handler on a fresh
+		thread, and it resumes a parked caller *propagating* whatever that thread raises, where
+		`coroutine.resume` would swallow the game's own error into a boolean nobody reads.
+	]]
+	local query = Query.new({
+		request = function(channel: any, call: number, value: any)
+			outbound.request(channel, call, value)
+		end,
+
+		reply = function(channel: any, who: any, call: number, status: number, value: any?)
+			outbound.reply(channel, who, call, status, value)
+		end,
+
+		spawn = task.spawn,
+	})
+
 	local inbound = Inbound.new({
 		resolve = Namespace.channelById,
 		admit = budget.admit,
 		isServer = isServer,
+		queries = query,
 	})
 
 	link.receive(inbound.receive)
@@ -82,17 +103,28 @@ function Driver.install()
 	]]
 	RunService.PostSimulation:Connect(function()
 		inbound.tick()
+
+		--[[ Between the dispatch and the flush, so that a call giving up this frame can retry in it
+		     rather than waiting a frame to be sent. A caller resumed with a failure is game code
+		     like any other and often does exactly that. ]]
+		query.tick()
 		outbound.flush()
 	end)
 
 	if isServer then
 		Players.PlayerRemoving:Connect(function(player)
-			--[[ Three places hold something per player: an unsent batch, a pending intent and a
-			     context record, and a rate window. None of them mean anything once the player is
-			     gone, and all three would otherwise grow with every join. ]]
+			--[[ Four places hold something per player: an unsent batch, a pending intent and a
+			     context record, a rate window, and the call slots of any query still running for
+			     them. None of them mean anything once the player is gone, and all four would
+			     otherwise grow with every join.
+
+			     `query.forget` releases the accounting and nothing else — a handler already parked
+			     inside a yield cannot be cancelled, because a yielded Luau coroutine cannot be. It
+			     returns when it returns, finds its slot gone, and writes no reply. ]]
 			outbound.forget(player)
 			inbound.forget(player)
 			budget.forget(player)
+			query.forget(player)
 		end)
 	end
 
@@ -112,12 +144,12 @@ function Driver.install()
 			outbound.broadcast(channel, value)
 		end,
 
-		--[[ `query` needs a call id, a pending table and a timeout, and the timeout is the part
-		     that matters: Blink and Zap have none, so a peer that never answers hangs the caller's
-		     thread forever (`RESEARCH §3.7-G`). Doing it without one would ship the bug this
-		     library exists to point at, so it waits for M3. ]]
-		invoke = function(): (any?, string?)
-			return nil, "netweave queries land in M3"
+		--[[ The timeout is the part that matters. Blink and Zap have none, so a peer that never
+		     answers parks the caller's thread for the session (`RESEARCH §3.7-G`); `timeout` is a
+		     required field on `nw.query` and there is no value of it meaning "wait forever". ]]
+		invoke = function(channel: any, args: any): (any?, string?)
+			ensure()
+			return query.invoke(channel, args)
 		end,
 
 		--[[ A handler has just been attached, so anything that arrived before it did is delivered
