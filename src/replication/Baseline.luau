@@ -33,12 +33,19 @@ local Settings = require("../api/Config")
 
 local Baseline = {}
 
---[[ Constant, because the refusal fires once per subject per tick for as long as the game stays
-     over the limit — which is a flood in every sense that matters, and `CLAUDE.md` §9's "count it
-     instead of weighing it" was learned on exactly this shape of mistake. ]]
+--[[
+	Constant, because the condition behind it is constant: a game over the limit is over it on every
+	tick, and a reason built per report would be `CLAUDE.md` §9's "count it instead of weighing it"
+	broken on exactly the shape that taught it.
+
+	It says what it costs rather than what it is. "Sent whole instead of as a change" was the old
+	wording and it understates by a factor of the framerate: the subject is sent whole **every tick**,
+	for a world that is not moving, for as long as the game stays over the line.
+]]
 local REFUSED = "this client is already holding the most replication baselines the "
-	.. "baselinesPerClient limit allows, so this subject is sent whole instead of as a change. "
-	.. "Raise the limit, or replicate fewer subjects to each player"
+	.. "baselinesPerClient limit allows, so every subject past it is encoded and sent whole on "
+	.. "every tick, changed or not — which costs more bandwidth than replicating it would. Raise "
+	.. "the limit, or narrow the audience so each player sees fewer subjects"
 
 --[[ The peer on the other end of a client's connection has no `Player` to be keyed by, and `nil` is
      not a table key. This stands in for "the server" on the client's side and cannot collide with a
@@ -100,6 +107,19 @@ function Baseline.new(bounded: boolean?): Baseline
 	     time would make the bound cost more than the thing it bounds. ]]
 	local counts: { [any]: number } = {}
 
+	--[[ Which clients have already been told their budget is full, per channel. A boolean rather
+	     than a count: what an author needs to know is that a line was crossed, and by how much is
+	     `held` minus the limit, which they can read at any time. ]]
+	local announced: { [any]: { [any]: boolean } } = {}
+
+	--[[ Back under the line, so the next crossing is worth saying again. Called from every path that
+	     releases one — a subject dropped, a channel given up on, a player gone. ]]
+	local function rearm(key: any)
+		if announced[key] and counts[key] and counts[key] < Settings.limitOf("baselinesPerClient") then
+			announced[key] = nil
+		end
+	end
+
 	local function channelsOf(key: any): Channels
 		local channels = records[key]
 
@@ -143,14 +163,36 @@ function Baseline.new(bounded: boolean?): Baseline
 
 			if limited and counts[key] >= Settings.limitOf("baselinesPerClient") then
 				--[[
-					Refused, and what that costs is a *snapshot every tick* for this subject and
-					this client rather than a patch — correct and expensive, which is how a bound
-					should fail. It degrades to what `nw.state` does for a living.
+					Refused, and what that costs is a full encode and a full packet for this subject
+					**on every tick** rather than a patch — correct and expensive, which is the right
+					way round for a bound to fail. A replication layer that answered a budget by
+					dropping state would be trading the one thing it exists to get right for the one
+					thing a bandwidth graph would have shown anyway.
 
-					Reported per channel and stage like every other refusal, so a game that crossed
-					the line finds out from its console rather than from its bandwidth graph.
+					~~It degrades to what `nw.state` does for a living.~~ **It does not**, and the
+					difference is the whole of this finding: `nw.state` sends when the game publishes,
+					and this sends every tick whether anything moved or not. Measured at 300 subjects
+					against a limit of 256, with the store untouched: 265 bytes and 44 refusals every
+					idle frame, for ever (M4 report).
+
+					**Said once per client per channel, not once per subject per tick.** The condition
+					is a state, not an event — 44 subjects over the line was 2,640 reports a second
+					describing one unchanging fact, which is a console nobody can read and an
+					`nw.observe` nobody can aggregate. It re-arms below the line, so a game that
+					crosses it again is told again.
 				]]
-				Observer.emit(channel.qualified, who, "replicate", REFUSED, 0)
+				local said = announced[key]
+
+				if not said then
+					said = {}
+					announced[key] = said
+				end
+
+				if not said[channel] then
+					said[channel] = true
+					Observer.emit(channel.qualified, who, "replicate", REFUSED, 0)
+				end
+
 				return false
 			end
 
@@ -175,6 +217,7 @@ function Baseline.new(bounded: boolean?): Baseline
 
 			subjects[subject] = nil
 			counts[key] = counts[key] - 1
+			rearm(key)
 		end,
 
 		--[[ Everything this client had on this channel, gone. The next tick therefore sends
@@ -202,6 +245,7 @@ function Baseline.new(bounded: boolean?): Baseline
 
 			channels[channel] = nil
 			counts[key] = counts[key] - held
+			rearm(key)
 		end,
 
 		--[[ They left. Tested the way `PLAN-M3` tested the queue drop, because it is the same
@@ -211,6 +255,7 @@ function Baseline.new(bounded: boolean?): Baseline
 			local key = keyOf(who)
 			records[key] = nil
 			counts[key] = nil
+			announced[key] = nil
 		end,
 
 		held = function(who: any): number
@@ -220,6 +265,7 @@ function Baseline.new(bounded: boolean?): Baseline
 		reset = function()
 			table.clear(records)
 			table.clear(counts)
+			table.clear(announced)
 		end,
 	}
 end

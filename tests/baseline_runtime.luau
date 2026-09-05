@@ -158,14 +158,38 @@ do
 	check("and the third", store.keep(alice, combat, "s3", 3))
 	equals("nothing reported yet", #reported, 0)
 
-	--[[ Past the limit netweave stops holding one, which means that subject is sent **whole** to
-	     this client every tick instead of as a change. Correct and expensive, which is how a bound
-	     should fail — it degrades to what `nw.state` does for a living. ]]
+	--[[ Past the limit netweave stops holding one, which means that subject is encoded and sent
+	     **whole** to this client on every tick instead of as a change — correct and expensive, which
+	     is the right way round for a bound to fail. ~~It degrades to what `nw.state` does for a
+	     living.~~ It does not: `nw.state` sends when the game publishes, and this sends every tick
+	     whether anything moved or not. Measured at 300 subjects against a limit of 256, with the
+	     store untouched: 265 bytes an idle frame, for ever. ]]
 	check("the fourth is refused", not store.keep(alice, combat, "s4", 4))
 	equals("and said out loud", #reported, 1)
 	equals("at the replicate stage", reported[1], "replicate:game.combat")
 	equals("with nothing kept", store.of(alice, combat, "s4"), nil)
 	equals("and the count unmoved", store.held(alice), 3)
+
+	--[[
+		**Once, not once per subject per tick.**
+
+		The tick asks again for every over-limit subject on every frame, so the old code said this
+		44 times a frame at 300 subjects — 2,640 reports a second describing one unchanging fact,
+		which is a console nobody can read and an `nw.observe` nobody can aggregate. The condition is
+		a state, so it is announced when the line is crossed and not while it stays crossed (M4
+		report).
+	]]
+	for _ = 1, 20 do
+		store.keep(alice, combat, "s5", 5)
+		store.keep(alice, combat, "s6", 6)
+	end
+
+	equals("and forty more refusals say nothing further", #reported, 1)
+
+	--[[ A second channel over the same client's budget is its own line to cross, because it is its
+	     own bandwidth. ]]
+	check("a different channel is refused too", not store.keep(alice, inventory, "s7", 7))
+	equals("and says so once of its own", #reported, 2)
 
 	--[[ The limit is per client, so it cannot be reached by a crowd. ]]
 	check("another client is unaffected", store.keep(bob, combat, "s4", 4))
@@ -178,6 +202,16 @@ do
 	--[[ Releasing one makes room, which is what makes the limit a ceiling rather than a latch. ]]
 	store.drop(alice, combat, "s1")
 	check("dropping one makes room", store.keep(alice, combat, "s4", 4))
+
+	--[[ And going back under the line re-arms the announcement, so a game that crosses it a second
+	     time is told a second time. A latch that never re-armed would report the *first* frame of a
+	     session and nothing about the hour after it. ]]
+	store.drop(alice, combat, "s2")
+	equals("back under the line", store.held(alice), 2)
+
+	check("and the room is usable", store.keep(alice, combat, "s9", 9))
+	check("crossing it again is refused again", not store.keep(alice, combat, "s10", 10))
+	equals("and said again, because it is a new crossing", #reported, 3)
 
 	Config.reset()
 	Observer.reset()
