@@ -644,6 +644,14 @@ local roster: Recipients.Roster = {
 
 		return #nearbyOf
 	end,
+
+	--[[ The rig says which of its stand-ins are real, which is what `has` is for and what production
+	     always supplies — `Recipients.roblox` answers it with `Parent == Players`. Without it every
+	     roster here would exercise the *degraded* path, and the one section that means to is the
+	     `lenient` case below, which builds a roster without this on purpose. ]]
+	has = function(who: any): boolean
+		return who == alice or who == bob or who == carol
+	end,
 }
 
 local function outboundChannel(id: number, descriptor: any, extra: { [string]: any }?): any
@@ -2228,13 +2236,20 @@ do
 	equals("a player who has left is not sent to", #left, 1)
 	check("while the one who stayed is", left[1] == alice)
 
-	--[[ And a roster that does not answer it still refuses what could never have been a recipient,
-	     which is what a rig standing players in with tables gets. ]]
+	--[[
+		And a roster that does not answer it still refuses what could never have been a recipient at
+		all — a number, a string, a boolean. That floor is a **kind** test and asks nothing about the
+		runtime, which is the correction M4 phase 8's Studio pass forced: it used to be exact inside
+		Roblox and a table test under lune, so this file passed on every lune run and went red the
+		moment the place was opened. A `Player` cannot be constructed, so no rig can hand the real
+		thing here the way the Instance suites do.
+	]]
 	local lenient: Recipients.Roster = { all = roster.all, owner = roster.owner, within = roster.within }
 
 	chosen = { alice, 7, "text" }
 	table.clear(out)
-	equals("without `has`, the shape test still holds", Recipients.of(audience, 1, lenient, out), 1)
+	equals("without `has`, the kind test still holds", Recipients.of(audience, 1, lenient, out), 1)
+	check("and what it admitted is the stand-in", out[1] == alice)
 
 	suite.passing()
 

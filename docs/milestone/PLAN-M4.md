@@ -872,6 +872,26 @@ Studio pass.
       which is G4), no union case in `sameFor` (1), and `branches` out of the signature (1).
       `bench/profile` 12,711 and `bench/decode` 20,792, unmoved.
 
+- [x] **The Studio pass caught what the lune pass could not, on this phase's own code.** `24bf8d7`
+      hardened `audience.select` with a shape test written the way `Serdes.isInstance` is — exact
+      inside Roblox, a table under lune — and every lune run passed while `replication_runtime` and
+      `transport_runtime` were red from the moment the place was opened. That is §9's "the half that
+      cannot run under lune is the half that goes red quietly", reproduced by the commit that quoted
+      it.
+
+      `Serdes.isInstance` may branch, because the Studio suite hands it a **real Instance**. A
+      `Player` cannot be constructed and Play mode has one, so no rig can do the same — the analogy
+      broke exactly where it mattered. The two questions are separated now: **kind** (could this ever
+      be addressed — a number cannot be a table key, true in both runtimes, no branch) and
+      **identity** (`roster.has`, which `Recipients.roblox` answers with `Parent == Players` and
+      which is strictly stronger). A roster that answers `has` is the whole test; the kind check is
+      the floor for one that does not, and both rigs supply `has` now so the Studio run takes the
+      path production takes.
+
+      What the floor gives up is a plain table — `{ 5, "text", {} }` was three parked send buffers
+      before phase 8 and is one rather than zero without a roster, and zero everywhere `has` exists,
+      which is every path netweave builds itself.
+
 #### The three that need Studio to finish
 
 Written, lowered, hashed and refused under lune; the *wire* half of each needs a `Vector3` or a real
