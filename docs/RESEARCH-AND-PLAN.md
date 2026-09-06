@@ -1174,6 +1174,33 @@ M2의 블록 최적화도, M4 페이즈 7의 fused writer도 전부 **인코드 
 21,960 → 20,856, 약 5%다. 270줄짜리 언롤을 하나 더 둘 값이 아니고, 천장까지 남은 격차는 원소마다의
 클로저 호출과 분기 체인이라 배열 단위 span으로는 어차피 안 없어진다.
 
+### MM. 새 타입 솔버 일반 출시 — 그리고 그게 우리 대상 독자에게 **불리한 쪽으로** 정확해졌다
+
+2026-09-06 확인. [devforum 4084991](https://devforum.roblox.com/t/general-release-luau-s-new-type-solver/4084991):
+
+> If you use `nocheck` or non-strict mode for all of your scripts, you will be automatically moved
+> to the New Type Solver with nonstrict enabled. **If you use strict mode, you will remain on the
+> old solver by default**, but can opt-in via Workspace Properties.
+
+netweave는 `LuauSolverV2`를 **요구**한다(`DESIGN-API` §7). 보장 G1·G2·G3·G6이 타입 에러고,
+`type function`은 구 솔버가 문법째로 거부한다. `src/`에 27개 있다.
+
+"일반 출시"를 들으면 조건이 사라졌다고 읽기 쉬운데 **정반대다.** 자동으로 옮겨지는 건 `nocheck`/
+non-strict 쪽이고, 그쪽은 netweave의 보장이 `--!strict` 주석이라 어차피 아무것도 못 받는다.
+그리고 **`--!strict` 저자 — `DESIGN-API` §0이 "the target"이라고 못박은 바로 그 집단 — 은 구
+솔버에 남는다.** §0의 표가 중요한 축에서 거꾸로였고, 그걸 취소선으로 고쳤다.
+
+바뀐 게 나쁘기만 한 건 아니다. 둘 다 문서에 이득이다:
+
+- **지시가 구체적이 됐다.** 스튜디오 베타 토글이 아니라 **Workspace Properties → Scripting**의
+  프로젝트별 설정이다. 베타를 설명하는 문단이 아니라 한 문장으로 쓸 수 있다.
+- **끝이 있다.** "committed to keep the old type inference engine available through 2026" — 상시
+  조건이 아니라 기한 있는 마이그레이션 단계다.
+
+`analyze.luau`는 이 발표와 무관하게 `--flag:LuauSolverV2=true`를 계속 명시한다. **도구의 기본값에
+의존하는 검사는 도구가 바뀌면 같이 바뀌는 검사**라서, 발표가 기본값을 어느 쪽으로 옮기든 저 줄은
+그대로 있어야 한다.
+
 ## 4. netweave 포지셔닝
 > **Flamework의 구조 + Blink의 할당 병합 + Zap의 비트패킹 + 빌드 스텝 없음. 순수 Luau 퍼스트.**
 > (§3.5 2차원 지도의 오른쪽 위 빈칸)
