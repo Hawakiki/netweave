@@ -177,6 +177,36 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A vector is its component schema, that many times over
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ Bare is what it always was. Named, everything a number node knows applies per component:
+	     a narrowed range takes a smaller storage, a quantisation step divides. ]]
+	equals("a bare vector3 is twelve bytes", Ir.lower(t.vector3).fixedSize, 12)
+	equals("and a bare vector2 is eight", Ir.lower(t.vector2).fixedSize, 8)
+
+	local placed = Ir.lower(t.vector3(t.i16(-2048, 2048)))
+	equals(
+		"a narrowed component takes the storage its span needs",
+		(placed.root.element :: Ir.Node).storage,
+		"u16"
+	)
+	equals("so three of them are six bytes", placed.fixedSize, 6)
+	equals("with the bound subtracted per axis", (placed.root.element :: Ir.Node).offset, -2048)
+
+	local flat = Ir.lower(t.vector2(t.i16(-1024, 1024)))
+	equals("and two are four", flat.fixedSize, 4)
+
+	--[[ The spelling the docstring recommends for a direction: three bytes where the bare one is
+	     twelve, because a component is a whole number type and `t.quantized` is one. ]]
+	local direction = Ir.lower(t.unitVector3(t.quantized(-1, 1, 2 / 254)))
+	equals("a quantised direction is three bytes", direction.fixedSize, 3)
+	check("and stays a unit vector", direction.root.unit == true)
+	equals("with the step on the component", (direction.root.element :: Ir.Node).step, 2 / 254)
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- The M0 benchmark schemas, in the byte counts the competitors produced
 -- ---------------------------------------------------------------------------------------------
 

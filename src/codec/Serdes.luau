@@ -1169,6 +1169,20 @@ function buildWriter(node: Node): Writer
 			bytes(value, length)
 		end
 	elseif kind == "vector2" then
+		--[[ A named component is a number node like any other, so its writer already carries the
+		     range check, the offset and the quantisation. Bare stays the two named `f32` calls it
+		     was, because that is the common case and a component writer is a call per axis. ]]
+		local component = node.element
+
+		if component then
+			local axis = buildWriter(component)
+
+			return function(value: any, flags: Flags)
+				axis(value.X, flags)
+				axis(value.Y, flags)
+			end
+		end
+
 		local f32: (value: number) -> () = if blocked then putF32 else writeF32
 
 		return function(value: any, _flags: Flags)
@@ -1176,6 +1190,18 @@ function buildWriter(node: Node): Writer
 			f32(value.Y)
 		end
 	elseif kind == "vector3" then
+		local component = node.element
+
+		if component then
+			local axis = buildWriter(component)
+
+			return function(value: any, flags: Flags)
+				axis(value.X, flags)
+				axis(value.Y, flags)
+				axis(value.Z, flags)
+			end
+		end
+
 		local f32: (value: number) -> () = if blocked then putF32 else writeF32
 
 		return function(value: any, _flags: Flags)
@@ -2031,6 +2057,25 @@ function buildReader(node: Node): Reader
 			return readBuffer(length)
 		end
 	elseif kind == "vector2" then
+		local component = node.element
+
+		if component then
+			local axis = buildReader(component)
+
+			return function(flags: Flags): any
+				local x, y = axis(flags), axis(flags)
+
+				--[[ Still asked, because a component the schema narrowed cannot be non-finite but a
+				     bare `f32` one named through `t.vector2(t.f32)` can. One branch either way. ]]
+				if not (isFinite(x) and isFinite(y)) then
+					reject("non-finite vector2")
+					return Vector2.zero
+				end
+
+				return Vector2.new(x, y)
+			end
+		end
+
 		return function(_flags: Flags): any
 			local x, y = readF32(), readF32()
 
@@ -2043,6 +2088,41 @@ function buildReader(node: Node): Reader
 		end
 	elseif kind == "vector3" then
 		local unit = node.unit
+		local component = node.element
+
+		--[[
+			**A quantised direction does not land on the unit sphere**, so the length check widens by
+			what the step can move it: each axis is off by at most half a step, and three of those
+			compose to `sqrt(3)` half-steps in the worst case.
+
+			Derived rather than guessed, and zero for every encoding that is not quantised — so a
+			bare `t.unitVector3` keeps exactly the tolerance it had. Without it, the compact spelling
+			the docstring recommends would be refused by its own reader on most values.
+		]]
+		local slack = UNIT_TOLERANCE
+			+ if component and component.step then math.sqrt(3) * (component.step :: number) / 2 else 0
+
+		if component then
+			local axis = buildReader(component)
+
+			return function(flags: Flags): any
+				local x, y, z = axis(flags), axis(flags), axis(flags)
+
+				if not (isFinite(x) and isFinite(y) and isFinite(z)) then
+					reject("non-finite vector3")
+					return Vector3.zero
+				end
+
+				local value = Vector3.new(x, y, z)
+
+				if unit and math.abs(value.Magnitude - 1) > slack then
+					reject("vector3 is not a unit vector")
+					return Vector3.zAxis
+				end
+
+				return value
+			end
+		end
 
 		return function(_flags: Flags): any
 			local x, y, z = readF32(), readF32(), readF32()
@@ -2100,6 +2180,7 @@ function buildReader(node: Node): Reader
 		end
 	elseif kind == "instance" then
 		local class = node.class
+		local root = node.descendantOf
 
 		return function(_flags: Flags): any
 			local value = readInstance()
@@ -2131,6 +2212,22 @@ function buildReader(node: Node): Reader
 
 			if class and not value:IsA(class) then
 				reject("instance is not a " .. class)
+				return nil
+			end
+
+			--[[
+				And where it is. A class says *what* a client handed over; it says nothing about
+				where the client got it, and the sidecar admits anything the sender can reference —
+				a `BasePart` out of its own `PlayerGui`, a `Model` in `ReplicatedStorage` a script
+				parented there a frame ago (M4 report).
+
+				Not in the protocol hash, and that is deliberate: this is enforcement one endpoint
+				does over its own tree, like a rate limit. Two peers naming their own `workspace`
+				mean the same thing and hold different objects, and a hash that moved for it would
+				force a client redeploy for a server-side edit.
+			]]
+			if root and not value:IsDescendantOf(root) then
+				reject("instance is not inside " .. root.Name)
 				return nil
 			end
 

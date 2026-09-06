@@ -16,6 +16,11 @@
 	unchecked `GetPlayerFromCharacter` argument survived to an external review (M3 phase 9).
 ]]
 
+--[[ Services rather than globals: `workspace` is one and `Players` and `ReplicatedStorage` are not,
+     and the container checks below need a tree on both sides of the boundary. ]]
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
 local Buffer = require("../src/codec/Buffer")
 local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
@@ -128,6 +133,77 @@ do
 	buffer.writef32(infinite, 8, 0)
 
 	rejects("a vector3 carrying infinity", t.vector3, infinite)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Vectors carried at a component schema (M4 phase 8)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Bare, a vector is three `f32` and **unbounded**: a position of `1e38` on an `intent` passes
+	`parse`, and `t.unitVector3` covers directions only (M4 report). Naming a component schema is how
+	a position says where the map is, and everything a number type knows applies per axis — so this
+	is also where the bytes go.
+
+	`tests/ir_runtime.luau` has the byte counts from the layout. What only Studio can say is that the
+	values survive, because a `Vector3` is what neither exists nor round-trips under lune.
+]]
+
+do
+	local placed = t.vector3(t.i16(-2048, 2048))
+	local value, failure, size = roundTrip(placed, Vector3.new(-2048, 0, 2048))
+
+	equals("a narrowed vector3 is six bytes, not twelve", size, 6)
+	equals("and decodes", failure, nil)
+	equals("both ends of the range survive", value, Vector3.new(-2048, 0, 2048))
+
+	local flat = t.vector2(t.i16(-1024, 1024))
+	local plane, refused, planeSize = roundTrip(flat, Vector2.new(-1024, 1024))
+
+	equals("a narrowed vector2 is four", planeSize, 4)
+	equals("and decodes", refused, nil)
+	equals("intact", plane, Vector2.new(-1024, 1024))
+
+	--[[ The whole point of naming a range: off the map is a refusal at the `:send` that wrote it,
+	     with the bounds in the message, rather than a legal position. ]]
+	local wrote = pcall(Serdes.fromSchema(placed).write, Vector3.new(1e38, 0, 0))
+	Buffer.load(nil)
+
+	check("a position outside the declared range is refused", not wrote)
+
+	local axis = pcall(Serdes.fromSchema(placed).write, Vector3.new(0, 4096, 0))
+	Buffer.load(nil)
+
+	check("and it is refused per axis, not only on the first", not axis)
+end
+
+do
+	--[[
+		The spelling the docstring recommends for a direction: three bytes where the bare one is
+		twelve.
+
+		**A quantised direction does not land on the unit sphere**, so the length check widens by
+		`sqrt(3)` half-steps — derived from the step rather than guessed. Without that the compact
+		spelling would be refused by its own reader on most values, which is the failure this
+		assertion exists to catch: the round trip is what says the tolerance is wide enough, and the
+		hostile case below is what says it is not too wide.
+	]]
+	local compact = t.unitVector3(t.quantized(-1, 1, 2 / 254))
+	local direction = Vector3.new(1, 2, 3).Unit
+	local value, failure, size = roundTrip(compact, direction)
+
+	equals("a quantised direction is three bytes", size, 3)
+	equals("and decodes", failure, nil)
+	check(`and stays a direction: {tostring(value)}`, (value - direction).Magnitude < 0.02)
+
+	--[[ Still a unit vector, still enforced. 254 levels over -1..1 puts every axis at its top, which
+	     is a magnitude of sqrt(3) — well outside anything `sqrt(3)` half-steps can excuse. ]]
+	local hostile = buffer.create(3)
+	buffer.writeu8(hostile, 0, 254)
+	buffer.writeu8(hostile, 1, 254)
+	buffer.writeu8(hostile, 2, 254)
+
+	rejects("a quantised direction with a magnitude of sqrt(3)", compact, hostile)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -249,6 +325,79 @@ do
 	--[[ The sidecar is attacker-influenced too: fewer instances than the schema declares must not
 	     hand a handler a nil where it declared an Instance. ]]
 	rejects("a missing instance", t.instance, buffer.create(0), {})
+end
+
+do
+	--[[
+		**Where it came from, not only what it is** (M4 phase 8).
+
+		A class says *what* a client handed over and nothing about where it got it: the sidecar
+		admits anything the sender can reference — a `BasePart` out of its own `PlayerGui`, a `Model`
+		a script parented into `ReplicatedStorage` a frame ago. `descendantOf` is the container
+		check, and it takes the container itself because a game declares its schema at startup, when
+		`workspace` exists, and resolving a path per packet would be a tree walk on the receive path.
+
+		`tests/types_runtime.luau` has the declaration refusals; this is the half that needs a tree.
+	]]
+	local holder = Instance.new("Folder")
+	holder.Parent = workspace
+
+	local inside = Instance.new("Part")
+	inside.Parent = holder
+
+	local outside = Instance.new("Part")
+	outside.Parent = ReplicatedStorage
+
+	local contained = t.instance("BasePart", { descendantOf = workspace })
+
+	local value, failure = roundTrip(contained, inside, { inside })
+
+	equals("a part inside the container decodes", failure, nil)
+	check("and survives", value == inside)
+
+	rejects("one of the right class from somewhere else", contained, buffer.create(0), { outside })
+
+	--[[ A nested descendant, not only a direct child: `IsDescendantOf` is the question, and a game
+	     that meant "child of" would be asking a different one. ]]
+	local deep = Instance.new("Part")
+	deep.Parent = holder
+
+	local nested = Instance.new("Folder")
+	nested.Parent = holder
+	deep.Parent = nested
+
+	local reached, deepFailure = roundTrip(contained, deep, { deep })
+
+	equals("a part nested deeper still decodes", deepFailure, nil)
+	check("and survives", reached == deep)
+
+	--[[ The control: without a container the same instance from outside is accepted, so the refusal
+	     above is the container check rather than something else refusing it. ]]
+	local loose, looseFailure = roundTrip(t.instance("BasePart"), outside, { outside })
+
+	equals("without a container it is accepted", looseFailure, nil)
+	check("and survives", loose == outside)
+
+	outside:Destroy()
+	holder:Destroy()
+end
+
+do
+	--[[ `t.player` is `t.instance("Player")` with the payload type Luau cannot get from a class
+	     name. What Studio can check is the runtime half: a Player passes, and anything else does
+	     not. ]]
+	local players = Players:GetPlayers()
+
+	if #players > 0 then
+		local value, failure = roundTrip(t.player, players[1], { players[1] })
+
+		equals("a player decodes", failure, nil)
+		check("and survives", value == players[1])
+	end
+
+	local part = Instance.new("Part")
+	rejects("something that is not a player", t.player, buffer.create(0), { part })
+	part:Destroy()
 end
 
 -- ---------------------------------------------------------------------------------------------
