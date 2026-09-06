@@ -26,6 +26,31 @@ That choice narrows the audience, and pretending otherwise would set the wrong e
 Blink and Zap serve anyone who can run a CLI. netweave asks for a typed codebase first. That is
 a smaller slice of the ecosystem, chosen on purpose.
 
+### The target audience is the group that does *not* get the new solver by default
+
+~~The solver setting is a gap in what a `--!strict` author knows.~~ **It is a default that runs
+against them**, and the general release is what made that precise rather than better
+([devforum 4084991](https://devforum.roblox.com/t/general-release-luau-s-new-type-solver/4084991),
+read 2026-09-06):
+
+> If you use `nocheck` or non-strict mode for all of your scripts, you will be automatically moved
+> to the New Type Solver with nonstrict enabled. **If you use strict mode, you will remain on the
+> old solver by default**, but can opt-in via Workspace Properties.
+
+So the row above is the wrong way round on the axis that matters. A `nocheck` author is moved to the
+new solver and gets nothing from it here, because netweave's guarantees are `--!strict` annotations
+they do not write. A `--!strict` author — netweave's stated target — keeps the **old** solver until
+they go and turn it on.
+
+Two things follow, and both are improvements on where this document was:
+
+- **The instruction is now concrete.** It used to be a Studio beta toggle; it is a per-project
+  setting under **Workspace Properties → Scripting**, which is a sentence netweave can put in its
+  own README rather than a paragraph about betas.
+- **The transition has an end.** Roblox is "committed to keep the old type inference engine
+  available through 2026", so the opt-in is a migration step with a horizon rather than a standing
+  condition. §7's decision does not change; what changes is that it stops being permanent.
+
 ### The guarantees are layered
 
 The inner layer is unconditional: framing, rate declaration, audience declaration, direction.
@@ -705,6 +730,12 @@ they are nothing, and shipping a second untyped declaration path would mean main
 of this library that cannot keep its own promises. The last row above is the reason not to
 pretend otherwise: on the stock solver a user sees errors in code they did not write, and telling
 them to ignore those is worse than telling them to turn the solver on.
+
+**How to turn it on, as of the general release**: Workspace Properties → Scripting, per project. A
+`--!strict` codebase is *not* moved automatically and has to opt in — see §0, which has the quote and
+the date. The old engine stays available through 2026, so this is a migration step rather than a
+standing condition; `analyze.luau` passes `--flag:LuauSolverV2=true` explicitly either way, because a
+check that depends on a tool's default is a check that changes when the tool does.
 
 ## 8. Context
 
