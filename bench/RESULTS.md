@@ -517,6 +517,40 @@ loop is 5.24 ms longer — more than the entire gap, which Blink gives back outs
 6.27 ms over 200 packets is 31.4 ns per packet against the 29.1 µs the codec measures on its own,
 so the cell is running the fused writer and the framing costs the difference.
 
+#### Re-run: the send loop reproduces, the frame does not
+
+The same probe, same place file, run again on 2026-09-06 — a re-run rather than a fresh
+measurement, and `CLAUDE.md` §9 is why it is here at all: a number that does not survive being
+re-run is not a number.
+
+| ArrayHeavy Up | send loop, recorded → re-run | frame, recorded → re-run |
+|---|---|---|
+| blink | 1.03 → **1.01 ms** <sub>−1.9%</sub> | 7.32 → 7.36 ms <sub>+0.5%</sub> |
+| bytenet | 5.43 → **5.39 ms** <sub>−0.7%</sub> | 8.56 → 8.77 ms <sub>+2.5%</sub> |
+| **netweave** | 6.27 → **6.31 ms** <sub>+0.6%</sub> | 11.58 → 12.24 ms <sub>+5.7%</sub> |
+| idle | — | 4.31 → 4.26 ms <sub>−1.2%</sub> |
+
+**The instrument's two halves do not have the same quality, and the table above reads as though they
+do.** The send loop lands within 2% on every library including the two controls, which is what makes
+"54% of the frame" and "the whole gap is in the send loop" safe to quote. The frame does not:
+netweave's moved 0.66 ms on code that did not change, and `everything else` — 5.30 → 5.93 ms, +12% —
+is the least reproducible quantity the probe reports.
+
+That is a **correction to what the next measurement should be**, not to the conclusion above. The
+open question at the end of phase 7 is that the codec got 1.96 ms cheaper per frame while the frame
+moved 0.3 ms; the plan was to run this probe on `ab5541e` and compare. One run cannot answer it —
+0.3 ms is less than half the drift this instrument shows on an unchanged tree, so a single reading
+either side would be comparing two samples of a quantity whose spread nobody had measured. It takes
+repeats on both trees, and the send loop rather than the frame is the number to compare.
+
+:::caution
+The re-run used the place file as it was built on 2026-09-05, so it is the same *instrument* on a
+pre-phase-8 tree rather than a pinned commit — the suite counts in its console (`hostile_runtime`
+186, `replication_runtime` 35) identify it as older than this document's HEAD and no more precisely
+than that. What that weakens is the frame column, which is the column being called unreliable
+anyway. The send loop is the same code on both readings.
+:::
+
 ### And the codec really did get 1.34x faster on that VM
 
 Measured with the *real* code rather than a stand-in, by walking the arity at which

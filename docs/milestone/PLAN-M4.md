@@ -652,6 +652,14 @@ API to write an example against.
       it is the one that now exists, run on `ab5541e` — the tree phase 7 was applied to. If the send
       loop there is ~8.2 ms, something outside the codec grew by what phase 7 removed; if it is
       ~6.5 ms, the arity ladder is measuring something the bench's channel does not do.
+
+      ~~One run on each tree settles it.~~ **It does not, and re-running the probe on an unchanged
+      tree is what says so** (2026-09-06, `bench/RESULTS.md`): the **send loop** reproduces within
+      2% on every library — 6.27 → 6.31 for netweave, 1.03 → 1.01 for blink, 5.43 → 5.39 for
+      bytenet — and the **frame** does not, netweave's moving 11.58 → 12.24 ms, +5.7%, with
+      `everything else` at +12%. 0.3 ms is less than half that drift, so a single reading either side
+      would compare two samples of a quantity whose spread nobody had measured. What the probe can
+      answer is the send loop; what it needs is repeats on both trees.
 - [x] **An independent target came out of the same run.** ByteNet spends 5.43 ms in its send loop
       against netweave's 6.27 and **3.12 ms outside it against netweave's 5.30**, and runs 30 FPS
       faster. What is outside the loop is the flush and — one process, both peers — the server's
