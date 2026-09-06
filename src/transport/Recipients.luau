@@ -37,14 +37,35 @@ local Recipients = {}
 	still connected is the roster's question — `has` above — and a roster that does not answer it
 	still gets the values that could never have been a recipient at all refused here.
 ]]
-local ROBLOX = typeof(game) == "Instance"
+--[[
+	~~Asked the way `Serdes.isInstance` asks its own question: exact inside Roblox, and a table under
+	lune where the suite stands players in.~~ **That split was wrong here, and the way it was wrong is
+	the finding.**
 
+	`Serdes.isInstance` can branch on the runtime because the Studio suite hands it a **real
+	Instance** — the double matches the real thing in the dimension the code checks, which is
+	`CLAUDE.md` §9's rule for doubles. A `Player` cannot be constructed, so no suite can do the same
+	here: `replication_runtime` needs two of them and Play mode has one. The branch therefore made
+	every table stand-in a recipient under lune and none in Studio, and two suites that pass on every
+	lune run went red the moment the place was opened — which is §9's "the half that cannot run under
+	lune is the half that goes red quietly", reproduced by the commit that quoted it.
+
+	So the two questions are separated instead of merged:
+
+	  * **kind**, here — could this ever be addressed at all. A number, a string or a boolean cannot
+	    be a table key the send buffers are parked under, let alone reach `FireClient`. That is true
+	    in both runtimes and needs no branch.
+	  * **identity**, `has` below — is this someone this endpoint can send to *right now*.
+	    `Recipients.roblox` answers it with `typeof(who) == "Instance"`, `IsA("Player")` and
+	    `Parent == Players`, which is strictly more than the kind test and is what production runs.
+
+	A roster that answers `has` is therefore the whole test, and this is the floor for one that does
+	not. What that floor gives up is a plain table: `{ 5, "text", {} }` was three parked send buffers
+	before M4 phase 8 and is one now rather than zero — and zero everywhere `has` exists, which is
+	every path netweave builds itself.
+]]
 local function isRecipient(who: any): boolean
-	if ROBLOX then
-		return typeof(who) == "Instance" and (who :: Instance):IsA("Player")
-	end
-
-	return type(who) == "table"
+	return type(who) == "table" or typeof(who) == "Instance"
 end
 
 --[[
@@ -314,9 +335,13 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 	local duplicated = false
 
 	for _, who in chosen do
+		--[[ The roster's answer where there is one, and the kind test where there is not. `has` is
+		     strictly the stronger question — `Recipients.roblox` checks the kind inside it — so
+		     asking both would be asking the weaker one twice. See `isRecipient`. ]]
 		local connected = roster.has
+		local admitted = if connected then connected(who) else isRecipient(who)
 
-		if not isRecipient(who) or (connected and not connected(who)) then
+		if not admitted then
 			dropped = true
 			continue
 		end

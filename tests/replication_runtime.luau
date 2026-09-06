@@ -149,6 +149,14 @@ local roster: Recipients.Roster = {
 		out[1] = alice
 		return 1
 	end,
+
+	--[[ Which of the stand-ins are real, which is what `has` is for and what production always
+	     supplies. A rig that leaves it out runs the degraded path everywhere — and until M4 phase 8
+	     that path was also runtime-dependent, so this file passed on every lune run and went red the
+	     moment the place was opened. ]]
+	has = function(who: any): boolean
+		return who == alice or who == bob
+	end,
 }
 
 local serverOut = Outbound.new(linkInto(toClient), roster)
