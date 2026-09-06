@@ -114,6 +114,7 @@ export type Field = {
 	.max number? -- the same, and what the decoder rejects against
 	.unit boolean?
 	.class string?
+	.descendantOf Instance? -- `instance`: the container an arrival must be inside, checked on receive
 	.lengthStorage Encoding? -- how a variable length is written; nil when the length is fixed
 	.lengthOffset number?
 	.count number? -- exact length, when the schema fixed one
@@ -148,6 +149,7 @@ export type Node = {
 	max: number?,
 	unit: boolean?,
 	class: string?,
+	descendantOf: Instance?,
 	lengthStorage: Encoding?,
 	lengthOffset: number?,
 	count: number?,
@@ -632,10 +634,33 @@ function lower(descriptor: Descriptor): Node
 		node.pattern = (descriptor :: any).pattern
 
 		return node
-	elseif kind == "vector2" then
-		return { kind = kind, bits = 0, fixedSize = 8, instances = 0 }
-	elseif kind == "vector3" then
-		return { kind = kind, bits = 0, fixedSize = 12, instances = 0, unit = descriptor.unit }
+	elseif kind == "vector2" or kind == "vector3" then
+		--[[
+			A vector is its component schema, `axes` times over. Bare that is `f32` and the old fixed
+			widths; named, everything a number node knows applies per component — a narrowed range
+			takes a smaller storage, a declared minimum is subtracted, a quantisation step divides.
+
+			The component is lowered as a node and carried on `element`, which is what `cloneNode`
+			copies, `Protocol.describe` walks and `Serdes` builds a writer from. Nothing about a
+			vector needs its own machinery once the component is a node.
+		]]
+		local axes = if kind == "vector2" then 2 else 3
+		local component = descriptor.element
+
+		if component then
+			local element = lower(component)
+
+			return {
+				kind = kind,
+				bits = 0,
+				fixedSize = (element.fixedSize :: number) * axes,
+				instances = 0,
+				unit = descriptor.unit,
+				element = element,
+			}
+		end
+
+		return { kind = kind, bits = 0, fixedSize = 4 * axes, instances = 0, unit = descriptor.unit }
 	elseif kind == "color3" then
 		return { kind = kind, bits = 0, fixedSize = 3, instances = 0 }
 	elseif kind == "cframe" then
@@ -646,7 +671,14 @@ function lower(descriptor: Descriptor): Node
 		]]
 		return { kind = kind, bits = 0, fixedSize = 24, instances = 0 }
 	elseif kind == "instance" then
-		return { kind = kind, bits = 0, fixedSize = 0, instances = 1, class = descriptor.class }
+		return {
+			kind = kind,
+			bits = 0,
+			fixedSize = 0,
+			instances = 1,
+			class = descriptor.class,
+			descendantOf = descriptor.descendantOf,
+		}
 	elseif kind == "enum" then
 		local variants = descriptor.variants :: { string }
 		local lookup: { [string]: number } = {}

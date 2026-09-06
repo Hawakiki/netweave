@@ -957,6 +957,43 @@ do
 
 	differs("and a branch renamed moves it too", renamed, narrow)
 
+	--[[ A vector's component schema is a node under `element`, so the walk that already reaches an
+	     array's element reaches this one — and two vectors of the same kind carrying different
+	     components read different bytes for the same three axes. ]]
+	local loose = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ at = t.vector3 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local bounded = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ at = t.vector3(t.i16(-2048, 2048)) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local tighter = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ at = t.vector3(t.i16(-1024, 1024)) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	--[[ The second pair is the one that is load-bearing, and the first would have passed without the
+	     walk: naming a component takes a `vector3` from twelve bytes to six, which is on the layout
+	     header the signature prints before it reaches a node. Two six-byte vectors differing only in
+	     their components' range is what isolates it — measured, by deleting the walk. ]]
+	differs("naming a vector's components moves the hash", bounded, loose)
+	differs("and so does narrowing them further, at the same size", tighter, bounded)
+
 	--[[ The patch layout is derived from `data`, so it cannot move on its own — what it earns is a
 	     cross-check: two peers whose data schemas somehow agreed while their derivations did not
 	     would differ here. Asserted as *presence* in the text rather than as a difference, because

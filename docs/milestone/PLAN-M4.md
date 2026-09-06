@@ -872,6 +872,41 @@ Studio pass.
       which is G4), no union case in `sameFor` (1), and `branches` out of the signature (1).
       `bench/profile` 12,711 and `bench/decode` 20,792, unmoved.
 
+#### The three that need Studio to finish
+
+Written, lowered, hashed and refused under lune; the *wire* half of each needs a `Vector3` or a real
+`Instance` and is asserted in `tests/roblox_runtime.luau`, which is the one file the lune list cannot
+run. **This section is not green until that file has been run in Studio** (§9: the half that cannot
+run under lune is the half that goes red quietly).
+
+- [x] **`t.vector2(component)` / `t.vector3(component)` / `t.unitVector3(component)`.** Bare, a
+      vector is three `f32` and unbounded — a position of `1e38` on an `intent` passes `parse`, and
+      `t.unitVector3` covers directions only. A component schema is how a position says where the map
+      is, and it is a **number node** rather than an encoding name, so a range, a subtracted minimum
+      and a quantisation step all apply per axis for free. `t.vector3(t.i16(-2048, 2048))` is six
+      bytes; `t.unitVector3(t.quantized(-1, 1, 2 / 254))` is three, against twelve.
+- [x] **A quantised direction does not land on the unit sphere**, so the length check widens by
+      `sqrt(3)` half-steps — derived from the component's step, and zero for every encoding that is
+      not quantised, so a bare `t.unitVector3` keeps exactly the tolerance it had. Without it the
+      compact spelling the docstring recommends would be refused by its own reader.
+- [x] **`t.instance(class, { descendantOf })`.** A class says *what* a client handed over and nothing
+      about where it got it; the sidecar admits anything the sender can reference. It takes the
+      container itself rather than a name, because a game declares its schema at startup when
+      `workspace` exists and resolving a path per packet would be a tree walk on the receive path.
+      **Not in the protocol hash** — this is enforcement one endpoint does over its own tree, like a
+      rate limit, and two peers naming their own `workspace` mean the same thing while holding
+      different objects.
+- [x] **`t.player`** — `t.instance("Player")` with the payload type Luau cannot get from a class
+      name. Its docstring says what it does not promise: `IsA("Player")` is still true for someone
+      who left, and where the sender's own identity is the question `ctx.player` is the server's
+      answer.
+- [x] Confirmed by the three mutations lune can run: a vector lowering to one component instead of
+      `axes` of them (3 failures), `descendantOf` accepting a name (2), and `element` out of the
+      signature (1). **That last one failed only on the second of its two pairs**, and the first
+      would have passed without the walk — naming a component takes a `vector3` from twelve bytes to
+      six, which is on the layout header. Two six-byte vectors differing only in their components'
+      range is what isolates it. Same shape as the union's branch pair, found the same way.
+
 ## 7. Acceptance criteria
 
 1. A client joining mid-session receives a snapshot and is correct on the first frame it renders — asserted against a subject whose state changed while that client was absent.

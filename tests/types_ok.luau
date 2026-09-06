@@ -211,4 +211,29 @@ local _moved: number = cost({ tag = "move", value = { x = 1, y = 2 } })
 local _wait: Action = { tag = "wait", value = 3 }
 local _move: Action = { tag = "move", value = { x = 4, y = 5 } }
 
+--[[ A vector's component schema, and the callable type that carries it. `Type<Vector3>` alone does
+     not, so annotating `t.vector3` that way would compile and then refuse the component at the call
+     site — the same shape as `t.Text` above, and the same reason to write it here. ]]
+local _componented: t.Componented<Vector3> = t.vector3
+local _narrowVector: t.Type<Vector3> = _componented(t.i16(-2048, 2048))
+local _flatVector: t.Type<Vector2> = t.vector2(t.i16(-1024, 1024))
+local _direction: t.Type<Vector3> = t.unitVector3(t.quantized(-1, 1, 2 / 254))
+
+--[[ `t.player` is the payload type Luau cannot get from a class name — `t.instance("Player")` is
+     `Type<Instance>`, and `UserId` is what says these are not the same annotation. ]]
+local _player: t.Type<Player> = t.player
+
+local function userIdOf(payload: t.PayloadOf<typeof(t.player)>): number
+	return payload.UserId
+end
+
+local _userId: (Player) -> number = userIdOf
+
+--[[ And the container. Annotated rather than written inline for the reason `TextOptions` is: an
+     unannotated literal is accepted as any table, so a misspelt key would be an option that looks
+     like it passed. This file is analysed and never run, which is why `workspace` can appear in it
+     at all. ]]
+local _where: t.InstanceOptions = { descendantOf = workspace }
+local _contained: t.Type<Instance> = t.instance("BasePart", _where)
+
 return nil

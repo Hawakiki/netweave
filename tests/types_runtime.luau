@@ -304,6 +304,68 @@ rejects("a union as a map key", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- What a vector's components are carried at
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Bare, a vector is three `f32` and **unbounded** — a position of `1e38` on an `intent` passes
+	`parse`, and `t.unitVector3` covers directions only. Naming a component schema is how a position
+	says where the map is, and it narrows the storage while it is at it.
+]]
+local placed = t.vector3(t.i16(-2048, 2048))
+check("a component schema is kept", (placed.element :: any).encoding == "i16")
+check("and the vector is still a vector3", placed.kind == "vector3")
+check("bare stays f32", t.vector3.encoding == "f32" and t.vector3.element == nil)
+check("and the unit flag survives a component", t.unitVector3(t.f32).unit == true)
+
+rejects("a component that is not a netweave type", function()
+	(t.vector3 :: any)(5)
+end)
+
+rejects("a component that is not a number", function()
+	(t.vector3 :: any)(t.string)
+end)
+
+rejects("and one that is optional", function()
+	(t.vector2 :: any)(t.optional(t.u8))
+end)
+
+-- ---------------------------------------------------------------------------------------------
+-- Where an instance came from, not only what it is
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	A class says *what* a client handed over and nothing about where it got it: the sidecar admits
+	anything the sender can reference. `descendantOf` is the container check, and it takes the
+	container itself rather than a name — a game declares its schema at startup, when `workspace`
+	exists, and resolving a path per packet would be a tree walk on the receive path.
+
+	The accepting half needs a real Instance and lives in `tests/roblox_runtime.luau`; what lune can
+	say is what the declaration refuses.
+]]
+check("t.player is an instance of class Player", t.player.kind == "instance" and t.player.class == "Player")
+check("and carries no container by default", t.player.descendantOf == nil)
+check("nor does a bare class", t.instance("Sound").descendantOf == nil)
+
+rejects("options that are not a table", function()
+	(t.instance :: any)("BasePart", "workspace")
+end)
+
+rejects("an unknown option", function()
+	(t.instance :: any)("BasePart", { descendentOf = 1 })
+end)
+
+--[[ A name is the spelling that reads correctly and does nothing: `"workspace"` is a string, and
+     `IsDescendantOf` takes an Instance. ]]
+rejects("a container named as a string", function()
+	(t.instance :: any)("BasePart", { descendantOf = "workspace" })
+end)
+
+rejects("or as anything else that is not an Instance", function()
+	(t.instance :: any)("BasePart", { descendantOf = 5 })
+end)
+
+-- ---------------------------------------------------------------------------------------------
 -- Wire order never comes from table iteration
 -- ---------------------------------------------------------------------------------------------
 

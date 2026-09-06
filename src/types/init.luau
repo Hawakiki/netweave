@@ -79,6 +79,7 @@ export type Kind =
 	.utf8 boolean? -- `string`: the bytes must decode as UTF-8
 	.pattern string? -- `string`: a Lua pattern the whole value must match
 	.class string? -- `instance`: the class an arrival must be, or nil for any
+	.descendantOf Instance? -- `instance`: the container an arrival must be inside
 	.variants { string }? -- `enum`: variant names, sorted. Wire index is the position here
 	.unit boolean? -- `vector3`: the magnitude must be 1
 	.inner Descriptor? -- `optional`
@@ -99,6 +100,7 @@ export type Descriptor = {
 	max: number?,
 	step: number?,
 	class: string?,
+	descendantOf: Instance?,
 	utf8: boolean?,
 	pattern: string?,
 	variants: { string }?,
@@ -139,6 +141,7 @@ export type Type<T> = {
 	max: number?,
 	step: number?,
 	class: string?,
+	descendantOf: Instance?,
 	utf8: boolean?,
 	pattern: string?,
 	variants: { string }?,
@@ -358,14 +361,48 @@ export type Text = typeof(setmetatable(
 ))
 
 --[=[
+	@type Componented<T> Type<T>
+	@within Types
+
+	A vector type, callable with the schema its **components** are carried at.
+
+	```lua
+	t.vector3                                   -- three f32, twelve bytes
+	t.vector3(t.i16(-2048, 2048))               -- three u16, six
+	t.unitVector3(t.quantized(-1, 1, 2 / 254))  -- three u8, three
+	```
+]=]
+export type Componented<T> = typeof(setmetatable(
+	{} :: Type<T>,
+	{} :: { __call: (self: any, component: Type<number>) -> Type<T> }
+))
+
+--[=[
+	@interface InstanceOptions
+	@within Types
+	.descendantOf Instance? -- the container an arrival must be inside
+
+	What [Types.instance] accepts after its class name.
+]=]
+export type InstanceOptions = {
+	descendantOf: Instance?,
+}
+
+--[=[
 	@type Classed Type<Instance>
 	@within Types
 
-	An instance type, callable with a class name to restrict what may arrive.
+	An instance type, callable with a class name to restrict what may arrive — and with a container
+	to restrict where it may have come from.
+
+	```lua
+	t.instance("Sound")
+	t.instance("BasePart", { descendantOf = workspace })
+	```
 ]=]
 export type Classed = typeof(setmetatable(
 	{} :: Type<Instance>,
-	{} :: { __call: (self: any, className: string) -> Type<Instance> }
+	{} :: { __call: (self: any, className: string, options: InstanceOptions?) -> Type<Instance> }
 ))
 
 --[[
@@ -820,34 +857,102 @@ t.buffer = ranged({
 	max = MAX_LENGTH,
 }, "buffer") :: Ranged<buffer>
 
---[=[
-	@prop vector2 Type<Vector2>
-	@within Types
-	Two `f32` components.
-]=]
-t.vector2 = descriptor({ kind = "vector2" :: Kind, encoding = "f32" :: Encoding }) :: Type<Vector2>
+--[[
+	A vector, callable with the schema its components are carried at.
+
+	Bare, a vector is three `f32` and **unbounded**: a position of `1e38` on an `intent` passes
+	`parse`, and `t.unitVector3` covers directions only (M4 report). Naming a component schema is
+	how a position says where the map is, and it narrows the storage at the same time, because
+	everything a number type knows is reused per component — a range, a declared minimum subtracted,
+	a quantisation step.
+
+	The component has to be a number and cannot be optional: a vector with two components is not a
+	vector, and there is no bit to spend saying so — a vector opens no scope of its own.
+]]
+local function vectored(base: { [string]: any }, label: string, axes: number): any
+	local self = table.clone(base)
+
+	local callable = setmetatable(
+		self,
+		table.freeze({
+			__call = function(_self: any, component: any): any
+				--[[ The kind test rather than `isType`, which is defined further down and is a duck
+				     check anyway: what a component has to be is a *number* schema, and asking that
+				     directly is both narrower and available here. ]]
+				check(
+					type(component) == "table",
+					`{label} needs a netweave type for its components, got {typeof(component)}`
+				)
+				check(
+					component.kind == "number",
+					`{label} carries {axes} numbers, and its component schema is a `
+						.. `{tostring(component.kind)}. Use t.f32, a narrowed integer like `
+						.. `t.i16(-2048, 2048), or t.quantized`
+				)
+
+				local constrained = table.clone(base)
+				constrained.element = component
+				constrained.encoding = nil
+
+				return descriptor(constrained)
+			end,
+		})
+	)
+
+	return table.freeze(callable)
+end
 
 --[=[
-	@prop vector3 Type<Vector3>
+	@prop vector2 Componented<Vector2>
 	@within Types
-	Three `f32` components.
+
+	Two `f32` components, or two of whatever you name: `t.vector2(t.i16(-1024, 1024))` is four bytes.
 ]=]
-t.vector3 = descriptor({ kind = "vector3" :: Kind, encoding = "f32" :: Encoding }) :: Type<Vector3>
+t.vector2 =
+	vectored({ kind = "vector2" :: Kind, encoding = "f32" :: Encoding }, "vector2", 2) :: Componented<Vector2>
 
 --[=[
-	@prop unitVector3 Type<Vector3>
+	@prop vector3 Componented<Vector3>
+	@within Types
+
+	Three `f32` components — twelve bytes, and **unbounded**.
+
+	```lua
+	position = t.vector3(t.i16(-2048, 2048)),   -- six bytes, and off the map is refused
+	```
+
+	A component schema is the difference between "a Vector3 arrived" and "a Vector3 inside the world
+	arrived". Bare, `1e38` on an `intent` is a legal position; naming the range makes it a refusal at
+	`parse` with the bounds in the message, and pays for itself in bytes.
+]=]
+t.vector3 =
+	vectored({ kind = "vector3" :: Kind, encoding = "f32" :: Encoding }, "vector3", 3) :: Componented<Vector3>
+
+--[=[
+	@prop unitVector3 Componented<Vector3>
 	@within Types
 
 	A direction: a `Vector3` validated to unit length on arrival.
 
 	This is the check a shooter would otherwise write by hand in every handler, and forgetting it
 	once is how a client sends a 10,000-stud "direction".
+
+	```lua
+	direction = t.unitVector3(t.quantized(-1, 1, 2 / 254)),   -- three bytes instead of twelve
+	```
+
+	:::note
+	A quantised direction does not land exactly on the unit sphere, so the length check widens by
+	what the step can move it — `sqrt(3)` half-steps, derived rather than guessed. Naming a component
+	coarse enough to matter is therefore a wider tolerance rather than a refusal, and the coarser the
+	step the less "unit" promises.
+	:::
 ]=]
-t.unitVector3 = descriptor({
+t.unitVector3 = vectored({
 	kind = "vector3" :: Kind,
 	encoding = "f32" :: Encoding,
 	unit = true,
-}) :: Type<Vector3>
+}, "unitVector3", 3) :: Componented<Vector3>
 
 --[=[
 	@prop cframe Type<CFrame>
@@ -882,11 +987,42 @@ t.instance = (function(): Classed
 	local callable = setmetatable(
 		self,
 		table.freeze({
-			__call = function(_self: any, className: string): Type<Instance>
+			__call = function(_self: any, className: string, options: any): Type<Instance>
 				check(type(className) == "string", "instance class must be a string")
 
 				local constrained = table.clone(base)
 				constrained.class = className
+
+				if options ~= nil then
+					check(
+						type(options) == "table",
+						`t.instance's options come as a table: t.instance("BasePart", `
+							.. `\{ descendantOf = workspace \}). Got {typeof(options)}`
+					)
+
+					for key in options do
+						check(
+							key == "descendantOf",
+							`t.instance has no option \`{tostring(key)}\`. The one is descendantOf — `
+								.. `check the spelling, because an option that is ignored looks exactly `
+								.. `like one that passed`
+						)
+					end
+
+					local root = options.descendantOf
+
+					if root ~= nil then
+						check(
+							typeof(root) == "Instance",
+							`t.instance's \`descendantOf\` takes the container itself, not a name: `
+								.. `t.instance("BasePart", \{ descendantOf = workspace \}). Got `
+								.. `{typeof(root)}`
+						)
+
+						constrained.descendantOf = root
+					end
+				end
+
 				return descriptor(constrained)
 			end,
 		})
@@ -894,6 +1030,26 @@ t.instance = (function(): Classed
 
 	return (table.freeze(callable) :: any) :: Classed
 end)()
+
+--[=[
+	@prop player Type<Player>
+	@within Types
+
+	A `Player`, which is [Types.instance] with the payload type Luau cannot get from a class name.
+
+	```lua
+	target = t.player,
+	```
+
+	:::caution
+	**A `Player` object that arrives is not necessarily a player who is here.** `IsA("Player")` is
+	still true for someone who left the instant before the packet was written, and the reference the
+	sender used keeps it alive. Where the sender's own identity is what you need, `ctx.player` is the
+	server's answer and cannot be chosen by anybody; this is for naming *another* player, and what
+	makes that name current is the roster, not the type.
+	:::
+]=]
+t.player = descriptor({ kind = "instance" :: Kind, class = "Player" }) :: Type<Player>
 
 local function isType(value: any): boolean
 	return type(value) == "table" and type(value.kind) == "string"
