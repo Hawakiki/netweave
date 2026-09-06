@@ -841,6 +841,36 @@ Studio pass.
       every byte that is not one, so the two guards covered for each other. That is M3's `maxBytes`
       incident (§9) in a fourth place, and it is why the mutations are run rather than reasoned
       about. The assertion now goes through a `utf8`-only schema.
+- [x] **`Ir.cloneNode` copied a hand-kept field list, in the one place nothing tests it.** `Ir.patch`
+      derives a second layout and copies everything that is not a struct whole; a property added to
+      `Node` and not added there compiles, passes every round trip on the *state* side, and produces
+      a patch layout that reads a different value than the state layout wrote. All four properties
+      this phase added were missing — measured, a `t.quantized` field inside `nw.replicate` sent
+      `-0.5` and delivered `-1`. It is `table.clone` now, so the list inverts to the four bit
+      *positions*, which do not grow.
+- [x] **`t.union({ tag = schema, … })`** — the tagged union `WIRE-FORMAT.md` §5 specified two
+      milestones before anything implemented it, which is where the report found it. The payload is
+      `{ tag: "move", value: … } | …`, so comparing `tag` against a literal narrows `value` with it;
+      the pattern it replaces — one optional field per case — cannot say *exactly one*, and lets a
+      peer set two cases at once or none.
+- [x] **The branches fork the bit budget**, as the document always said. The tag is `ceil(log2 n)`
+      bits in the enclosing bitfield and every branch is numbered from the same slot after it, so a
+      union of two structs carrying five flags each is `1 + 5` bits — one byte — where summing is
+      `1 + 10`, which is two. Zap sums (`RESEARCH §3.9-Y`). Bytes cannot fork, so a static framing
+      survives only where every branch is the same fixed size, and the ceiling is the widest branch.
+- [x] `Delta` gets its own comparison for a union: two branches share no fields, so comparing them
+      the way a struct is compared reads `value.x` off a branch that has no `x`, finds nil on both
+      sides, and calls two different actions the same.
+- [x] Both branch *names* and each branch's *schema* reach the protocol hash. **The obvious test for
+      the second passed for the wrong reason** — a widened branch changes the union's own `fixedSize`
+      and `maxSize`, which are on the layout header the signature prints before it walks a node, so
+      that pair moved the hash with the branch walk deleted. The pair is `t.u8` against `t.i8` now:
+      same bits, same size, same ceiling, and only the branch's declared range differs.
+- [x] Confirmed by five mutations: branches summing their bits (5 failures across two files),
+      branches numbered after one another (raises inside `Ir`, which is the loud half), an
+      out-of-range tag not refused (the codec calls a nil reader — wire data reaching a Luau error,
+      which is G4), no union case in `sameFor` (1), and `branches` out of the signature (1).
+      `bench/profile` 12,711 and `bench/decode` 20,792, unmoved.
 
 ## 7. Acceptance criteria
 

@@ -125,6 +125,7 @@ export type Field = {
 	.key Node?
 	.value Node?
 	.fields { Field }?
+	.branches { Field }? -- `union`: one per branch, in wire order
 	.template { [string]: boolean }? -- cloned on decode so the result table never rehashes
 	.chunkIndex number? -- which bitfield chunk this node's flag lives in
 	.mask number? -- its bit within that chunk
@@ -158,6 +159,7 @@ export type Node = {
 	key: Node?,
 	value: Node?,
 	fields: { Field }?,
+	branches: { Field }?,
 	template: { [string]: boolean }?,
 	chunkIndex: number?,
 	mask: number?,
@@ -661,6 +663,67 @@ function lower(descriptor: Descriptor): Node
 			variants = variants,
 			lookup = lookup,
 		}
+	elseif kind == "union" then
+		--[[
+			A tag, and then whichever branch it names.
+
+			**The branches fork the bit budget rather than summing it.** Only one branch is ever
+			present, so its flags may occupy the same bits another branch's would — `assignBits`
+			numbers every branch from the same base and the node reserves the widest. A union of two
+			structs each carrying three flags is `1 + 3` bits, not `1 + 6`. Zap sums, so its variants
+			consume separate bits even though only one can be there (`RESEARCH §3.9-Y`,
+			`WIRE-FORMAT.md` §5).
+
+			Bytes cannot fork the same way, because a byte offset is a position in a run rather than
+			a slot in a bitfield. So `fixedSize` survives only when every branch agrees on it — which
+			is a real case (`t.union({ a = t.u16, b = t.i16 })` is two bytes whichever arrives) and
+			not the common one.
+		]]
+		local variants = descriptor.variants :: { string }
+		local source = descriptor.branches :: { [string]: Descriptor }
+
+		local lookup: { [string]: number } = {}
+		local branches: { Field } = sized(#variants)
+
+		local widest = 0
+		local fixedSize: number? = nil
+		local instances: number? = nil
+		local sameSize = true
+		local sameInstances = true
+
+		for index, name in variants do
+			local branch = lower(source[name])
+
+			lookup[name] = index
+			branches[index] = { name = name, node = branch }
+
+			if branch.bits > widest then
+				widest = branch.bits
+			end
+
+			if index == 1 then
+				fixedSize = branch.fixedSize
+				instances = branch.instances
+			else
+				if fixedSize ~= branch.fixedSize then
+					sameSize = false
+				end
+
+				if instances ~= branch.instances then
+					sameInstances = false
+				end
+			end
+		end
+
+		return {
+			kind = kind,
+			bits = bitsToIndex(#variants) + widest,
+			fixedSize = if sameSize then fixedSize else nil,
+			instances = if sameInstances then instances else nil,
+			variants = variants,
+			lookup = lookup,
+			branches = branches,
+		}
 	elseif kind == "optional" then
 		local inner = lower(descriptor.inner :: Descriptor)
 
@@ -725,6 +788,44 @@ local function assignBits(node: Node, scope: Scope, next: number): number
 		node.tagChunks = chunks
 		node.tagMasks = masks
 		return next
+	elseif kind == "union" then
+		local variants = node.variants :: { string }
+		local tagBits = bitsToIndex(#variants)
+
+		local chunks: { number } = sized(tagBits)
+		local masks: { number } = sized(tagBits)
+
+		for index = 1, tagBits do
+			chunks[index], masks[index] = locate(scope, next)
+			next += 1
+		end
+
+		node.tagChunks = chunks
+		node.tagMasks = masks
+
+		--[[
+			**Every branch numbered from the same slot**, which is the fork `lowerNumber`'s sibling
+			above reserved room for. Only one branch is ever present, so branch A's first flag and
+			branch B's first flag are the same bit — and the node returns the widest of them so the
+			enclosing scope carries on after the longest branch rather than after the last one.
+
+			A branch with no flags is skipped for the same reason a field with none is: `assignBits`
+			has nothing to number and would return `base` anyway.
+		]]
+		local base = next
+		local widest = base
+
+		for _, branch in node.branches :: { Field } do
+			if branch.node.bits > 0 then
+				local after = assignBits(branch.node, scope, base)
+
+				if after > widest then
+					widest = after
+				end
+			end
+		end
+
+		return widest
 	elseif kind == "optional" then
 		node.chunkIndex, node.mask = locate(scope, next)
 		next += 1
@@ -796,6 +897,12 @@ local function assignNestedScopes(node: Node)
 	elseif kind == "struct" then
 		for _, field in node.fields :: { Field } do
 			assignNestedScopes(field.node)
+		end
+	elseif kind == "union" then
+		--[[ A branch does not open a scope of its own — its flags fork into the enclosing one — but
+		     a branch may *contain* a dynamic array or a map, and those do. ]]
+		for _, branch in node.branches :: { Field } do
+			assignNestedScopes(branch.node)
 		end
 	elseif kind == "optional" then
 		assignNestedScopes(node.inner :: Node)
@@ -877,6 +984,20 @@ local function ceiling(node: Node): number
 		end
 
 		body = total
+	elseif kind == "union" then
+		--[[ The widest branch, not their sum. One arrives; the ceiling is the largest one that can.
+		     The tag itself is bits in the enclosing scope and is counted there. ]]
+		local widest = 0
+
+		for _, branch in node.branches :: { Field } do
+			local size = ceiling(branch.node)
+
+			if size > widest then
+				widest = size
+			end
+		end
+
+		body = widest
 	elseif kind == "optional" then
 		--[[ Presence is a bit in the enclosing scope; the inner value costs its own ceiling only
 		     when it is there, and the ceiling is the worst case. ]]
@@ -1012,6 +1133,16 @@ local function cloneNode(node: Node): Node
 		end
 
 		copy.fields = fields
+	end
+
+	if node.branches then
+		local branches: { Field } = {}
+
+		for index, branch in node.branches :: { Field } do
+			branches[index] = { name = branch.name, node = cloneNode(branch.node) }
+		end
+
+		copy.branches = branches
 	end
 
 	return copy

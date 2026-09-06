@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 10
+-- netweave:expect 11
 
 --[[
 	Every assignment here must be rejected. `lune run analyze` fails if the count on line 1 stops
@@ -55,7 +55,8 @@ local _notAType = t.struct({ id = 5 })
 	when the reduction is gone these two stop erroring and the count drops to 8.
 
 	9 is a payload that does not match the schema. 10 is the message the docstring promises for
-	something that is not a netweave type at all.
+	something that is not a netweave type at all. 11 is the one below, and it is written beside its
+	own case because it belongs to `t.union` rather than to `PayloadOf`.
 ]]
 --[[ Underscored because `typeof` in a type position is a use selene does not scan, and a warning
      there fails `selene src tests`. It is declared for the analyzer, which is what the prefix means
@@ -64,5 +65,14 @@ local _shot = t.struct({ seq = t.u16 })
 
 local _mistypedPayload: t.PayloadOf<typeof(_shot)> = { seq = "not a number" }
 type _notASchema = t.PayloadOf<number>
+
+--[[
+	11. **A union branch's value has to match its tag.** The pattern this replaces — one optional
+	field per case — cannot say that: `{ move = { x = 1 }, attack = { target = 2 } }` is a legal
+	value of it, and so is `{}`. Here the tag selects the component and the value has to be that
+	component's.
+]]
+local _action = t.union({ move = t.struct({ x = t.u8 }), wait = t.u8 })
+local _crossed: t.PayloadOf<typeof(_action)> = { tag = "wait", value = { x = 1 } }
 
 return nil

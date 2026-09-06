@@ -157,6 +157,36 @@ local function sameFor(node: Node): (a: any, b: any) -> boolean
 
 			return true
 		end
+	elseif kind == "union" then
+		local branches = node.branches :: { Field }
+		local lookup = node.lookup :: { [string]: number }
+		local sames: { (a: any, b: any) -> boolean } = sized(#branches)
+
+		for index, branch in branches do
+			sames[index] = sameFor(branch.node)
+		end
+
+		return function(a: any, b: any): boolean
+			if a == b then
+				return true
+			end
+
+			--[[ A different branch is a different value whatever is inside it, and comparing across
+			     branches would be comparing two shapes that share no fields. ]]
+			if a == nil or b == nil or a.tag ~= b.tag then
+				return false
+			end
+
+			--[[ A tag neither branch names cannot be compared, and "changed" is the safe answer: the
+			     writer refuses it a moment later and says which value it was. ]]
+			local index = lookup[a.tag]
+
+			if index == nil then
+				return false
+			end
+
+			return sames[index](a.value, b.value)
+		end
 	elseif kind == "array" then
 		local sameElement = sameFor(node.element :: Node)
 

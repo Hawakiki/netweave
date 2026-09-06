@@ -142,6 +142,21 @@ local function describe(node: Ir.Node, out: { string })
 		describe(node.element :: Ir.Node, out)
 	end
 
+	--[[ A union's branch *names* come through `variants` above, which is the tag order. These are
+	     what each name carries, and two builds that agree on the names and disagree on one branch's
+	     schema is the same failure as two builds disagreeing on a struct field. ]]
+	if node.branches then
+		table.insert(out, "branches[")
+
+		for _, branch in node.branches :: { Ir.Field } do
+			table.insert(out, `{branch.name}:`)
+			describe(branch.node, out)
+			table.insert(out, ";")
+		end
+
+		table.insert(out, "]")
+	end
+
 	--[[ A fixed-length array with per-position flags lowers one node per position, and those nodes
 	     can differ from one another — so each is written, not just the first. ]]
 	if node.elements then

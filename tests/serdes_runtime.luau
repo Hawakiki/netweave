@@ -16,6 +16,7 @@
 ]]
 
 local Buffer = require("../src/codec/Buffer")
+local Ir = require("../src/codec/Ir")
 local Serdes = require("../src/codec/Serdes")
 local harness = require("./harness")
 local t = require("../src/types")
@@ -1668,6 +1669,110 @@ do
 
 	check("a plain string takes the same bytes", unrefused == nil)
 	equals("and hands them over", through, "\xff\xfe")
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- One of several shapes, and the wire says which
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ Both branches, so neither is the one that happens to work. Sorted names put `a` at tag 0 and
+	     `b` at tag 1, and the two carry different widths on purpose — a union whose branches are the
+	     same size cannot tell "wrote the right branch" from "wrote the only length". ]]
+	local pair = t.union({ a = t.u8, b = t.u16 })
+
+	trip("the first branch", pair, { tag = "a", value = 7 }, 2)
+	trip("the second", pair, { tag = "b", value = 40000 }, 3)
+
+	--[[ Three branches is two tag bits, and it is the arity where the tag has room the schema does
+	     not use — the case the reader has to refuse below. ]]
+	local three = t.union({ a = t.u8, b = t.u8, c = t.u8 })
+
+	trip("one of three", three, { tag = "c", value = 5 }, 2)
+
+	--[[ A branch that is not a scalar, and one nested in a struct beside ordinary fields. ]]
+	trip(
+		"a branch that is a struct",
+		t.union({ move = t.struct({ x = t.u8, y = t.u8 }), wait = t.u8 }),
+		{ tag = "move", value = { x = 3, y = 4 } },
+		3
+	)
+
+	trip(
+		"a union inside a struct",
+		t.struct({ n = t.u8, action = t.union({ a = t.u8, b = t.u16 }) }),
+		{ n = 9, action = { tag = "b", value = 500 } },
+		4
+	)
+
+	refuses("a tag no branch names", pair, { tag = "nope", value = 1 })
+	refuses("a value that is not a tagged pair", pair, 7)
+	refuses("and a branch given the wrong kind of value", pair, { tag = "b", value = "text" })
+end
+
+do
+	--[[
+		**The fork, in bytes.**
+
+		Only one branch is ever present, so branch A's flags and branch B's flags may occupy the same
+		bits. Two branches of five booleans each fork to `1 + 5` bits — one byte — where summing them
+		is `1 + 10`, which is two. Zap sums, so its variants consume separate bits even though only
+		one can be there (`RESEARCH §3.9-Y`).
+
+		Five is the width that makes the difference a *byte* rather than a bit. Three would fork to 4
+		and sum to 7, and both round to one byte, so the assertion would pass either way.
+	]]
+	local forked = t.union({
+		a = t.struct({ p = t.boolean, q = t.boolean, r = t.boolean, s = t.boolean, u = t.boolean }),
+		b = t.struct({ v = t.boolean, w = t.boolean, x = t.boolean, y = t.boolean, z = t.boolean }),
+	})
+
+	local layout = Ir.lower(forked)
+
+	equals("a tag bit plus the widest branch, not the sum", layout.root.bits, 6)
+
+	trip(
+		"and five flags and a tag are one byte",
+		forked,
+		{ tag = "b", value = { v = true, w = false, x = true, y = false, z = true } },
+		1
+	)
+
+	--[[ The other branch through the same bits, because a fork that numbered only the first branch
+	     would pass everything above. ]]
+	trip(
+		"the other branch reads the same bits",
+		forked,
+		{ tag = "a", value = { p = false, q = true, r = true, s = false, u = true } },
+		1
+	)
+end
+
+do
+	--[[ The tag has room the schema does not use whenever the branch count is not a power of two:
+	     three branches are two bits and a peer can put 3 in them. Refused rather than raised, and
+	     the packet behind it still decodes. ]]
+	local three = Serdes.fromSchema(t.union({ a = t.u8, b = t.u8, c = t.u8 }))
+
+	local honest = buffer.create(2)
+	buffer.writeu8(honest, 0, 2)
+	buffer.writeu8(honest, 1, 5)
+
+	local named, allowed = decode(three, honest)
+
+	check(`tag 2 names the third branch: {tostring(allowed)}`, allowed == nil)
+	check("and carries its value", named ~= nil and named.tag == "c" and named.value == 5)
+
+	--[[ Through `rejects` rather than by hand, because what has to be asserted is all three of its
+	     clauses at once: the decode did not **raise**, it reported, and it handed nothing up. Without
+	     the refusal the tag indexes past the branch list and the codec calls a nil reader — wire data
+	     reaching a Luau error, which is G4. ]]
+	rejects("a tag past the last branch", t.union({ a = t.u8, b = t.u8, c = t.u8 }), bytes(3, 5))
+
+	local after, again = decode(three, honest)
+
+	check("while the next packet still decodes", again == nil)
+	check("into the branch it names", after ~= nil and after.tag == "c")
 end
 
 -- ---------------------------------------------------------------------------------------------

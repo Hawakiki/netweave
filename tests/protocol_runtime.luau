@@ -906,6 +906,57 @@ do
 
 	differs("two steps in the same byte and the same bounds hash differently", fine, coarse)
 
+	--[[
+		**A union's branches, which the walk over `variants` alone cannot see.**
+
+		The branch *names* reach the signature through `variants`, because that is the tag order. What
+		each name carries is a second layer, and two builds agreeing on the names while disagreeing on
+		one branch's schema is the same failure as two builds disagreeing on a struct field — with the
+		tag reading correctly and the bytes under it read as something else.
+	]]
+	--[[
+		The pair is `u8` against `i8` rather than `u8` against `u16`, and the difference is the point.
+
+		A widened branch changes the union's own `fixedSize` and `maxSize`, which are on the layout
+		header the signature prints before it walks a single node — so that pair moves the hash
+		whether or not anything reads `branches`, and asserting it would have been asserting nothing.
+		Measured: with the branch walk deleted, the widened pair still passed.
+
+		`t.i8` and `t.u8` both narrow to one unsigned byte. Same bits, same fixed size, same ceiling;
+		what differs is the branch's declared range, which is reachable only through the branch.
+	]]
+	local narrow = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ act = t.union({ move = t.u8, wait = t.u8 }) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local signed = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ act = t.union({ move = t.i8, wait = t.u8 }) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("one branch's range moves the hash, at the same size", signed, narrow)
+
+	--[[ And a branch renamed, which moves the tag order under every other branch. ]]
+	local renamed = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ act = t.union({ move = t.u8, zzz = t.u8 }) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("and a branch renamed moves it too", renamed, narrow)
+
 	--[[ The patch layout is derived from `data`, so it cannot move on its own — what it earns is a
 	     cross-check: two peers whose data schemas somehow agreed while their derivations did not
 	     would differ here. Asserted as *presence* in the text rather than as a difference, because

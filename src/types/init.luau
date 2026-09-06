@@ -46,7 +46,7 @@
 export type Encoding = "u8" | "u16" | "u32" | "u53" | "i8" | "i16" | "i32" | "i53" | "f32" | "f64"
 
 --[=[
-	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "optional" | "array" | "map" | "struct"
+	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "optional" | "array" | "map" | "struct" | "union"
 	@within Types
 
 	What a descriptor describes. The codec dispatches on this.
@@ -66,6 +66,7 @@ export type Kind =
 	| "array"
 	| "map"
 	| "struct"
+	| "union"
 
 --[=[
 	@interface Descriptor
@@ -85,6 +86,7 @@ export type Kind =
 	.key Descriptor? -- `map`
 	.value Descriptor? -- `map`
 	.fields { [string]: Descriptor }? -- `struct`
+	.branches { [string]: Descriptor }? -- `union`: branch name to schema
 	.order { string }? -- `struct`: field names, sorted. Wire order is the order here
 
 	An untyped type. Most fields are unused by most kinds; the codec reads only the ones its
@@ -106,6 +108,7 @@ export type Descriptor = {
 	key: Descriptor?,
 	value: Descriptor?,
 	fields: { [string]: Descriptor }?,
+	branches: { [string]: Descriptor }?,
 	order: { string }?,
 }
 
@@ -145,6 +148,7 @@ export type Type<T> = {
 	key: Descriptor?,
 	value: Descriptor?,
 	fields: { [string]: Descriptor }?,
+	branches: { [string]: Descriptor }?,
 	order: { string }?,
 	__payload: T,
 }
@@ -241,6 +245,55 @@ end
 	The variants have to be written as table *keys* because Luau widens `{"a", "b"}` to `{string}`,
 	losing exactly the information this exists to preserve.
 ]]
+--[=[
+	@type UnionPayload<B> B
+	@within Types
+
+	Turns a table of branch schemas into a **discriminated union** of `{ tag, value }` pairs. Applied
+	by [Types.union].
+
+	`t.union({ move = M, attack = A })` carries
+	`{ tag: "move", value: MovePayload } | { tag: "attack", value: AttackPayload }`, so
+	`if action.tag == "move" then` narrows `action.value` to the move payload and nothing else.
+]=]
+--[[
+	The `tag`/`value` shape rather than `{ move: M? } | { attack: A? }`, and the reason is narrowing
+	rather than taste. Luau narrows a union of tables on a **singleton property**, so comparing `tag`
+	against a literal selects one component and its `value` with it. A union of tables distinguished
+	by which optional field is present narrows on `if action.move then`, which leaves the other
+	branches' fields readable as `nil` — the reader can still write `action.attack` and get no error,
+	which is the whole failure the tag exists to prevent.
+]]
+export type function UnionPayload(branches)
+	local result = nil
+
+	for key, property in branches:properties() do
+		local branch = property.read
+
+		if not branch or not branch:is("table") then
+			error("a union branch is not a netweave type")
+		end
+
+		local payload = branch:readproperty(types.singleton("__payload"))
+
+		if not payload then
+			error("a union branch is not a netweave type")
+		end
+
+		local case = types.newtable()
+		case:setproperty(types.singleton("tag"), key)
+		case:setproperty(types.singleton("value"), payload)
+
+		result = if result then types.unionof(result, case) else case
+	end
+
+	if not result then
+		error("a union needs at least one branch")
+	end
+
+	return result
+end
+
 export type function EnumPayload(variants)
 	local result = nil
 
@@ -1051,6 +1104,71 @@ function t.struct<F>(fields: F): Type<StructPayload<F>>
 		kind = "struct" :: Kind,
 		fields = fields :: any,
 		order = order,
+	})
+end
+
+--[=[
+	@within Types
+	@function union
+	@param branches B -- branch name to schema
+	@return Type<UnionPayload<B>>
+
+	**One of several shapes, and the wire says which.**
+
+	```lua
+	local Action = t.union({
+		move = t.struct({ x = t.u8, y = t.u8 }),
+		attack = t.struct({ target = t.u16 }),
+		wait = t.u8,
+	})
+
+	action:listen(function(ctx, value)
+		if value.tag == "move" then
+			print(value.value.x)     -- narrowed to the move branch
+		end
+	end)
+	```
+
+	The payload is `{ tag: "move", value: … } | { tag: "attack", value: … }`, so comparing `tag`
+	against a literal narrows `value` with it.
+
+	Two branches cost **one bit**, three or four cost two, and only the chosen branch's bytes are
+	written. Branches fork the bit budget rather than summing it: a union of two structs each
+	carrying three flags costs `1 + 3` bits, not `1 + 6` — Zap sums, so its variants consume separate
+	bits even though only one can ever be present (`RESEARCH §3.9-Y`, `WIRE-FORMAT.md` §5).
+
+	:::caution
+	**This is what the "one optional field per case" pattern was standing in for**, and the
+	difference is that the pattern cannot say *exactly one*. A struct of optionals lets a peer set
+	two cases at once, or none, and every handler that reads it has to check for both — which is a
+	check that gets written once and forgotten twice.
+	:::
+
+	:::note
+	Adding, removing or renaming a branch changes the wire and the protocol hash, the same as adding
+	an enum variant: the tag is a **position**, so a branch inserted in the middle renumbers the ones
+	after it. Both peers redeploy together, which the handshake enforces rather than hopes for.
+	:::
+]=]
+--[[
+	Branches are encoded in sorted name order for the same reason struct fields and enum variants
+	are: both peers evaluate the same literal, and "hash order usually agrees" is exactly how
+	ByteNet's id assignment behaves.
+]]
+function t.union<B>(branches: B): Type<UnionPayload<B>>
+	check(type(branches) == "table", "union branches must be a table")
+
+	local names = sortedKeys(branches :: any)
+	check(#names > 0, "a union needs at least one branch")
+
+	for _, name in names do
+		check(isType((branches :: any)[name]), `union branch "{name}" is not a netweave type`)
+	end
+
+	return descriptor({
+		kind = "union" :: Kind,
+		variants = names,
+		branches = branches :: any,
 	})
 end
 

@@ -275,6 +275,35 @@ rejects("and on a buffer", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- One of several shapes
+-- ---------------------------------------------------------------------------------------------
+
+local action = t.union({ move = t.struct({ x = t.u8 }), attack = t.u16, wait = t.u8 })
+
+--[[ Sorted, because the tag is a **position** and both peers have to number the branches the same
+     way — the rule that already covers struct fields, enum variants and channel ids. ]]
+check("branch order is sorted", table.concat(action.variants :: { string }, ",") == "attack,move,wait")
+check("and the branches are kept", (action.branches :: any).attack.encoding == "u16")
+
+rejects("a branch that is not a netweave type", function()
+	invalid.union({ move = 5 })
+end)
+
+rejects("an empty union", function()
+	invalid.union({})
+end)
+
+rejects("branches that are not a table", function()
+	invalid.union("move")
+end)
+
+--[[ A union is a fresh table on decode, so two entries the sender wrote with equal keys arrive as
+     two distinct ones — the same reason a struct, an array and a map are refused as map keys. ]]
+rejects("a union as a map key", function()
+	invalid.map(action, t.u8)
+end)
+
+-- ---------------------------------------------------------------------------------------------
 -- Wire order never comes from table iteration
 -- ---------------------------------------------------------------------------------------------
 

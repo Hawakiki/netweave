@@ -78,6 +78,8 @@ local UNCOVERED: { [string]: string } = {
 	["t.Kind"] = "the discriminant of Descriptor, internal for the same reason.",
 	["t.StructPayload"] = "reached through t.struct's signature rather than written.",
 	["t.EnumPayload"] = "reached through t.enum's signature rather than written.",
+	["t.UnionPayload"] = "reached through t.union's signature rather than written; a game names it "
+		.. "with t.PayloadOf, which tests/types_ok.luau writes on both sides of a channel.",
 }
 
 -- ---------------------------------------------------------------------------------------------
