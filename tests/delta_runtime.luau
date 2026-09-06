@@ -128,6 +128,14 @@ local function valueOf(descriptor: any, variant: number): any
 		end
 
 		return out
+	elseif kind == "union" then
+		--[[ The first branch against the last, so a pair differs by *which branch* as well as by
+		     what is in it — a union whose two sides always take the same branch would not exercise
+		     the tag at all. ]]
+		local variants = descriptor.variants
+		local name = variants[if variant == 1 then 1 else #variants]
+
+		return { tag = name, value = valueOf(descriptor.branches[name], variant) }
 	end
 
 	return nil
@@ -189,6 +197,23 @@ do
 			schema = t.struct({ n = t.u8, list = t.array(t.boolean, 0, 12) }),
 		},
 		{ name = "a fixed array of booleans", schema = t.array(t.boolean, 8, 8) },
+
+		--[[ A union is replaced whole by the derivation — `patchNode` recurses into structs and
+		     wraps everything else in an optional — so what these check is that the whole value
+		     survives the trip, tag included, through both the branch that carries flags and the one
+		     that carries only bytes. ]]
+		{ name = "a union of scalars", schema = t.union({ a = t.u8, b = t.u16 }) },
+		{
+			name = "a union of structs carrying flags",
+			schema = t.union({
+				a = t.struct({ f = t.boolean, x = t.u8 }),
+				b = t.struct({ g = t.boolean, y = t.u16 }),
+			}),
+		},
+		{
+			name = "a struct holding a union",
+			schema = t.struct({ n = t.u8, act = t.union({ a = t.u8, b = t.u16 }) }),
+		},
 
 		--[[ Not in the ceiling list, and the reason patches exist: a struct deep enough that a
 		     nested bit has to mean "something below moved". ]]
@@ -495,6 +520,63 @@ do
 
 	local _, missing = nested.apply(nil)
 	check("a sub-struct nothing carried is refused too", missing ~= nil)
+
+	Buffer.load(nil)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- What "the same" means for a union
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		The property above shows a changed union arrives. What it cannot show is the other half: that
+		an **unchanged** one writes nothing, which is the whole economy of a patch and the one thing a
+		diff can get wrong while still round-tripping perfectly.
+
+		A union needs its own comparison because two branches share no fields: comparing them the way
+		a struct is compared would read `value.x` off a branch that has no `x`, find nil on both
+		sides, and call two different actions the same.
+	]]
+	local delta = Delta.build(Ir.lower(t.struct({
+		n = t.u8,
+		act = t.union({ move = t.struct({ x = t.u8, y = t.u8 }), wait = t.u8 }),
+	})))
+
+	local base = { n = 1, act = { tag = "move", value = { x = 1, y = 2 } } }
+
+	Buffer.take()
+	Buffer.load(nil)
+
+	suite.failing()
+
+	check("an equal union writes nothing", not delta.write(base, {
+		n = 1,
+		act = { tag = "move", value = { x = 1, y = 2 } },
+	}))
+
+	suite.passing()
+
+	Buffer.load(nil)
+	check(
+		"a value inside the same branch is a change",
+		delta.write(base, {
+			n = 1,
+			act = { tag = "move", value = { x = 9, y = 2 } },
+		})
+	)
+
+	Buffer.load(nil)
+
+	--[[ The case a struct-shaped comparison gets wrong: `wait` has no `x` or `y`, so a walk over the
+	     move branch's field names finds nil on both sides and concludes nothing moved. ]]
+	check(
+		"and so is the same value in another branch",
+		delta.write(base, {
+			n = 1,
+			act = { tag = "wait", value = 1 },
+		})
+	)
 
 	Buffer.load(nil)
 end

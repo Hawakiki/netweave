@@ -337,9 +337,38 @@ about `set` pays 19 bytes where netweave pays 6.
 ### Enum tags
 
 A unit enum of `n` variants costs `ceil(log2(n))` bits in the enclosing bitfield: one variant is
-free, two cost one bit, three or four cost two. Tagged enums fork the bit budget per branch and
-take the maximum, rather than summing across branches — Zap sums, so its variants consume
-separate bits even though only one can be present (`RESEARCH §3.9-Y`).
+free, two cost one bit, three or four cost two.
+
+### Tagged unions
+
+~~Tagged enums fork the bit budget per branch and take the maximum, rather than summing across
+branches.~~ **They do, and as of M4 phase 8 there is something that does it.** That sentence
+specified `t.union` two milestones before it existed — the M4 report found it under "documented and
+not implemented" — and what follows is the layout as built rather than as planned.
+
+```
+union := tag(ceil(log2 n) bits) [chosen branch's flags] [chosen branch's bytes]
+```
+
+The tag is `ceil(log2(n))` bits in the **enclosing** bitfield, numbered before any branch, and the
+branches' own flags follow it **from the same slot**: branch A's first flag and branch B's first flag
+are the same bit, because only one branch is ever present. The node reserves the widest branch, so a
+union of two structs carrying five flags each is `1 + 5` bits and not `1 + 10` — one byte instead of
+two. Zap sums, so its variants consume separate bits even though only one can be there
+(`RESEARCH §3.9-Y`).
+
+Bytes do not fork, and cannot: a byte offset is a position in a run rather than a slot in a
+bitfield. So only the chosen branch's bytes are written, and the payload keeps a **static** framing
+only where every branch is the same fixed size — `t.union({ a = t.u16, b = t.i16 })` is two bytes
+whichever arrives; `t.union({ a = t.u8, b = t.u16 })` is counted, with a ceiling of the widest.
+
+Branch names are sorted, so the tag is a **position** — the same rule as struct fields, enum variants
+and channel ids. Adding, removing or renaming a branch renumbers the ones after it and moves the
+protocol hash, which both branch names and each branch's schema reach.
+
+A tag has room the schema does not use whenever `n` is not a power of two: three branches are two
+bits, and a peer can put 3 in them. That is refused on the receive path like any other value a peer
+chose, and it never reaches a branch reader.
 
 ### Numbers
 

@@ -94,7 +94,7 @@ Everything else on the surface:
 | | What it is | The one thing to know |
 |---|---|---|
 | `nw.namespace(name, channels)` | a group of channels, declared once and required by both sides | declare every one at startup; ids depend on all of them (`WIRE-FORMAT.md` §3) |
-| `nw.types` | the schema library: `t.u8`, `t.string(0, 32)`, `t.array`, `t.struct`, `t.enum`, `t.optional` | every type is bounded, which is where each channel's byte ceiling comes from |
+| `nw.types` | the schema library: `t.u8`, `t.string(0, 32)`, `t.array`, `t.struct`, `t.enum`, `t.optional`, `t.union`, `t.quantized` | every type is bounded, which is where each channel's byte ceiling comes from |
 | `nw.policy(factory)` | two stages: the factory runs once, the check runs per request | a verdict is `nw.allow(value)` or `nw.deny(reason)`, and `ok == true` or it is a refusal |
 | `nw.all(...)` | composes policies, threading the allowed value onward | it stops at the first denial |
 | `nw.audience` | `everyone`, `owner`, `nearby(studs)`, `select(fn)` | only `everyone` gives a channel `broadcast` |

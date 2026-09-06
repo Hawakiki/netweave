@@ -933,6 +933,62 @@ local function fusedStructWriter(fields: { Field }): Writer?
 	end
 end
 
+--[[
+	A tag, then whichever branch it names.
+
+	The tag half is `enumWriter`'s, bit for bit, because that is what it is — the difference is only
+	that a union's index also selects a writer. The bits go into the *enclosing* scope, and so do the
+	chosen branch's, forked so that branch A's first flag and branch B's first flag are the same bit
+	(`Ir.assignBits`). Nothing here has to know that: `flags` is the same accumulator either way.
+
+	A single-branch union carries no tag at all — the index is known — which is why `tagChunks` may
+	be absent rather than empty.
+]]
+local function unionWriter(node: Node): Writer
+	local lookup = node.lookup :: { [string]: number }
+	local branches = node.branches :: { Field }
+
+	local writers: { Writer } = sized(#branches)
+
+	for index, branch in branches do
+		writers[index] = buildWriter(branch.node)
+	end
+
+	local chunks = node.tagChunks
+	local masks = node.tagMasks
+	local bits = if chunks then #chunks else 0
+
+	return function(value: any, flags: Flags)
+		if type(value) ~= "table" then
+			error(
+				`[netweave] a union field was given {typeof(value)}, and it takes a tag and a value: `
+					.. `\{ tag = "move", value = ... \}`
+			)
+		end
+
+		local index = lookup[value.tag]
+
+		if index == nil then
+			error(`[netweave] "{tostring(value.tag)}" is not a branch of this union`)
+		end
+
+		if bits > 0 then
+			local tag = index - 1
+			local positions = chunks :: { number }
+			local bitmasks = masks :: { number }
+
+			for bit = 1, bits do
+				if band(rshift(tag, bit - 1), 1) == 1 then
+					local chunk = positions[bit]
+					flags[chunk] = bor(flags[chunk], bitmasks[bit])
+				end
+			end
+		end
+
+		writers[index](value.value, flags)
+	end
+end
+
 local function structWriter(node: Node): Writer
 	local fields = node.fields :: { Field }
 	local count = #fields
@@ -1187,6 +1243,8 @@ function buildWriter(node: Node): Writer
 		return mapWriter(node)
 	elseif kind == "struct" then
 		return structWriter(node)
+	elseif kind == "union" then
+		return unionWriter(node)
 	end
 
 	error(`[netweave] no writer for a "{kind}"`)
@@ -1658,6 +1716,69 @@ local function fusedStructReader(node: Node): Reader?
 	end
 end
 
+--[[
+	`unionWriter`'s mirror, with the one asymmetry every reader in this file has: the tag is a number
+	a peer chose, and a tag naming no branch has to be refused rather than raised (G4).
+
+	The tag has room the schema does not use whenever the branch count is not a power of two — three
+	branches are two bits, and a peer can put 3 in them — which is `enumReader`'s case exactly.
+
+	What comes back on that path is a shared frozen table rather than nil, for the reason
+	`fusedStructReader` returns a struct of minimums: a union nested in a larger payload handing up
+	nil would drop its key, and the next `.tag` read on it raises. It is never seen — the rejection
+	makes `Serdes.build`'s reader drop the whole value — and it reads no bytes, because there is no
+	branch to read them with.
+]]
+local function unionReader(node: Node): Reader
+	local variants = node.variants :: { string }
+	local branches = node.branches :: { Field }
+
+	local readers: { Reader } = sized(#branches)
+
+	for index, branch in branches do
+		readers[index] = buildReader(branch.node)
+	end
+
+	local chunks = node.tagChunks
+	local masks = node.tagMasks
+	local bits = if chunks then #chunks else 0
+
+	local refused = table.freeze({ tag = variants[1] })
+
+	if bits == 0 then
+		--[[ One branch carries no tag, so there is nothing a peer can say about which it is. ]]
+		local only = readers[1]
+		local name = variants[1]
+
+		return function(flags: Flags): any
+			return { tag = name, value = only(flags) }
+		end
+	end
+
+	local positions = chunks :: { number }
+	local bitmasks = masks :: { number }
+
+	return function(flags: Flags): any
+		local tag = 0
+
+		for bit = 1, bits do
+			if band(flags[positions[bit]], bitmasks[bit]) ~= 0 then
+				tag = bor(tag, bit32.lshift(1, bit - 1))
+			end
+		end
+
+		local index = tag + 1
+		local name = variants[index]
+
+		if name == nil then
+			reject("unknown union branch")
+			return refused
+		end
+
+		return { tag = name, value = readers[index](flags) }
+	end
+end
+
 local function structReader(node: Node): Reader
 	local fields = node.fields :: { Field }
 	local count = #fields
@@ -2035,6 +2156,8 @@ function buildReader(node: Node): Reader
 		return mapReader(node)
 	elseif kind == "struct" then
 		return structReader(node)
+	elseif kind == "union" then
+		return unionReader(node)
 	end
 
 	error(`[netweave] no reader for a "{kind}"`)

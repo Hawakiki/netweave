@@ -177,4 +177,38 @@ local _named: t.Type<string> = t.string(1, 20, _options)
 local _text: t.Text = t.string
 local _plain: t.Type<string> = _text(0, 8)
 
+--[[
+	**`t.union` narrows**, and that is the whole reason its payload is a `tag`/`value` pair rather
+	than one optional field per case.
+
+	This has to be asserted here rather than in `types_reject.luau`, because the failure a union
+	prevents is that too *much* is accepted: a struct of optionals lets a reader write
+	`action.attack` on a move and get `nil` instead of a diagnostic. What a rejection file can show
+	is the payload that does not fit a tag, which it does; what only this file can show is that the
+	fit *works* — that `value` is the move's fields inside the branch and the wait's number outside
+	it.
+]]
+local _Action = t.union({
+	move = t.struct({ x = t.u8, y = t.u8 }),
+	wait = t.u8,
+})
+
+type Action = t.PayloadOf<typeof(_Action)>
+
+local function cost(action: Action): number
+	if action.tag == "move" then
+		return action.value.x + action.value.y
+	end
+
+	return action.value
+end
+
+local _cost: number = cost({ tag = "wait", value = 3 })
+local _moved: number = cost({ tag = "move", value = { x = 1, y = 2 } })
+
+--[[ Built as a local and then sent, which is the other half of how a game touches a union: the
+     narrowing above is for a value that arrived, and this is one on its way out. ]]
+local _wait: Action = { tag = "wait", value = 3 }
+local _move: Action = { tag = "move", value = { x = 4, y = 5 } }
+
 return nil

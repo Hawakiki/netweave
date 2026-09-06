@@ -142,6 +142,41 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A union forks the bit budget and takes the widest branch
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ One tag bit and five flags, forked: `1 + 5`. Summed it would be `1 + 10`, which is the extra
+	     byte `tests/serdes_runtime.luau` measures. Zap sums (`RESEARCH §3.9-Y`). ]]
+	local forked = Ir.lower(t.union({
+		a = t.struct({ p = t.boolean, q = t.boolean, r = t.boolean, s = t.boolean, u = t.boolean }),
+		b = t.struct({ v = t.boolean, w = t.boolean, x = t.boolean, y = t.boolean, z = t.boolean }),
+	}))
+
+	equals("a tag bit plus the widest branch", forked.root.bits, 6)
+	equals("and the flags are one byte", forked.maxSize, 1)
+
+	--[[ Both branches numbered from the same slot, which is what "forked" means where it can be
+	     read: the first flag of either branch is the bit after the tag. ]]
+	local branches = forked.root.branches :: { Ir.Field }
+	local first = (branches[1].node.fields :: { Ir.Field })[1].node
+	local second = (branches[2].node.fields :: { Ir.Field })[1].node
+
+	equals("the two branches share their first bit", first.mask, second.mask)
+	equals("in the same chunk", first.chunkIndex, second.chunkIndex)
+
+	--[[ Bytes cannot fork, because a byte offset is a position in a run rather than a slot in a
+	     bitfield. So a fixed size survives only where every branch agrees on one. ]]
+	local same = Ir.lower(t.union({ a = t.u16, b = t.i16 }))
+	equals("branches of one width keep a fixed size", same.root.fixedSize, 2)
+	equals("and the payload stays static", same.framing, "static")
+
+	local mixed = Ir.lower(t.union({ a = t.u8, b = t.u16 }))
+	equals("branches of two widths do not", mixed.root.fixedSize, nil)
+	equals("and the ceiling is the widest, not the sum", mixed.maxSize, 3)
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- The M0 benchmark schemas, in the byte counts the competitors produced
 -- ---------------------------------------------------------------------------------------------
 
