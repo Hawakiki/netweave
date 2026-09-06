@@ -89,8 +89,13 @@ Two consequences:
 
 ### `_refsrc/` is read-only
 Cloned competitor repositories, kept until the user says to delete them. Never edit,
-never `git add`, never import from `src/`. Read them, cite them, leave them alone.
-`_refsrc/README.md` records the exact commit each was cloned at.
+never import from `src/`. Read them, cite them, leave them alone.
+
+~~Never `git add`.~~ **`_refsrc/README.md` is tracked, and only that file.** It records the exact
+commit each repository was cloned at, which is what every claim in the research log is a claim
+*about* — the clones are disposable and it is not. Ignored along with them, it lived on one machine.
+The `.gitignore` entry is `_refsrc/*` with a negation, because git does not descend into an excluded
+directory and a negation inside one never matches. Everything else under `_refsrc/` stays out.
 
 ---
 
@@ -370,7 +375,8 @@ directly.
 
 `.gitignore` already covers it: build outputs (`netweave.rbxm`, `netweave-test.rbxl`,
 `bench/Benchmark.rbxl`), `sourcemap.json`, and **`_refsrc/`** — 45 MB of vendored competitor
-sources that are read-only research material, not this project's code (§2).
+sources that are read-only research material, not this project's code (§2). Its `README.md` is the
+one exception and is tracked; §2 says why.
 
 ---
 
