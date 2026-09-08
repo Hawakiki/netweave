@@ -141,8 +141,23 @@ local UNKNOWN_ID = protocol.count + 1
 -- ---------------------------------------------------------------------------------------------
 
 local delivered = 0
-local reports: { { stage: string, reason: string, bytes: number, channel: string? } } = {}
+type Report = { stage: string, reason: string, bytes: number, channel: string? }
+
+local reports: { Report } = {}
 local replies: { { call: number, status: number } } = {}
+
+--[[
+	The first report, or a stand-in that fails every assertion about one. Indexing `reports[1]`
+	directly raised `attempt to index nil with 'reason'` the moment a stage was disabled, which
+	aborted the file and hid every section after it — a §9 "break the guard, watch the test fail"
+	run read as one failure instead of the true count (M4-1, tests). A refusal that never happened
+	has to fail the assertions written for it, not the file.
+]]
+local NO_REPORT: Report = { stage = "(no report)", reason = "(no report)", bytes = -1 }
+
+local function first(): Report
+	return reports[1] or NO_REPORT
+end
 
 local at = 0
 
@@ -276,8 +291,8 @@ do
 	local survived = feed()
 	check("a batch on the wrong version does not raise", survived)
 	equals("it is refused whole", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
-	check("naming the version", string.find(reports[1].reason, "version 0", 1, true) ~= nil)
+	equals("at parse", first().stage, "parse")
+	check("naming the version", string.find(first().reason, "version 0", 1, true) ~= nil)
 end
 
 do
@@ -288,7 +303,7 @@ do
 	local survived = feed()
 	check("a channel id that runs off the end does not raise", survived)
 	equals("it stops the batch", #reports, 1)
-	check("reported as truncated", string.find(reports[1].reason, "truncated channel id", 1, true) ~= nil)
+	check("reported as truncated", string.find(first().reason, "truncated channel id", 1, true) ~= nil)
 end
 
 do
@@ -331,7 +346,7 @@ do
 		behind it is unreachable. What must not happen is the loss going unmeasured: the report's
 		byte count is exactly the distance from the unresolvable id to the end of the batch.
 	]]
-	equals("and the report measures exactly what was discarded", reports[1].bytes, size - afterGood)
+	equals("and the report measures exactly what was discarded", first().bytes, size - afterGood)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -349,7 +364,7 @@ do
 	equals("it stops the batch", #reports, 1)
 	check(
 		"reported as a truncated length",
-		string.find(reports[1].reason, "truncated packet length", 1, true) ~= nil
+		string.find(first().reason, "truncated packet length", 1, true) ~= nil
 	)
 end
 
@@ -369,8 +384,8 @@ do
 	check("a length past the end of the batch does not raise", survived)
 	equals("the packet in front of it arrived", delivered, 1)
 	equals("and the rest is one refusal", #reports, 1)
-	check("naming the overrun", string.find(reports[1].reason, "past the batch", 1, true) ~= nil)
-	equals("measuring what was discarded", reports[1].bytes, size - afterGood)
+	check("naming the overrun", string.find(first().reason, "past the batch", 1, true) ~= nil)
+	equals("measuring what was discarded", first().bytes, size - afterGood)
 end
 
 do
@@ -397,8 +412,8 @@ do
 	check("an overstated instance count does not raise", survived)
 	equals("the packet in front of it arrived", delivered, 1)
 	equals("and the batch stops there", #reports, 1)
-	check("naming the sidecar", string.find(reports[1].reason, "sidecar", 1, true) ~= nil)
-	equals("measuring what was discarded", reports[1].bytes, size - afterGood)
+	check("naming the sidecar", string.find(first().reason, "sidecar", 1, true) ~= nil)
+	equals("measuring what was discarded", first().bytes, size - afterGood)
 end
 
 do
@@ -433,8 +448,8 @@ do
 	check("a number in the sidecar does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
-	check("naming what was there instead", string.find(reports[1].reason, "sidecar holds", 1, true) ~= nil)
+	equals("at parse", first().stage, "parse")
+	check("naming what was there instead", string.find(first().reason, "sidecar holds", 1, true) ~= nil)
 	accounts("a non-instance in the sidecar", 3)
 end
 
@@ -458,7 +473,7 @@ do
 	check("a string on a class-less instance field does not raise", survived)
 	equals("nothing was delivered", delivered, 0)
 	equals("and it was refused", #reports, 1)
-	check("naming the type", string.find(reports[1].reason, "string", 1, true) ~= nil)
+	check("naming the type", string.find(first().reason, "string", 1, true) ~= nil)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -480,7 +495,7 @@ do
 	check("a number out of its declared range does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
+	equals("at parse", first().stage, "parse")
 	accounts("out of range", 3)
 end
 
@@ -526,7 +541,7 @@ do
 	check("an array claiming more than the bytes behind it does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	check("naming the claim", string.find(reports[1].reason, "claims", 1, true) ~= nil)
+	check("naming the claim", string.find(first().reason, "claims", 1, true) ~= nil)
 	accounts("array claim", 3)
 end
 
@@ -550,8 +565,8 @@ do
 	check("a payload over the declared ceiling does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at budget, before decode", reports[1].stage, "budget")
-	check("naming the ceiling", string.find(reports[1].reason, "over the 32", 1, true) ~= nil)
+	equals("at budget, before decode", first().stage, "budget")
+	check("naming the ceiling", string.find(first().reason, "over the 32", 1, true) ~= nil)
 	accounts("over the declared ceiling", 3)
 end
 
@@ -621,8 +636,8 @@ do
 	check("a policy that raises does not take the batch", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at authorize", reports[1].stage, "authorize")
-	check("naming the raise", string.find(reports[1].reason, "the policy raised", 1, true) ~= nil)
+	equals("at authorize", first().stage, "authorize")
+	check("naming the raise", string.find(first().reason, "the policy raised", 1, true) ~= nil)
 	accounts("a raising policy", 3)
 
 	Guarded.authorize = previous
@@ -649,7 +664,7 @@ do
 	check("a handler that raises does not take the batch", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at handler", reports[1].stage, "handler")
+	equals("at handler", first().stage, "handler")
 	accounts("a raising handler", 3)
 
 	Guarded.handler = previous
@@ -717,7 +732,7 @@ do
 	check("a batch past the pending ceiling does not raise", survived)
 	equals("the ceiling is what is delivered", delivered, 3)
 	equals("and the rest are refused", #reports, 5)
-	check("naming the ceiling", string.find(reports[1].reason, "more than 3 packets", 1, true) ~= nil)
+	check("naming the ceiling", string.find(first().reason, "more than 3 packets", 1, true) ~= nil)
 	accounts("past the pending ceiling", 8)
 
 	Config.reset()
@@ -778,7 +793,7 @@ do
 	equals("the packets around them arrived", delivered, 2)
 	equals("and every one of the forty was refused", #reports, 40)
 	equals("at direction", reportedAt("direction"), 40)
-	check("naming the class", string.find(reports[1].reason, "event is sent by the server", 1, true) ~= nil)
+	check("naming the class", string.find(first().reason, "event is sent by the server", 1, true) ~= nil)
 	accounts("a client sending on an outbound class", 42)
 
 	--[[ And none of them was decoded: the refusal is before `codec.read`, at the same point and for
@@ -858,7 +873,7 @@ do
 
 	check("a truncated call id does not raise", survived)
 	equals("it stops the batch", #reports, 1)
-	check("reported as truncated", string.find(reports[1].reason, "truncated call id", 1, true) ~= nil)
+	check("reported as truncated", string.find(first().reason, "truncated call id", 1, true) ~= nil)
 end
 
 do
@@ -892,7 +907,7 @@ do
 	check("a repeated call id does not raise", survived)
 	equals("only the first was served", delivered, 1)
 	equals("and the repeat was refused", #reports, 1)
-	check("naming the repeat", string.find(reports[1].reason, "already in flight", 1, true) ~= nil)
+	check("naming the repeat", string.find(first().reason, "already in flight", 1, true) ~= nil)
 	equals("the repeat was answered rather than dropped", #replies, 1)
 	equals("with a refusal", replies[1].status, Batch.REFUSED)
 	equals("and the first still holds its slot", queries.inflight(mallory), 1)
@@ -975,8 +990,8 @@ do
 
 	check("a raise inside the read phase does not escape the receive path", survived)
 	equals("it is reported", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
-	check("naming the raise", string.find(reports[1].reason, "read phase raised", 1, true) ~= nil)
+	equals("at parse", first().stage, "parse")
+	check("naming the raise", string.find(first().reason, "read phase raised", 1, true) ~= nil)
 end
 
 do
@@ -1020,7 +1035,7 @@ do
 
 	check("a raise inside the dispatch phase does not escape either", survived)
 	equals("it is reported", #reports, 1)
-	equals("at handler", reports[1].stage, "handler")
+	equals("at handler", first().stage, "handler")
 
 	--[[ The canary: whatever the raise left behind, an honest batch still arrives. A leaked pending
 	     list, a stranded cursor or an unrestored sender would all show up here and nowhere else. ]]
@@ -1048,7 +1063,7 @@ do
 
 	check("a control packet with no kind does not raise", survived)
 	equals("it is refused", #reports, 1)
-	check("as truncated", string.find(reports[1].reason, "truncated control", 1, true) ~= nil)
+	check("as truncated", string.find(first().reason, "truncated control", 1, true) ~= nil)
 end
 
 do
@@ -1063,7 +1078,7 @@ do
 
 	check("a control body running past the batch does not raise", survived)
 	equals("it is refused", #reports, 1)
-	check("naming the overrun", string.find(reports[1].reason, "past the batch", 1, true) ~= nil)
+	check("naming the overrun", string.find(first().reason, "past the batch", 1, true) ~= nil)
 end
 
 do
@@ -1087,7 +1102,7 @@ do
 	check("an unknown control kind does not raise", survived)
 	equals("it is stepped over", delivered, 1)
 	equals("and said out loud rather than skipped in silence", #reports, 1)
-	check("naming the kind", string.find(reports[1].reason, "control kind 200", 1, true) ~= nil)
+	check("naming the kind", string.find(first().reason, "control kind 200", 1, true) ~= nil)
 end
 
 do
@@ -1113,10 +1128,7 @@ do
 	     mismatched hello and nothing else used to be refused in silence. ]]
 	equals("the hello and all three behind it were refused", #reports, 4)
 	equals("at protocol", reportedAt("protocol"), 4)
-	check(
-		"with both hashes named",
-		string.find(reports[1].reason, Protocol.hex(protocol.hash), 1, true) ~= nil
-	)
+	check("with both hashes named", string.find(first().reason, Protocol.hex(protocol.hash), 1, true) ~= nil)
 
 	agreement.forget(mallory)
 end
