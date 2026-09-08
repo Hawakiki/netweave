@@ -103,16 +103,16 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 1 — the instruments
 
-- [ ] `analyze.luau`: refuse any file under `src/` whose first non-empty line is not `--!strict`
-- [ ] `analyze.luau`: fail when luau-lsp exits non-zero and reported zero diagnostics
-- [ ] `analyze.luau`: `-- netweave:expect N` also declares the lines; a diagnostic on an undeclared line
-      or a declared line with none is a failure
-- [ ] `tools/exports.luau`: skip string bodies in the same walk that skips comments
-- [ ] `tests/transport_runtime.luau`: a `select` hole built by assignment (`t[1] = a; t[3] = b`); confirmed
+- [x] `analyze.luau`: refuse any file under `src/` whose first non-empty line is not `--!strict`
+- [x] `analyze.luau`: fail when luau-lsp exits non-zero and reported zero diagnostics
+- [x] `analyze.luau`: `-- netweave:expect N` also marks the lines, and each mark says what its diagnostic
+      has to contain — lines alone were measured and let junk swapped onto the marked line pass
+- [x] `tools/exports.luau`: skip string bodies in the same walk that skips comments
+- [x] `tests/transport_runtime.luau`: a `select` hole built by assignment (`t[1] = a; t[3] = b`); confirmed
       to fail with `Recipients.luau:337` reverted to `#`
-- [ ] `tests/hostile_runtime.luau`: the nine `reports[1].reason` reads guarded, so a disabled stage counts
+- [x] `tests/hostile_runtime.luau`: the nine `reports[1].reason` reads guarded, so a disabled stage counts
       its failures instead of raising
-- [ ] `bench/RESULTS.md` and `PLAN-M4.md`: criterion 5 at 1.15x on `2026-09-06-m4p8.json`, the Down
+- [x] `bench/RESULTS.md` and `PLAN-M4.md`: criterion 5 at 1.15x on `2026-09-06-m4p8.json`, the Down
       cell at −30% as unexplained, both with strikethroughs on the old text
 
 ### Phase 2 — what a client can trigger
