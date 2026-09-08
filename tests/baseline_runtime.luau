@@ -25,7 +25,13 @@ local Observer = require("../src/api/Observer")
 local harness = require("./harness")
 local t = require("../src/types")
 
-local suite = harness.suite("baseline_runtime", 0.5)
+--[[
+	~~0.5~~ **0.3, which is the honest share.** M4-1 re-read every failure-path tag in this file and found
+	the floor met by tagging `drop`, `desync` and `forget` lifecycle as failure-path. PLAN-M4-BUG D-5: a floor met by relabelling is lowered
+	to what the file measures, not defended; the number here is what counting only refusals, bounds,
+	hostile input and failure isolation gives, and it moves up when real refusal cases are written.
+]]
+local suite = harness.suite("baseline_runtime", 0.3)
 local check, equals = suite.check, suite.equals
 
 local alice = { name = "alice" }
@@ -87,7 +93,7 @@ end
 -- The three ways a baseline stops existing
 -- ---------------------------------------------------------------------------------------------
 
-suite.failing()
+suite.passing()
 
 do
 	local store = Baseline.new()
@@ -146,6 +152,8 @@ do
 	check("and can start again from nothing", store.keep(alice, combat, "a1", { n = 9 }))
 	equals("counted from zero", store.held(alice), 1)
 end
+
+suite.failing()
 
 do
 	local store = Baseline.new()

@@ -304,8 +304,12 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
 
 **A security-relevant suite counts its own shape** through `tests/harness.luau`, and refuses to pass
-under the floor it declares. Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
-90%, `transport_runtime` 66%, and the rule behind the number is §9.
+under the floor it declares. ~~Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
+90%, `transport_runtime` 66%.~~ The floors live in the files, and since PLAN-M4-BUG phase 6 each one is
+the share the file honestly measures — `fuzz_runtime` 0.25, `replication_runtime` 0.16, `baseline_runtime`
+0.3, `delta_runtime` 0.03, `store_runtime` none — after M4-1 found four of them met by tagging lifecycle
+and no-op sections as failure-path. The rule behind the number is §9, and D-5 of that plan says a floor
+met by relabelling is lowered, not defended.
 
 Three checks read source off disk rather than running it, which is why they live outside `src/` and
 `tests/` — the analyzer walks those two roots and cannot resolve `@lune/fs`:

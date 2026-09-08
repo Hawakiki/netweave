@@ -34,7 +34,13 @@ local t = require("../src/types")
 
 local harness = require("./harness")
 
-local suite = harness.suite("replication_runtime", 0.3)
+--[[
+	~~0.3~~ **0.16, which is the honest share.** M4-1 re-read every failure-path tag in this file and found
+	the floor met by tagging audience-leaving lifecycle and "a tick at rest sends nothing" as failure-path. PLAN-M4-BUG D-5: a floor met by relabelling is lowered
+	to what the file measures, not defended; the number here is what counting only refusals, bounds,
+	hostile input and failure isolation gives, and it moves up when real refusal cases are written.
+]]
+local suite = harness.suite("replication_runtime", 0.16)
 local check, equals = suite.check, suite.equals
 
 -- ---------------------------------------------------------------------------------------------
@@ -471,7 +477,7 @@ end
 -- Leaving, which is the case with nothing on the wire to say it until the root bit
 -- ---------------------------------------------------------------------------------------------
 
-suite.failing()
+suite.passing()
 
 do
 	--[[
@@ -526,6 +532,8 @@ do
 	local after = frame()
 	equals("and it is not said twice", after, 0)
 end
+
+suite.failing()
 
 -- ---------------------------------------------------------------------------------------------
 -- A change that does not arrive, which is the one failure this class cannot absorb
@@ -747,15 +755,11 @@ do
 
 	check("both clients hold the subject", agrees(alice, 700) and agrees(bob, 700))
 
-	suite.failing()
-
 	attempts = 0
 	local quiet = frame()
 
 	equals("a tick over a world at rest sends nothing", quiet, 0)
 	equals("and does not ask whether it should", attempts, 0)
-
-	suite.passing()
 
 	--[[ One field, then a nested one — the comparison recurses, and a shallow one would pass the
 	     second of these and freeze the subject at its old position on every client. ]]
@@ -777,8 +781,6 @@ do
 	equals("and a field that went away", mirrorOf(alice)[700].tag, nil)
 	check("with the rest of the subject intact", agrees(alice, 700))
 
-	suite.failing()
-
 	attempts = 0
 	frame()
 	equals("after which it is quiet again", attempts, 0)
@@ -788,8 +790,6 @@ do
 	sees(700, alice)
 	frame()
 	equals("a client that walked out is told to forget", mirrorOf(bob)[700], nil)
-
-	suite.passing()
 
 	--[[
 		And back in. `settled` is true — the subject has not moved — and the gate must still not
@@ -818,13 +818,9 @@ do
 		serverBaselines.of(bob, channel, 700) == serverBaselines.of(alice, channel, 700)
 	)
 
-	suite.failing()
-
 	attempts = 0
 	frame()
 	equals("so the tick after a client joins is quiet too", attempts, 0)
-
-	suite.passing()
 
 	--[[ A client that gave up on the channel. The gate reads the baseline rather than a flag it
 	     keeps, so a baseline that went away is a full send — which is the whole of why a resync
@@ -847,8 +843,6 @@ do
 
 	check("a broadcast subject reaches both clients", shares(alice, 800) and shares(bob, 800))
 
-	suite.failing()
-
 	attempts = 0
 	frame()
 	equals("and a broadcast at rest asks nothing either", attempts, 0)
@@ -858,8 +852,6 @@ do
 
 	equals("a broadcast subject that stops existing is removed", peers[alice].broadcast[800], nil)
 	equals("from everyone", peers[bob].broadcast[800], nil)
-
-	suite.passing()
 
 	commons[800] = { hp = 6, gold = 60, pos = { x = 3, y = 3 }, tag = nil }
 	frame()
@@ -1025,8 +1017,6 @@ do
 	commons[951] = { hp = 2, gold = 2, pos = { x = 2, y = 2 }, tag = nil }
 	frame()
 
-	suite.failing()
-
 	equals("no handler is blamed for a packet nobody was listening to", blamed, 0)
 	check(
 		"the client holds the first subject in its baseline",
@@ -1034,8 +1024,6 @@ do
 	)
 	check("and the second", peers[alice].baselines.of(nil, shared, 951) ~= nil)
 	equals("and the game has seen neither", peers[alice].broadcast[950], nil)
-
-	suite.passing()
 
 	shared.handler = listening
 
@@ -1105,9 +1093,7 @@ do
 		frame()
 	end
 
-	suite.failing()
 	equals("a non-schema key changing every frame costs no attempt", attempts, 0)
-	suite.passing()
 
 	commons[960].hp = 2
 	attempts = 0
@@ -1274,15 +1260,11 @@ do
 
 	local sent = frame()
 
-	suite.failing()
-
 	equals("nothing is sent to a player who has left", sent, 0)
 	equals("and no baseline is rebuilt for her", serverBaselines.held(alice), 0)
 
 	frame()
 	equals("nor on the frame after", serverBaselines.held(alice), 0)
-
-	suite.passing()
 
 	departed[alice] = nil
 	owned[970] = nil
