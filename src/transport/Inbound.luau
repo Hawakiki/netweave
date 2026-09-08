@@ -684,7 +684,19 @@ function Inbound.new(config: Config): Inbound
 		peer trying to make the server work. The first gets its state a frame or two later; the
 		second gets a sixtieth of what it asked for.
 	]]
-	local RESYNC_TICKS = 30
+	--[[ Read from `Config` at each use rather than once: the limit takes effect immediately, which
+	     is what a game reaching for it under attack needs. ]]
+	local function resyncWindow(): number
+		return Settings.limitOf("resyncTicks")
+	end
+
+	--[[ Constant, so a peer asking every frame costs a report and no allocation: §9's "nothing on
+	     the receive path is silent" — a deferred ask used to return without a word, so a peer
+	     asking ninety times in ninety frames was invisible to `nw.observe` (M4-1). ]]
+	local RESYNC_DEFERRED = "a resync arrived inside the window since the last one was acted on; it is "
+		.. "remembered and honoured when the window closes. A peer asking every frame is either on a "
+		.. "very bad connection or trying to make this server work; nw.configure({ limits = { resyncTicks "
+		.. "= n } }) widens the window"
 
 	local ticks = 0
 
@@ -965,10 +977,11 @@ function Inbound.new(config: Config): Inbound
 
 			local honoured = seen[channel]
 
-			if honoured and ticks - honoured < RESYNC_TICKS then
+			if honoured and ticks - honoured < resyncWindow() then
 				seen[channel] = honoured
 				owed[channel] = owed[channel] or {}
 				owed[channel][sender] = true
+				report(channel, sender, "replicate", RESYNC_DEFERRED, bytes)
 				return
 			end
 
@@ -1290,7 +1303,7 @@ function Inbound.new(config: Config): Inbound
 						local seen = resyncs[who]
 						local honoured = seen and seen[channel]
 
-						if not honoured or ticks - honoured >= RESYNC_TICKS then
+						if not honoured or ticks - honoured >= resyncWindow() then
 							senders[who] = nil
 
 							if seen then

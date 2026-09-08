@@ -1361,6 +1361,7 @@ do
 	end
 
 	equals("and sixty more inside the window buy nothing", cleared, 0)
+	equals("and every one of them is reported, not swallowed", reportedAt("replicate"), 60)
 
 	--[[ Nothing is dropped, though. The window passes and the ask that arrived inside it is
 	     honoured by the tick, without the peer asking again. ]]
@@ -1371,6 +1372,28 @@ do
 	end
 
 	equals("what was asked for inside the window is honoured after it", held.held(mallory), 0)
+
+	--[[ The window is a limit, not a constant: a game with a large replicated state shrinks what a
+	     peer can extract by widening it, and a test shortens it to see the edge. Two ticks. ]]
+	Config.configure({ limits = { resyncTicks = 2 } })
+
+	for _ = 1, 30 do
+		replicated.tick()
+	end
+
+	repopulate()
+	ask()
+	equals("an ask after a widened window is honoured", held.held(mallory), 0)
+
+	repopulate()
+	ask()
+	equals("the next one inside two ticks is not", held.held(mallory), 2)
+
+	replicated.tick()
+	replicated.tick()
+	equals("and is honoured two ticks later", held.held(mallory), 0)
+
+	Config.reset()
 
 	--[[ And a peer already refused at `protocol` gets nothing at all, which is the other half:
 	     control packets are read before `admit`, so the verdict is the only thing standing between a

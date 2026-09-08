@@ -120,6 +120,7 @@ export type Rules = {
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
 	.callsInFlight number? -- unanswered `nw.query` calls one player may hold at once
 	.baselinesPerClient number? -- `(channel, subject)` pairs one client's replication may hold
+	.resyncTicks number? -- ticks a peer waits between resyncs that are acted on; a second ask inside the window is honoured when it closes
 
 	Numbers, not severities, and kept in their own field so that a limit can never be mistaken for a
 	switch.
@@ -134,6 +135,7 @@ export type Rules = {
 	| `repeatsPerDiagnostic` | on every report |
 	| `callsInFlight` | on every `invoke` and on every request the server accepts, so it takes effect immediately |
 | `baselinesPerClient` | on every baseline a replicated channel is about to keep, so lowering it stops new ones rather than releasing held ones |
+	| `resyncTicks` | on every resync request and every tick, so it takes effect immediately. It was a constant until PLAN-M4-BUG phase 5: with a 30 KB replicated state each hostile client could extract 60 KB/s of encode for 10 B/s up, and a game could not tune it (M4-1) |
 
 	Configuring before the first channel is declared makes all three behave the same way, which is
 	why that is the advice rather than the rule.
@@ -145,6 +147,7 @@ export type Limits = {
 	repeatsPerDiagnostic: number?,
 	callsInFlight: number?,
 	baselinesPerClient: number?,
+	resyncTicks: number?,
 }
 
 --[=[
@@ -250,6 +253,7 @@ export type function CheckedSettings(spec, snapshot)
 		repeatsPerDiagnostic = true,
 		callsInFlight = true,
 		baselinesPerClient = true,
+		resyncTicks = true,
 	}
 
 	--[[ Annotated `any` throughout: inside a type function the values are the analyzer's own type
@@ -552,6 +556,12 @@ local LIMITS: { [string]: { default: number, min: number, max: number } } = {
 	     against a game that replicates thousands of subjects without noticing that the cost is
 	     multiplied by everyone who can see them (`PLAN-M3` D-6, applied to L3). ]]
 	baselinesPerClient = { default = 256, min = 1, max = 65536 },
+
+	--[[ How many ticks a peer waits between resyncs that are acted on. Half a second at 60 Hz by
+	     default: an honest client's first ask is always honoured at once, so this is only the gap
+	     before a second one. The bound on what a hostile peer can extract is one full resend per
+	     window per channel, and a game with a large replicated state raises this to shrink it. ]]
+	resyncTicks = { default = 30, min = 1, max = 3600 },
 }
 table.freeze(LIMITS)
 
