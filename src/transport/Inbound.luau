@@ -1088,6 +1088,19 @@ function Inbound.new(config: Config): Inbound
 				store.keep(sender, channel, subject, value)
 			end
 
+			--[[
+				Nobody is listening yet, and this class does not use the queue the others do: the
+				baseline *is* the queue (PLAN-M4-BUG D-3), and `drain` walks it when `:listen`
+				attaches. Queued here instead, the entry reached `call` with a nil handler — reported
+				as the game's own handler raising, with a traceback — and was never delivered,
+				because the baseline already said this client had the subject and the server sends
+				a snapshot once. A static subject in the first batch was invisible for the session,
+				on the join path, in exactly the module order the queue exists for (M4-1, 중대).
+			]]
+			if not channel.handler then
+				return
+			end
+
 			local count = filling.count + 1
 
 			if count > pendingCeiling then
@@ -1178,9 +1191,46 @@ function Inbound.new(config: Config): Inbound
 		--[[ A handler has just been attached. Whatever arrived before it did is delivered now, in
 		     arrival order. ]]
 		drain = function(channel: any)
+			if not channel.handler then
+				return
+			end
+
+			--[[
+				A replicated channel keeps nothing in a queue: every subject that arrived before the
+				handler is in the baseline, and delivering the baseline is delivering the queue —
+				one copy, not two. The closure is one allocation per `:listen`, not per packet. A
+				handler attached, detached and attached again is handed everything a second time,
+				which is the same thing `:listen` on any class does with its queue.
+			]]
+			if channel.class == "replicate" then
+				local store = baselines
+
+				if isServer or not store then
+					return
+				end
+
+				local list = claim()
+
+				store.each(nil, channel, function(subject: any, value: any)
+					local count = list.count + 1
+
+					list.count = count
+					list.channels[count] = channel
+					list.senders[count] = nil
+					list.values[count] = value
+					list.subjects[count] = subject
+					list.sizes[count] = 0
+					list.calls[count] = 0
+					list.statuses[count] = -1
+				end)
+
+				dispatch(list)
+				return
+			end
+
 			local queue = queues[channel]
 
-			if not queue or not channel.handler then
+			if not queue then
 				return
 			end
 
