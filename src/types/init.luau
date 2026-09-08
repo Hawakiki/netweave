@@ -202,6 +202,121 @@ end
 ]]
 type _instantiatePayloadOf = PayloadOf<Type<{ probe: boolean }>>
 
+--[[
+	**The two-parameter seam, and the one-parameter one behind it.**
+
+	`t.map<K, V>(key: Type<K>, value: Type<V>)` compiled for primitives and failed for the schema
+	every replicated-entities game writes first: `t.map(t.u16, Entity)` was `Expected this to be
+	exactly 'unknown', but got '{ hp: number }'`, because the solver does not unify a generic
+	parameter against a type-function result — `Entity` is a `Type<StructPayload<…>>`, and a `T`
+	read out of that is `unknown`, not the struct (M4-1, 중대). Measured next: `t.optional(Entity)`
+	and `t.array(Entity)` had the same seam outside a spec literal, so `nw.validate(t.optional(S),
+	v)` returned an unbranded `unknown?` and the brand never applied on that path.
+
+	Reading `__payload` directly is what `t.struct` has always done and what works. Three small
+	type functions, one per constructor, each with its own message, rather than `PayloadOf` reused,
+	because the message prints verbatim at the call site and has to name the constructor that was
+	called. The extraction is spelled out three times because a type function cannot reference an
+	outer local — the analyzer refuses it as a syntax error.
+]]
+
+--[=[
+	@type OptionalPayload<I> I?
+	@within Types
+
+	What [Types.optional] carries: the inner type's payload, or nil. Applied for you.
+]=]
+--[[ A schema built at runtime reaches these through `any`, and `any` carries no `__payload`. It
+     stays `any` on the way out rather than being refused: the analyzer has been bypassed on
+     purpose, and the runtime `check()` is the guard on that path. ]]
+export type function OptionalPayload(inner)
+	if inner:is("any") then
+		return types.any
+	end
+
+	local advice = "t.optional takes a netweave type, as in t.optional(t.u16) or t.optional(Entity). "
+		.. "What was passed carries no payload, so it did not come from t.u8, t.struct, t.enum or "
+		.. "another constructor"
+
+	if not inner:is("table") then
+		error(advice)
+	end
+
+	local payload = inner:readproperty(types.singleton("__payload"))
+
+	if not payload then
+		error(advice)
+	end
+
+	return types.unionof(payload :: type, types.singleton(nil))
+end
+
+--[=[
+	@type ArrayPayload<E> { E }
+	@within Types
+
+	What [Types.array] carries: a list of the element type's payload. Applied for you.
+]=]
+export type function ArrayPayload(element)
+	if element:is("any") then
+		return types.newtable(nil, { index = types.number, readresult = types.any, writeresult = types.any })
+	end
+
+	local advice = "t.array takes a netweave element type, as in t.array(t.u8) or t.array(Entity, 100). "
+		.. "What was passed carries no payload, so it did not come from t.u8, t.struct, t.enum or "
+		.. "another constructor"
+
+	if not element:is("table") then
+		error(advice)
+	end
+
+	local payload = element:readproperty(types.singleton("__payload"))
+
+	if not payload then
+		error(advice)
+	end
+
+	return types.newtable(
+		nil,
+		{ index = types.number, readresult = payload :: type, writeresult = payload :: type }
+	)
+end
+
+--[=[
+	@type MapPayload<K, V> { [K]: V }
+	@within Types
+
+	What [Types.map] carries: the key type's payload indexing the value type's. Applied for you.
+]=]
+export type function MapPayload(key, value)
+	local advice = "t.map takes two netweave types, a key and a value, as in t.map(t.u16, Entity). "
+		.. "One of them carries no payload, so it did not come from t.u16, t.string, t.struct or "
+		.. "another constructor"
+
+	local function payloadOf(carrier: type): type
+		if carrier:is("any") then
+			return types.any
+		end
+
+		if not carrier:is("table") then
+			error(advice)
+		end
+
+		local payload = carrier:readproperty(types.singleton("__payload"))
+
+		if not payload then
+			error(advice)
+		end
+
+		return payload
+	end
+
+	local index = payloadOf(key)
+	local payload = payloadOf(value)
+
+	return types.newtable(nil, { index = index, readresult = payload, writeresult = payload })
+end
+
 --[=[
 	@type StructPayload<F> F
 	@within Types
@@ -1249,14 +1364,14 @@ end
 --[=[
 	@within Types
 	@function optional
-	@param inner Type<T>
-	@return Type<T?>
+	@param inner I -- a netweave type
+	@return Type<OptionalPayload<I>>
 
 	A value that may be absent. Presence costs one bit in the enclosing bitfield, not a byte.
 ]=]
-function t.optional<T>(inner: Type<T>): Type<T?>
+function t.optional<I>(inner: I): Type<OptionalPayload<I>>
 	check(isType(inner), "optional needs a netweave type")
-	check(inner.kind ~= "optional", "optional cannot wrap an optional")
+	check((inner :: any).kind ~= "optional", "optional cannot wrap an optional")
 
 	return descriptor({
 		kind = "optional" :: Kind,
@@ -1267,10 +1382,10 @@ end
 --[=[
 	@within Types
 	@function array
-	@param element Type<T>
+	@param element E -- a netweave type
 	@param min number? -- alone, an exact length
 	@param max number?
-	@return Type<{ T }>
+	@return Type<ArrayPayload<E>>
 
 	A list.
 
@@ -1283,7 +1398,7 @@ end
 	The exact form is what makes a schema statically sized, and a statically sized packet carries
 	no length prefix at all — the framing guarantee costs it nothing.
 ]=]
-function t.array<T>(element: Type<T>, min: number?, max: number?): Type<{ T }>
+function t.array<E>(element: E, min: number?, max: number?): Type<ArrayPayload<E>>
 	check(isType(element), "array needs a netweave element type")
 
 	local lower = min or 0
@@ -1313,9 +1428,9 @@ end
 --[=[
 	@within Types
 	@function map
-	@param key Type<K>
-	@param value Type<V>
-	@return Type<{ [K]: V }>
+	@param key K -- a netweave type the receiver can look a value up by
+	@param value V -- a netweave type
+	@return Type<MapPayload<K, V>>
 
 	A dictionary, length-prefixed and written as key/value pairs.
 ]=]
@@ -1351,7 +1466,7 @@ local MAP_KEYS: { [string]: boolean } = {
 	instance = true,
 }
 
-function t.map<K, V>(key: Type<K>, value: Type<V>): Type<{ [K]: V }>
+function t.map<K, V>(key: K, value: V): Type<MapPayload<K, V>>
 	check(isType(key), "map needs a netweave key type")
 	check(isType(value), "map needs a netweave value type")
 

@@ -78,6 +78,37 @@ local _entity: Type<{
 }> =
 	entity
 
+--[[
+	**The canonical replicated-state schema, which had never been in an `_ok` file** (M4-1, 중대):
+	`t.map(t.u16, Entity)` was a type error, because a `T` read out of a `Type<StructPayload<…>>`
+	through a generic parameter is `unknown`. The only `t.map` this file wrote was primitive on
+	both sides. The same seam, measured next, took `t.optional(entity)` and `t.array(entity)` to
+	`unknown` outside a spec literal. Each is written here with the payload it has to have, and the
+	one-line cases below say the constructor's payload type is nameable through `t.`.
+]]
+type Entity = {
+	id: number,
+	x: number,
+	y: number,
+	z: number,
+	orientation: number,
+	animation: number,
+}
+
+local _entities: Type<{ [number]: Entity }> = t.map(t.u16, entity)
+local _byName: Type<{ [string]: Entity }> = t.map(t.string(1, 32), entity)
+type Weapon = "primary" | "secondary" | "melee"
+local _byWeapon: Type<{ [Weapon]: number }> = t.map(weapon, t.u8)
+local _maybeEntity: Type<Entity?> = t.optional(entity)
+local _maybeWeapon: Type<Weapon?> = t.optional(weapon)
+local _entityList: Type<{ Entity }> = t.array(entity)
+local _entityFixed: Type<{ Entity }> = t.array(entity, 100)
+
+local _mapPayload: t.MapPayload<typeof(t.u16), typeof(entity)> =
+	{ [1] = { id = 1, x = 0, y = 0, z = 0, orientation = 0, animation = 0 } }
+local _optionalPayload: t.OptionalPayload<typeof(entity)> = nil
+local _arrayPayload: t.ArrayPayload<typeof(weapon)> = { "primary", "melee" }
+
 --[[ Nesting: a struct inside an array inside a struct. ]]
 local snapshot = t.struct({
 	tick = t.u32,
