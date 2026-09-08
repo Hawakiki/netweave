@@ -579,10 +579,21 @@ local function descriptor(fields: { [string]: any }): any
 	return table.freeze(fields)
 end
 
-local function sortedKeys(source: { [string]: any }): { string }
+--[[
+	Every key is checked to be a string before the sort. A number key reached `table.sort` and
+	either sorted in silently — `t.enum({ [1] = true })` accepted with `variants = {1}` while the
+	analyzer refused it for a different reason — or, mixed with strings, died in the VM's
+	`attempt to compare string < number`, which names neither the constructor nor the key (M4-1).
+]]
+local function sortedKeys(source: { [string]: any }, what: string): { string }
 	local keys = {}
 
 	for key in source do
+		check(
+			type(key) == "string",
+			`a {what} is named by a string key, and {tostring(key)} is a {typeof(key)}. Write `
+				.. `\{ name = ... \}, not \{ ... \} — a list has positions where this needs names`
+		)
 		table.insert(keys, key)
 	end
 
@@ -1020,7 +1031,13 @@ t.f64 = number("f64") :: Ranged<number>
 	and not netweave's.
 	:::
 ]=]
-function t.quantized(min: number, max: number, step: number): Type<number>
+function t.quantized(min: number, max: number, step: number, ...: any): Type<number>
+	check(
+		select("#", ...) == 0,
+		`t.quantized takes a minimum, a maximum and a step and nothing after them, got `
+			.. `{select("#", ...) + 3} arguments. An argument that is dropped looks exactly like one `
+			.. `that was applied`
+	)
 	check(type(min) == "number", "quantized needs a numeric minimum")
 	check(type(max) == "number", "quantized needs a numeric maximum")
 	check(type(step) == "number", "quantized needs a numeric step")
@@ -1141,7 +1158,14 @@ local function vectored(base: { [string]: any }, label: string, axes: number): a
 	local callable = setmetatable(
 		self,
 		table.freeze({
-			__call = function(_self: any, component: any): any
+			__call = function(_self: any, component: any, ...: any): any
+				check(
+					select("#", ...) == 0,
+					`{label} takes one component schema and nothing after it, got `
+						.. `{select("#", ...) + 1} arguments. An argument that is dropped looks `
+						.. `exactly like one that was applied`
+				)
+
 				--[[ The kind test rather than `isType`, which is defined further down and is a duck
 				     check anyway: what a component has to be is a *number* schema, and asking that
 				     directly is both narrower and available here. ]]
@@ -1155,6 +1179,32 @@ local function vectored(base: { [string]: any }, label: string, axes: number): a
 						.. `{tostring(component.kind)}. Use t.f32, a narrowed integer like `
 						.. `t.i16(-2048, 2048), or t.quantized`
 				)
+
+				--[[
+					A unit vector's components are in [-1, 1] and almost never whole, so a component
+					that is an integer can represent six directions, an unsigned one three, and a
+					range that stops short of ±1 none along that axis. The writer refuses a
+					fractional value in an integer component and the reader's tolerance widens only
+					for a quantised step, so `t.unitVector3(t.u8)` lowered to three bytes and refused
+					almost every honest direction — the `t.array(x, 1.5)` shape one level up (M4-1).
+				]]
+				if base.unit then
+					local fractional = FRACTIONAL[component.encoding or ""] == true or component.step ~= nil
+					local low = if component.min ~= nil then component.min else -math.huge
+					local high = if component.max ~= nil then component.max else math.huge
+
+					check(
+						fractional,
+						`{label} is a direction, and its components are fractions in -1..1; a `
+							.. `{tostring(component.encoding)} component can hold only whole numbers. `
+							.. `Use t.f32, or t.quantized(-1, 1, 2 / 254) for one byte per axis`
+					)
+					check(
+						low <= -1 and high >= 1,
+						`{label} is a direction, and its components reach -1 and 1; this one covers `
+							.. `{low}..{high}. Declare the component over -1..1 or wider`
+					)
+				end
 
 				local constrained = table.clone(base)
 				constrained.element = component
@@ -1253,7 +1303,13 @@ t.instance = (function(): Classed
 	local callable = setmetatable(
 		self,
 		table.freeze({
-			__call = function(_self: any, className: string, options: any): Type<Instance>
+			__call = function(_self: any, className: string, options: any, ...: any): Type<Instance>
+				check(
+					select("#", ...) == 0,
+					`t.instance takes a class and an options table and nothing after them, got `
+						.. `{select("#", ...) + 2} arguments. An argument that is dropped looks exactly `
+						.. `like one that was applied`
+				)
 				check(type(className) == "string", "instance class must be a string")
 
 				local constrained = table.clone(base)
@@ -1348,7 +1404,7 @@ end
 function t.enum<V>(variants: V): Type<EnumPayload<V>>
 	check(type(variants) == "table", "enum variants must be a table")
 
-	local names = sortedKeys(variants :: any)
+	local names = sortedKeys(variants :: any, "enum variant")
 	check(#names > 0, "an enum needs at least one variant")
 
 	for _, name in names do
@@ -1400,6 +1456,20 @@ end
 ]=]
 function t.array<E>(element: E, min: number?, max: number?): Type<ArrayPayload<E>>
 	check(isType(element), "array needs a netweave element type")
+
+	--[[
+		`{ T? }` with no exact length has no length: `#` on a table with nils is a border, and Luau
+		picks it from how the table was built — `{1, nil, 3}` as a literal is three, filled by
+		assignment it is one. So `{1, 2, nil}` sent two and `{[2] = -5}` sent nothing, with no raise
+		and no report (M4-1). With an exact length nothing is measured, every position is written;
+		without one the honest spellings are a map keyed by index, or a struct.
+	]]
+	check(
+		(element :: any).kind ~= "optional" or (min ~= nil and (max == nil or max == min)),
+		`t.array(t.optional(...)) needs an exact length, because a list with holes has no length `
+			.. `Luau agrees on. Give it one — t.array(t.optional(t.u8), 4) — or key the entries: `
+			.. `t.map(t.u8, t.u8)`
+	)
 
 	local lower = min or 0
 	local upper = max or (if min then min else MAX_LENGTH)
@@ -1515,16 +1585,20 @@ end
 function t.struct<F>(fields: F): Type<StructPayload<F>>
 	check(type(fields) == "table", "struct fields must be a table")
 
-	local order = sortedKeys(fields :: any)
+	local order = sortedKeys(fields :: any, "struct field")
 	check(#order > 0, "a struct needs at least one field")
 
 	for _, name in order do
 		check(isType((fields :: any)[name]), `struct field "{name}" is not a netweave type`)
 	end
 
+	--[[ A copy, frozen. The caller's table was kept by reference, so swapping a field after the
+	     declaration changed what a codec built later encoded and what the signature hashed — a
+	     schema that is not what was declared, with no message (M4 report, finding 17; the same
+	     in `t.union`). ]]
 	return descriptor({
 		kind = "struct" :: Kind,
-		fields = fields :: any,
+		fields = table.freeze(table.clone(fields :: any)),
 		order = order,
 	})
 end
@@ -1580,7 +1654,7 @@ end
 function t.union<B>(branches: B): Type<UnionPayload<B>>
 	check(type(branches) == "table", "union branches must be a table")
 
-	local names = sortedKeys(branches :: any)
+	local names = sortedKeys(branches :: any, "union branch")
 	check(#names > 0, "a union needs at least one branch")
 
 	for _, name in names do
@@ -1590,7 +1664,7 @@ function t.union<B>(branches: B): Type<UnionPayload<B>>
 	return descriptor({
 		kind = "union" :: Kind,
 		variants = names,
-		branches = branches :: any,
+		branches = table.freeze(table.clone(branches :: any)),
 	})
 end
 

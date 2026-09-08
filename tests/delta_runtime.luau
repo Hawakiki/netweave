@@ -177,7 +177,7 @@ do
 		{ name = "an array of scalars", schema = t.array(t.u8, 0, 10) },
 		{ name = "a fixed array of scalars", schema = t.array(t.u8, 10, 10) },
 		{ name = "an array of booleans", schema = t.array(t.boolean, 0, 10) },
-		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 0, 10) },
+		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 10) },
 		{
 			name = "an array of structs carrying a flag",
 			schema = t.array(t.struct({ f = t.boolean, x = t.u8 }), 0, 10),
