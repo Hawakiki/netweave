@@ -64,11 +64,18 @@ try {
 	foreach ($step in $steps) {
 		$started = $clock.Elapsed
 		$exe, $rest = $step.Command
-		# A missing executable leaves $LASTEXITCODE at the previous step's value, so a tool that is
-		# not installed would read as green (measured). The sentinel makes "did not run" a failure.
+		# A missing executable is a terminating error under `pwsh -File`: the first version of this
+		# script died on it with exit 0 and no summary, and the version before that read it as green,
+		# because $LASTEXITCODE kept the previous step's value (both measured). So: catch it, and
+		# start every step from a sentinel so "did not run" cannot read as "passed".
 		$global:LASTEXITCODE = -1
-		$output = & $exe @rest 2>&1 | ForEach-Object { "$_" }
-		$code = $LASTEXITCODE
+		try {
+			$output = & $exe @rest 2>&1 | ForEach-Object { "$_" }
+			$code = $LASTEXITCODE
+		} catch {
+			$output = @("$_")
+			$code = -1
+		}
 		$seconds = ($clock.Elapsed - $started).TotalSeconds.ToString("0.0")
 		$label = $step.Name.PadRight($width)
 
