@@ -91,6 +91,11 @@ local ATTRIBUTES: { string } = {
 	     identically and printed byte-identical signatures — the `subject` failure below, in a third
 	     place. ]]
 	"step",
+	--[[ `t.u53` is an f64 on the wire with a wholeness check; `t.f64(0, 2^53)` is the same storage
+	     without it. Same bytes, different protocols — one peer refuses 1.5 and the other delivers
+	     it — and until M4-1 they hashed identically, the `step` failure above in a fourth place.
+	     Every reader-side attribute belongs here for the same reason. ]]
+	"whole",
 	"unit",
 	"class",
 	"lengthStorage",
