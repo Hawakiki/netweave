@@ -329,6 +329,15 @@ rejects("a third argument on a number", function()
 	(t.u8 :: any)(0, 10, { utf8 = true })
 end)
 
+--[[ The constructors whose comment said they refused an extra argument, and dropped it (M4-1). ]]
+rejects("a fourth argument on t.quantized", function()
+	(t.quantized :: any)(0, 1, 0.5, "extra")
+end)
+
+rejects("a third argument on t.instance", function()
+	(t.instance :: any)("Sound", {}, "extra")
+end)
+
 rejects("and on a buffer", function()
 	(t.buffer :: any)(0, 10, { utf8 = true })
 end)
@@ -356,6 +365,51 @@ rejects("branches that are not a table", function()
 	invalid.union("move")
 end)
 
+--[[
+	The caller's table was kept by reference, unfrozen: swapping a branch after the declaration
+	changed what a codec built later encoded and what the signature hashed, with no message (M4
+	report, finding 17, and again in `t.union` in M4-1). And a number key reached `table.sort` —
+	alone it sorted in silently, mixed with a string it died in the VM's `attempt to compare`.
+]]
+do
+	--[[ Through `invalid`, because a table the test mutates afterwards cannot carry the literal
+	     type the type function reads. ]]
+	local given: { [string]: any } = { move = t.struct({ x = t.u8 }), wait = t.u8 }
+	local declared = invalid.union(given)
+
+	given.wait = t.u16
+	given.move = nil
+
+	check(
+		"swapping a branch after the declaration changes nothing",
+		(declared.branches :: any).wait.encoding == "u8"
+	)
+	check("nor does removing one", (declared.branches :: any).move ~= nil)
+	check("because the declaration froze its own copy", table.isfrozen(declared.branches :: any))
+
+	local fields: { [string]: any } = { id = t.u8 }
+	local shape = invalid.struct(fields)
+	fields.id = t.string
+
+	check("and a struct's fields are the same story", (shape.fields :: any).id.kind == "number")
+end
+
+for _, constructor in { "union", "struct", "enum" } do
+	local ok, err = pcall(function()
+		invalid[constructor]({ [1] = if constructor == "enum" then true else t.u8 })
+	end)
+
+	check(`a number key on a {constructor} is refused`, not ok)
+	check(
+		"with the fix named, not a VM message",
+		not ok and string.find(tostring(err), "string key", 1, true) ~= nil
+	)
+end
+
+rejects("mixed keys on a union do not reach table.sort", function()
+	invalid.union({ a = t.u8, [1] = t.u8 })
+end)
+
 --[[ A union is a fresh table on decode, so two entries the sender wrote with equal keys arrive as
      two distinct ones — the same reason a struct, an array and a map are refused as map keys. ]]
 rejects("a union as a map key", function()
@@ -376,6 +430,38 @@ check("a component schema is kept", (placed.element :: any).encoding == "i16")
 check("and the vector is still a vector3", placed.kind == "vector3")
 check("bare stays f32", t.vector3.encoding == "f32" and t.vector3.element == nil)
 check("and the unit flag survives a component", t.unitVector3(t.f32).unit == true)
+
+--[[
+	A direction's components are fractions in -1..1. An integer component can hold six directions,
+	an unsigned one three, a range short of ±1 none along that axis — and `t.unitVector3(t.u8)`
+	was accepted and lowered to three bytes, refusing almost every honest direction on the way
+	out (M4-1). Both halves of the check, and the one shape that is the whole point of naming a
+	component on a direction: a quantised byte per axis.
+]]
+for _, whole in { t.i16(-2048, 2048), t.u8, t.u53, t.i8 } do
+	rejects(`a direction with a whole-number component: {whole.encoding}`, function()
+		t.unitVector3(whole)
+	end)
+end
+
+rejects("a direction with a quantised component that stops short of -1", function()
+	t.unitVector3(t.quantized(0, 1, 0.5))
+end)
+
+rejects("and a float one that stops short of 1", function()
+	t.unitVector3(t.f32(-1, 0.5))
+end)
+
+check(
+	"a quantised byte per axis is what a direction wants",
+	t.unitVector3(t.quantized(-1, 1, 2 / 254)).unit == true
+)
+check("and a float over exactly -1..1", t.unitVector3(t.f32(-1, 1)).unit == true)
+check("while a position keeps any number it likes", t.vector3(t.quantized(0, 1, 0.5)).kind == "vector3")
+
+rejects("a component and then something else", function()
+	(t.vector3 :: any)(t.f32, "extra")
+end)
 
 rejects("a component that is not a netweave type", function()
 	(t.vector3 :: any)(5)

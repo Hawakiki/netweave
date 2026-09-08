@@ -486,7 +486,7 @@ do
 
 		--[[ Every one of these opens a scope per element, which is the case the ceiling missed. ]]
 		{ name = "an array of booleans", schema = t.array(t.boolean, 0, 10) },
-		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 0, 10) },
+		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 10) },
 		{
 			name = "an array of structs carrying a flag",
 			schema = t.array(t.struct({ f = t.boolean, x = t.u8 }), 0, 10),
