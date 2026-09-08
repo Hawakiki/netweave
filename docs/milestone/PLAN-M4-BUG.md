@@ -176,16 +176,28 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 6 — the suite
 
-- [ ] every failure-path tag re-read; sections that assert a lifecycle or a no-op re-tagged; floors moved
-      to the honest share with a strikethrough where they fall
-- [ ] `fuzz_runtime`: a fifth invariant, "the packet consumed exactly its declared length"; confirmed to
-      go red with `Buffer.span`'s bound deleted
-- [ ] `fuzz_runtime` corpus: union, quantised, u53, constrained string, componented vector; sidecar
-      contents mutated; server-side `RESYNC`
-- [ ] the seven `UNCOVERED` types annotated in `types_ok`; `tools/exports` list emptied
-- [ ] the D-5 ceiling and the union bit-fork each pinned by an assertion that fails under its mutation
-- [ ] `roblox_runtime` prints `skip` when no player is present; sections for `Driver`, `Link.roblox`, the
-      908 limit, a table in the sidecar, `Context.acquire` on a real `Player`
+- [x] every failure-path tag re-read; sections that assert a lifecycle or a no-op re-tagged; floors moved
+      to the honest share with a strikethrough where they fall (replication 0.16, baseline 0.3, delta 0.03,
+      store none, fuzz 0.25; `CLAUDE.md` §6 updated). Acceptance 11 of `PLAN-M4` is therefore **missed**:
+      the honest share is 17%, and phase 8 writes that into the plan
+- [x] ~~`fuzz_runtime`: a fifth invariant, "the packet consumed exactly its declared length"; confirmed to
+      go red with `Buffer.span`'s bound deleted~~ The invariant is enforced in `Batch.read` instead — a
+      payload that does not end where its length says is refused at `parse`, pinned in `hostile_runtime` —
+      because through `Batch` the `span` bound is unreachable: a static length comes from the schema and a
+      counted one is checked against the batch before a byte is read, so no fuzz over `Batch` can see it
+      deleted; `serdes_runtime`'s bare-buffer fuzz is its pin. Two silent exits the wider corpus found are
+      closed with it: a control body that ends mid-value, and a resync at an endpoint with no baselines
+- [x] `fuzz_runtime` corpus: union, quantised, u53, constrained string, an enum-keyed map, ~~componented
+      vector~~ (needs a `Vector3`; Studio's); sidecar contents mutated; server-side `RESYNC`, with honoured
+      resyncs counted so invariant 3 can tell one from a silence
+- [x] the seven `UNCOVERED` types annotated in `types_ok`; `tools/exports` list emptied. One solver
+      behaviour measured on the way: a union payload alias checks a literal only after it has been used
+      as a parameter type (recorded in `types_ok` and for `PLAN-M5`)
+- [x] the D-5 ceiling and the union bit-fork each pinned by an assertion (the fork's mutation is
+      caught first by `Ir`'s require-time self-check, so its pin cannot be shown to bite on its own)
+- [x] `roblox_runtime` prints `skip` when no player is present; a table in the sidecar (two cases)
+- [ ] `roblox_runtime` sections for `Driver`, `Link.roblox`, the 908 limit, `Context.acquire` on a real
+      `Player` — written at Studio, where they can be run while being written
 - [ ] the Studio pass run and its console read
 
 ### Phase 7 — the record

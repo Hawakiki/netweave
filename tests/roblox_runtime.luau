@@ -305,6 +305,16 @@ do
 
 	rejects("an instance of the wrong class", t.instance("Sound"), buffer.create(0), { part })
 
+	--[[ The exact shape of the old double: a table answering `:IsA`. Under lune that *is* an
+	     instance, which is why this case can only live here. ]]
+	local impostor: any = {
+		IsA = function()
+			return true
+		end,
+	}
+	rejects("a table answering IsA in the sidecar", t.instance("Part"), buffer.create(0), { impostor })
+	rejects("and a bare table", t.instance("Part"), buffer.create(0), { {} :: any })
+
 	--[[ And on the way out. The writer asked only "is it an Instance", so `nw.validate` branded a
 	     part as a `Sound` and the reader refused the same bytes (M4 report, finding 23; M4-1). ]]
 	local outgoing = Serdes.fromSchema(t.instance("Sound"))
@@ -488,8 +498,12 @@ do
 	     `nw.audience.owner` takes on a `command`'s `ctx.player`. ]]
 	local players = roster.all()
 
+	--[[ Said when it cannot run. A server-only Play has no player, and a probe that did not run and
+	     printed OK is the opposite of §9's "a probe that finds nothing is written down" (M4-1). ]]
 	if #players > 0 then
 		equals("a player owns themselves", roster.owner(players[1]), players[1])
+	else
+		print("        skip: no player in this Play, so `owner(player)` was not asserted")
 	end
 
 	part:Destroy()
