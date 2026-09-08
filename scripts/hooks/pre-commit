@@ -1,0 +1,26 @@
+#!/bin/sh
+# Runs every lune-side check before a commit lands. Git runs this through its own sh (Git for
+# Windows bundles one), so the shell the committer types in does not matter.
+#
+# Enable once per clone — hooks are not tracked by git, only this directory is:
+#     git config core.hooksPath scripts/hooks
+#
+# The checks run over the working tree, not the index, so a partially staged file is checked as
+# it is on disk. `git commit --no-verify` skips it; CLAUDE.md §8 says when that is acceptable.
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if ! command -v pwsh >/dev/null 2>&1; then
+	echo "pre-commit: pwsh is not on PATH, so scripts/check.ps1 cannot run" >&2
+	exit 1
+fi
+
+pwsh -NoProfile -File scripts/check.ps1
+status=$?
+
+if [ "$status" -ne 0 ]; then
+	echo "" >&2
+	echo "pre-commit: $status check(s) failed; the commit was not made. Fix them, or --no-verify if the commit is meant to record a red tree." >&2
+fi
+
+exit "$status"
