@@ -76,6 +76,12 @@ local BEFORE: { [string]: number } = {
 	["one in ten 50x500"] = 36.51,
 	["all 50x500"] = 40.24,
 	["narrow 50x500"] = 1.67,
+	--[[ The three rungs PLAN-M4-BUG phase 5 added, measured on the tree before that phase's tick
+	     changes — the parent of the commit that changed `Tick.luau` — so the ratio printed beside
+	     them is against a tree this file ran on. ]]
+	["select-all 50x500"] = 14.32,
+	["extra key 50x500"] = 31.02,
+	["subtree 50x500"] = 1.85,
 }
 
 -- ---------------------------------------------------------------------------------------------
@@ -104,7 +110,18 @@ type Shape = {
 	players: number,
 	subjects: number,
 	narrow: boolean,
+	--[[ A `select` that returns the whole roster: the most common `select` shape — everyone but
+	     spectators, a team — and the one the broadcast skip did not cover (M4-1). ]]
+	selectAll: boolean?,
+	--[[ One key per subject the schema never reads, changing every tick: `lastSeen = os.clock()`,
+	     a `Character` reference. A walk over the whole table calls every subject moved (M4-1). ]]
+	extra: boolean?,
+	--[[ A subtree per subject the schema never reads — the inventory a `Replica.Data` carries that
+	     this channel does not replicate — cloned into every baseline and walked every tick. ]]
+	subtree: boolean?,
 }
+
+local SUBTREE_ENTRIES = 20
 
 local SHAPES: { Shape } = {
 	{ name = "10x100", players = 10, subjects = 100, narrow = false },
@@ -112,6 +129,9 @@ local SHAPES: { Shape } = {
 	{ name = "50x100", players = 50, subjects = 100, narrow = false },
 	{ name = "50x500", players = 50, subjects = 500, narrow = false },
 	{ name = "narrow", players = 50, subjects = 500, narrow = true },
+	{ name = "select-all", players = 50, subjects = 500, narrow = false, selectAll = true },
+	{ name = "extra", players = 50, subjects = 500, narrow = false, extra = true },
+	{ name = "subtree", players = 50, subjects = 500, narrow = false, subtree = true },
 }
 
 type Rig = {
@@ -124,6 +144,8 @@ type Rig = {
 	--[[ Bumps one field on every `step`th subject, so a rung can move a tenth of the world or all
 	     of it without allocating anything the tick would then be timed carrying. ]]
 	move: (step: number) -> (),
+	--[[ Bumps the non-schema key on every subject, which is what a `lastSeen` does between ticks. ]]
+	churn: () -> (),
 }
 
 local rigs: { [string]: Rig } = {}
@@ -142,10 +164,24 @@ for _, entry in SHAPES do
 	local world: { [number]: any } = {}
 
 	for subject = 1, entry.subjects do
-		local value: { [string]: number } = {}
+		local value: { [string]: any } = {}
 
 		for index = 1, FIELDS do
 			value[`f{index}`] = index
+		end
+
+		if entry.extra then
+			value.lastSeen = 0
+		end
+
+		if entry.subtree then
+			local inventory: { number } = table.create(SUBTREE_ENTRIES)
+
+			for index = 1, SUBTREE_ENTRIES do
+				inventory[index] = index
+			end
+
+			value.inventory = inventory
 		end
 
 		world[subject] = value
@@ -157,11 +193,15 @@ for _, entry in SHAPES do
 		players[index] = { name = `p{index}` }
 	end
 
-	--[[ `select` returning one player is the narrow shape; everything else is `everyone`, which is
-	     the branch that expands the roster into the recipient array. ]]
+	--[[ `select` returning one player is the narrow shape; a `select` returning the roster is the
+	     shape the broadcast skip does not cover; everything else is `everyone`, which is the
+	     branch that expands the roster into the recipient array. ]]
 	local audience = if entry.narrow
 		then nw.audience.select(function(): { any }
 			return { players[1] }
+		end)
+		elseif entry.selectAll then nw.audience.select(function(): { any }
+			return players
 		end)
 		else nw.audience.everyone
 
@@ -184,6 +224,13 @@ for _, entry in SHAPES do
 			for subject = step, entry.subjects, step do
 				local value = world[subject]
 				value.f1 = (value.f1 + 1) % 65536
+			end
+		end,
+
+		churn = function()
+			for subject = 1, entry.subjects do
+				local value = world[subject]
+				value.lastSeen = (value.lastSeen or 0) + 1
 			end
 		end,
 	}
@@ -234,6 +281,8 @@ type Rung = {
 	--[[ How much of the world moves between ticks: `nil` is nothing, 10 is a tenth, 1 is all of
 	     it. ]]
 	step: number?,
+	--[[ Whether the non-schema key changes between ticks. Nothing the schema reads moves. ]]
+	churn: boolean?,
 }
 
 local RUNGS: { Rung } = {
@@ -244,6 +293,9 @@ local RUNGS: { Rung } = {
 	{ name = "one in ten 50x500", rig = rigs["50x500"], step = 10 },
 	{ name = "all 50x500", rig = rigs["50x500"], step = 1 },
 	{ name = "narrow 50x500", rig = rigs["narrow"] },
+	{ name = "select-all 50x500", rig = rigs["select-all"] },
+	{ name = "extra key 50x500", rig = rigs["extra"], churn = true },
+	{ name = "subtree 50x500", rig = rigs["subtree"] },
 }
 
 type Result = {
@@ -269,12 +321,20 @@ local function measure(rung: Rung): Result
 			rig.move(rung.step)
 		end
 
+		if rung.churn then
+			rig.churn()
+		end
+
 		rig.tick()
 	end
 
 	for index = 1, REPEATS do
 		if rung.step then
 			rig.move(rung.step)
+		end
+
+		if rung.churn then
+			rig.churn()
 		end
 
 		local started = os.clock()
