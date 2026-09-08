@@ -494,6 +494,132 @@ end
 local TEXT_OPTIONS: { [string]: boolean } = { utf8 = true, pattern = true }
 table.freeze(TEXT_OPTIONS)
 
+--[[
+	The matcher's worst case for a pattern with k unbounded items is about `max^k` steps, and this
+	is the largest product `t.string` admits. 2^16 steps is 0.4 ms measured (`spike/pattern/cost`:
+	two items at 256 bytes), which a `rate` can budget; the default `max` of 65,535 with two items
+	is 4 × 10^9 steps, 25 seconds, which nothing can. So two unbounded items allow a `max` of 256,
+	three allow 40, four allow 16, and one is linear at any length.
+]]
+local PATTERN_STEPS = 65536
+
+--[[
+	What the declaration checks, because the matcher does not: Lua 5.3 §6.4.1 says a malformed
+	pattern raises *during matching*, and the M4-1 report found the previous check — `string.find`
+	against the empty string — reached nothing behind a literal. `"a%b"` was accepted at
+	declaration and raised on the receive path, on a peer's string, outside `reject` (G4).
+
+	So the pattern is walked here by the grammar in that section. Two things are refused that are
+	well-formed: a back-reference (`%1`), because it needs a capture the walk would have to track
+	and its cost is not the `max^k` bound below; and an anchor at either end, because netweave adds
+	its own (see `TEXT_OPTIONS`). A `^` or `$` anywhere else is the literal character, as it is in
+	Lua, and `%$` at the end is an escaped dollar, not an anchor — the old check read the last
+	character alone and refused it.
+
+	Returns the count of unbounded items — a single-character class followed by `*`, `+` or `-` —
+	which is what the cost rule needs; `?` is bounded and `%b`/`%f` are linear.
+]]
+local function scanPattern(pattern: string): (string?, number)
+	local length = #pattern
+	local at = 1
+	local depth = 0
+	local unbounded = 0
+
+	--[[ The index of the ']' closing a set that opens at `open`, or nil. A '^' first negates, a
+	     ']' first (after that) is the literal bracket, and a '%' escapes the character after it. ]]
+	local function closeSet(open: number): number?
+		local close = open + 1
+		if string.sub(pattern, close, close) == "^" then
+			close += 1
+		end
+		if string.sub(pattern, close, close) == "]" then
+			close += 1
+		end
+		while close <= length and string.sub(pattern, close, close) ~= "]" do
+			if string.sub(pattern, close, close) == "%" then
+				close += 1
+			end
+			close += 1
+		end
+		return if close <= length then close else nil
+	end
+
+	if string.sub(pattern, 1, 1) == "^" then
+		return "anchor", 0
+	end
+
+	while at <= length do
+		local char = string.sub(pattern, at, at)
+		local item = true
+
+		if char == "(" then
+			depth += 1
+			at += 1
+			item = false
+		elseif char == ")" then
+			if depth == 0 then
+				return "a ')' with no '(' before it", 0
+			end
+			depth -= 1
+			at += 1
+			item = false
+		elseif char == "$" and at == length then
+			return "anchor", 0
+		elseif char == "%" then
+			local next = string.sub(pattern, at + 1, at + 1)
+
+			if next == "" then
+				return "ends in a '%', which has to be followed by a class or the character it escapes", 0
+			elseif next == "b" then
+				if at + 3 > length then
+					return "'%b' needs the two characters it balances, as in %b()", 0
+				end
+				at += 4
+				item = false
+			elseif next == "f" then
+				if string.sub(pattern, at + 2, at + 2) ~= "[" then
+					return "'%f' needs a set after it, as in %f[%w]", 0
+				end
+				local close = closeSet(at + 2)
+				if not close then
+					return "a '[' that never closes", 0
+				end
+				at = close + 1
+				item = false
+			elseif string.match(next, "%d") then
+				return `a back-reference '%{next}', which netweave patterns do not support; spell the repeated text out`,
+					0
+			else
+				at += 2
+			end
+		elseif char == "[" then
+			local close = closeSet(at)
+			if not close then
+				return "a '[' that never closes", 0
+			end
+			at = close + 1
+		else
+			at += 1
+		end
+
+		if item then
+			local quantifier = string.sub(pattern, at, at)
+			if quantifier == "*" or quantifier == "+" or quantifier == "-" then
+				unbounded += 1
+				at += 1
+			elseif quantifier == "?" then
+				at += 1
+			end
+		end
+	end
+
+	if depth > 0 then
+		return "a '(' that never closes", 0
+	end
+
+	return nil, unbounded
+end
+
 local function refineText(constrained: any, options: any)
 	if options == nil then
 		return
@@ -531,17 +657,35 @@ local function refineText(constrained: any, options: any)
 			"t.string's `pattern` is empty, which matches only an empty string. Use a length of 0..0 if that is what you meant"
 		)
 
+		local problem, unbounded = scanPattern(pattern)
+
 		check(
-			string.sub(pattern, 1, 1) ~= "^" and string.sub(pattern, -1) ~= "$",
+			problem ~= "anchor",
 			`t.string's \`pattern\` "{pattern}" carries its own anchor, and netweave adds one — the `
 				.. `two together match a literal ^ or $. Write the pattern for the whole value and `
-				.. `leave the anchors off`
+				.. `leave the anchors off; a literal dollar at the end is %$`
 		)
 
 		check(
-			(pcall(string.find, "", pattern)),
-			`t.string's \`pattern\` "{pattern}" is not a Lua pattern. A '%' has to be followed by a `
-				.. `class or a literal, and a '[' has to close`
+			problem == nil,
+			`t.string's \`pattern\` "{pattern}" is not a Lua pattern: {problem or ""}. It would raise `
+				.. `on a peer's string rather than refuse it, so it is refused here`
+		)
+
+		--[[ `max` is the length of the value the matcher runs over, and it is the attacker's choice
+		     up to that bound. The rule is on the product, so a short field keeps its two `.*`. ]]
+		local max = constrained.max
+		local allowed = math.floor(PATTERN_STEPS ^ (1 / math.max(unbounded, 1)))
+
+		check(
+			unbounded <= 1 or max ^ unbounded <= PATTERN_STEPS,
+			`t.string's \`pattern\` "{pattern}" has {unbounded} unbounded items (*, + or -) over a `
+				.. `value of up to {max} bytes, and the matcher backtracks over every one of them: `
+				.. `about {max}^{unbounded} steps on a hostile string, which is seconds per packet at `
+				.. `the default maximum. `
+				.. `Lower the maximum to {allowed} or fewer for this many items, or rewrite the `
+				.. `pattern so at most one item is unbounded — a character class with a count, `
+				.. `[%w]?[%w]?, or a class instead of '.'`
 		)
 
 		constrained.pattern = pattern
@@ -833,6 +977,13 @@ t.boolean = descriptor({ kind = "boolean" :: Kind }) :: Type<boolean>
 
 	Both are checked on the way out *and* on the way in: a value the schema forbids is a raise at
 	the `:send` that wrote it, and a peer's is a refused packet.
+
+	A pattern has a **cost**, and a peer chooses the string it runs over. Lua's matcher backtracks,
+	so a pattern with `k` unbounded items (`*`, `+` or `-`) costs about `max^k` steps on a hostile
+	string: `(.*)@(.*)%.(.*)` over the default 65,535 bytes is 34 seconds per packet, inside any
+	`rate`. `t.string` refuses a pattern whose `max^k` passes 2^16 — two unbounded items need a
+	`max` of 256 or less, three need 40, and one unbounded item is linear at any length. Write the
+	shape with bounded classes where you can: `[%w_]+` is one item and costs nothing.
 
 	:::caution
 	A pattern is a promise about shape, not about safety. It cannot make a string safe to

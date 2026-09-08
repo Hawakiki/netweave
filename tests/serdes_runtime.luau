@@ -1612,6 +1612,13 @@ do
 	     anything through, and the reason netweave adds the anchors rather than the author. ]]
 	refuses("a value that only contains a match", t.string(1, 20, { pattern = "[%w_]+" }), "<script>a")
 	refuses("or one that begins with a match", t.string(1, 20, { pattern = "[%w_]+" }), "abc!!")
+
+	--[[ The declaration's anchor check used to read the last character alone, so a pattern ending
+	     in an escaped dollar was refused as "carries its own anchor" and there was no way to say a
+	     value must end in `$`. Through the real reader, so the anchor netweave adds is seen to sit
+	     after the escape rather than fuse with it. ]]
+	trip("a pattern ending in an escaped dollar", t.string(1, 8, { pattern = "%d+%$" }), "12$", 4)
+	refuses("and it still requires the dollar", t.string(1, 8, { pattern = "%d+%$" }), "12")
 end
 
 do

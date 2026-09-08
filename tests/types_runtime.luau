@@ -264,6 +264,65 @@ rejects("a pattern that is not a pattern", function()
 	t.string(0, 8, { pattern = "%" })
 end)
 
+--[[
+	The malformed constructs a `string.find` against the empty string never reaches: everything
+	behind a literal (M4-1). Lua raises on these *during matching* — that is, on a peer's string,
+	on the receive path, outside `reject` — so each has to be refused at the declaration.
+]]
+for _, malformed in { "a%b", "a%f", "a%fx", "a%1", "a[b", "a[^b", "a(", "a)", "a%", "a(%b" } do
+	rejects(`a malformed pattern behind a literal: "{malformed}"`, function()
+		t.string(0, 8, { pattern = malformed })
+	end)
+end
+
+--[[ And the well-formed constructs the same scan has to let through, including the two the old
+     last-character check got wrong: `%$` is an escaped dollar, and a `$` or `^` in the middle is
+     the literal character. ]]
+for _, wellFormed in { "%b()", "%f[%w]%w+", "[%]]+", "[]a]+", "[^%]]*", "%d+%$", "a^b", "a$b", "()a", "%%" } do
+	local ok = pcall(function()
+		t.string(0, 8, { pattern = wellFormed })
+	end)
+	check(`a well-formed pattern is accepted: "{wellFormed}"`, ok)
+end
+
+--[[
+	The cost rule. The matcher backtracks over every unbounded item, so k of them over a value of
+	up to `max` bytes is about `max^k` steps, and a peer chooses the bytes: `(.*)@(.*)%.(.*)` at
+	the default maximum was measured at 34 seconds per packet (M4-1, `spike/pattern/cost`). The
+	budget is 2^16 steps on the product, which lets a short field keep its two `.*`.
+]]
+rejects("two unbounded items at the default maximum", function()
+	t.string(0, 65535, { pattern = "(.*)x(.*)y" })
+end)
+
+rejects("three unbounded items on a chat-sized field", function()
+	t.string(0, 200, { pattern = "(.*)@(.*)%.(.*)" })
+end)
+
+rejects("and `-` and `+` are unbounded too", function()
+	t.string(0, 257, { pattern = "(.-)%s+" })
+end)
+
+rejects("two items one byte over the budget", function()
+	t.string(0, 257, { pattern = "(.*)x(.*)y" })
+end)
+
+check("two items inside the budget are accepted", (pcall(function()
+	t.string(0, 256, { pattern = "(.*)x(.*)y" })
+end)))
+
+check("three items on a short field are accepted", (pcall(function()
+	t.string(0, 40, { pattern = "(.*)@(.*)%.(.*)" })
+end)))
+
+check("one unbounded item is linear, at any length", (pcall(function()
+	t.string(0, 65535, { pattern = "[%w_]+" })
+end)))
+
+check("and `?` is bounded", (pcall(function()
+	t.string(0, 65535, { pattern = "a?b?c?d?e?f?" })
+end)))
+
 --[[ And the third argument nothing else takes. `t.u8(0, 10, { utf8 = true })` used to be accepted
      and ignored, which looks exactly like an option that worked. ]]
 rejects("a third argument on a number", function()
