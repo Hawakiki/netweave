@@ -140,18 +140,19 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 4 — residue of phase 8
 
-- [ ] `Context.acquire` clears `character` and `humanoid` unconditionally; `live` gets a `__newindex`
+- [x] `Context.acquire` clears `character` and `humanoid` unconditionally; `live` gets a `__newindex`
       that raises with the guard's message
-- [ ] `Protocol.ATTRIBUTES` carries `whole`; `protocol_runtime` changes it alone
-- [ ] `t.unitVector3` requires a fractional component whose range covers `[-1, 1]`
-- [ ] `t.union`, `t.struct`, `t.enum`: clone-then-freeze the caller's table; refuse a non-string key
+- [x] `Protocol.ATTRIBUTES` carries `whole`; `protocol_runtime` changes it alone
+- [x] `t.unitVector3` requires a fractional component whose range covers `[-1, 1]`
+- [x] `t.union`, `t.struct`, `t.enum`: clone-then-freeze the caller's table; refuse a non-string key
       before `sortedKeys`
-- [ ] `quantized`, `vectored`, `instance` refuse extra arguments, as their comment says
-- [ ] arrays of optionals: an exact length iterates `1..exact` without `#`; a dynamic array of optionals
+- [x] `quantized`, `vectored`, `instance` refuse extra arguments, as their comment says
+- [x] arrays of optionals: an exact length iterates `1..exact` without `#`; a dynamic array of optionals
       is refused at declaration
-- [ ] `owner` and `nearby` consult `roster.has`; an end-to-end test runs `forget(alice)` through the real
+- [x] `owner` and `nearby` consult `roster.has`; an end-to-end test runs `forget(alice)` through the real
       `Tick` and asserts `held(alice) == 0` on the next frame
-- [ ] the instance writer checks class and `descendantOf`, so `nw.validate` brands what the reader accepts
+- [x] the instance writer checks class and `descendantOf`, so `nw.validate` brands what the reader accepts —
+      stand-ins under lune; the two real-Instance cases in `roblox_runtime` wait for the phase-6 Studio pass
 
 ### Phase 5 — the tick
 

@@ -1667,6 +1667,43 @@ do
 	refuses("a short array of non-optionals is still refused by its count", t.array(t.u8, 4), { 1, 2, 3 })
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- The instance writer asks the reader's questions
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		The reader has always checked the class and the container; the writer asked only "is it an
+		Instance", so `nw.validate(t.instance("Sound"), part)` branded a part as conforming and the
+		reader refused the same bytes (M4 report, finding 23; M4-1). Stand-ins here answer the two
+		methods the writer asks; the real Instances are in `tests/roblox_runtime.luau`.
+	]]
+	local function standIn(className: string, inside: boolean): any
+		return {
+			ClassName = className,
+			IsA = function(_self: any, class: string): boolean
+				return class == className
+			end,
+			IsDescendantOf = function(): boolean
+				return inside
+			end,
+		}
+	end
+
+	--[[ The declaration refuses a container that is not an Instance, so the descriptor is built by
+	     hand — the path a schema built at runtime takes, and the one the reader's own tests take. ]]
+	local container: any = { Name = "Workspace" }
+	local contained: any = { kind = "instance", class = "Part", descendantOf = container }
+
+	refuses("a wrong class on the way out", t.instance("Sound"), standIn("Part", true))
+	refuses("and one outside its container", contained, standIn("Part", false))
+
+	local right = Serdes.fromSchema(contained)
+	local wrote = pcall(right.write, standIn("Part", true))
+	Buffer.load(nil)
+	check("while the declared class inside its container is written", wrote)
+end
+
 do
 	--[[
 		The half the finding is about: a **peer's** string is the one that reaches `SetAsync`,

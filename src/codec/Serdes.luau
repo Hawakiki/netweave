@@ -1248,6 +1248,9 @@ function buildWriter(node: Node): Writer
 			f32(axis.Z * angle)
 		end
 	elseif kind == "instance" then
+		local class = node.class
+		local root = node.descendantOf
+
 		return function(value: any, _flags: Flags)
 			if value == nil then
 				error("[netweave] a non-optional instance field is nil")
@@ -1258,6 +1261,18 @@ function buildWriter(node: Node): Writer
 			     shape on the way in; this is the send side of that check. ]]
 			if not isInstance(value) then
 				error(`[netweave] an instance field was given {typeof(value)}`)
+			end
+
+			--[[ The class and the container, on the way out as well as in. The reader has always
+			     asked both; the writer asked only "is it an Instance", so `nw.validate` branded a
+			     `BasePart` as conforming to `t.instance("Sound")` and DESIGN-API's "exactly as strict
+			     as the encoder" was true and useless (M4 report, finding 23; M4-1). ]]
+			if class and not value:IsA(class) then
+				error(`[netweave] an instance field declared {class} was given a {value.ClassName}`)
+			end
+
+			if root and not value:IsDescendantOf(root) then
+				error(`[netweave] an instance field declared inside {root.Name} was given one outside it`)
 			end
 
 			writeInstance(value)
