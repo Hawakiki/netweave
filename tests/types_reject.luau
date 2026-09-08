@@ -20,30 +20,30 @@ local entity = t.struct({
 })
 
 --[[ 1. A struct field's type is not interchangeable with another. ]]
-local _wrongField: Type<{ id: string, name: string }> = entity
+local _wrongField: Type<{ id: string, name: string }> = entity -- netweave:reject 'Type<{ id: string, name: string }>'
 
 --[[ 2. A field cannot be dropped from the payload. ]]
-local _missingField: Type<{ id: number }> = entity
+local _missingField: Type<{ id: number }> = entity -- netweave:reject 'Type<{ id: number }>'
 
 --[[ 3. A field cannot be invented. ]]
-local _extraField: Type<{ id: number, name: string, health: number }> = entity
+local _extraField: Type<{ id: number, name: string, health: number }> = entity -- netweave:reject 'Type<{ health: number, id: number, name: string }>'
 
 --[[ 4. An array's element type is checked. ]]
-local _wrongElement: Type<{ string }> = t.array(t.u8)
+local _wrongElement: Type<{ string }> = t.array(t.u8) -- netweave:reject 'Type<{string}>'
 
 --[[ 5. An optional is not the same type as its inner. ]]
-local _optionalDropped: Type<number> = t.optional(t.u16)
+local _optionalDropped: Type<number> = t.optional(t.u16) -- netweave:reject 'Type<number>'
 
 --[[ 6. An enum only admits the variants that were declared. ]]
 local weapon = t.enum({ primary = true, secondary = true })
-local _undeclaredVariant: Type<"primary" | "grenade"> = weapon
+local _undeclaredVariant: Type<"primary" | "grenade"> = weapon -- netweave:reject 'Type<"grenade" | "primary">'
 
 --[[ 7. Nesting is checked all the way down. ]]
 local nested = t.struct({ entities = t.array(entity, 4) })
-local _wrongNested: Type<{ entities: { { id: string, name: string } } }> = nested
+local _wrongNested: Type<{ entities: { { id: string, name: string } } }> = nested -- netweave:reject 'Type<{ entities: {{ id: string, name: string }} }>'
 
 --[[ 8. A struct field has to be a netweave type at all. ]]
-local _notAType = t.struct({ id = 5 })
+local _notAType = t.struct({ id = 5 }) -- netweave:reject a struct field is not a netweave type
 
 --[[
 	9 and 10. **`PayloadOf` has to reduce**, and only a rejection can say whether it does.
@@ -63,8 +63,8 @@ local _notAType = t.struct({ id = 5 })
      everywhere else in this file. ]]
 local _shot = t.struct({ seq = t.u16 })
 
-local _mistypedPayload: t.PayloadOf<typeof(_shot)> = { seq = "not a number" }
-type _notASchema = t.PayloadOf<number>
+local _mistypedPayload: t.PayloadOf<typeof(_shot)> = { seq = "not a number" } -- netweave:reject but got '"not a number"'
+type _notASchema = t.PayloadOf<number> -- netweave:reject PayloadOf takes a netweave type
 
 --[[
 	11. **A union branch's value has to match its tag.** The pattern this replaces — one optional
@@ -73,6 +73,6 @@ type _notASchema = t.PayloadOf<number>
 	component's.
 ]]
 local _action = t.union({ move = t.struct({ x = t.u8 }), wait = t.u8 })
-local _crossed: t.PayloadOf<typeof(_action)> = { tag = "wait", value = { x = 1 } }
+local _crossed: t.PayloadOf<typeof(_action)> = { tag = "wait", value = { x = 1 } } -- netweave:reject but got '"move" | "wait"'
 
 return nil

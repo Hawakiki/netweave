@@ -281,7 +281,10 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
   has no test.** `nw.configure` shipped in M3 phase 0 typed so that Luau rejected every call, and
   `tests/config_reject.luau` counted nine of those rejections as its own cases passing. Write the
   `_ok` half.
-- `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header
+- `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header, one
+  per line marked `-- netweave:reject <text>`, each saying what its diagnostic has to contain. The count
+  alone let a case be swapped for junk; the line alone let junk be swapped onto the marked line. Both
+  were measured before the text was added.
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
 
 **A security-relevant suite counts its own shape** through `tests/harness.luau`, and refuses to pass

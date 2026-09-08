@@ -24,7 +24,7 @@
 local nw = require("../src/netweave")
 
 -- A rule that does not exist.
-nw.configure({ rules = { handlers = "warn" } })
+nw.configure({ rules = { handlers = "warn" } }) -- netweave:reject no such rule `handlers`
 
 --[[ A severity that is not one of the three is *not* here, and that is the one thing the analyzer
      cannot see. A bare `S` parameter gives a config block's severities no expected type, so
@@ -32,24 +32,24 @@ nw.configure({ rules = { handlers = "warn" } })
      `Config.configure` refuses it at startup instead, and `tests/config_runtime.luau` pins that. ]]
 
 -- A severity that is not a string at all.
-nw.configure({ rules = { parse = 2 } })
+nw.configure({ rules = { parse = 2 } }) -- netweave:reject rule `parse` takes a severity
 
 -- A limit that does not exist.
-nw.configure({ limits = { queueCapacitiy = 8 } })
+nw.configure({ limits = { queueCapacitiy = 8 } }) -- netweave:reject no such limit `queueCapacitiy`
 
 -- A limit that is not a number.
-nw.configure({ limits = { queueCapacity = "512" } })
+nw.configure({ limits = { queueCapacity = "512" } }) -- netweave:reject limit `queueCapacity` takes a number
 
 -- A top-level setting that does not exist.
-nw.configure({ rule = {} })
+nw.configure({ rule = {} }) -- netweave:reject no such setting `rule`
 
 -- `contextGuard` is a boolean.
-nw.configure({ contextGuard = "on" })
+nw.configure({ contextGuard = "on" }) -- netweave:reject `contextGuard` takes a boolean
 
 -- Settings are a table.
-nw.configure(7)
+nw.configure(7) -- netweave:reject takes a table of settings
 
 -- The snapshot is not a way to set anything.
-nw.config.snapshot().rules.parse = "off"
+nw.config.snapshot().rules.parse = "off" -- netweave:reject is read-only
 
 return true
