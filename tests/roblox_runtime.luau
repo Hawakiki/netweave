@@ -305,6 +305,13 @@ do
 
 	rejects("an instance of the wrong class", t.instance("Sound"), buffer.create(0), { part })
 
+	--[[ And on the way out. The writer asked only "is it an Instance", so `nw.validate` branded a
+	     part as a `Sound` and the reader refused the same bytes (M4 report, finding 23; M4-1). ]]
+	local outgoing = Serdes.fromSchema(t.instance("Sound"))
+	local wrote = pcall(outgoing.write, part)
+	Buffer.take()
+	check("and the writer refuses it too, so nw.validate cannot brand it", not wrote)
+
 	local sound = Instance.new("Sound")
 	local value, failure = roundTrip(t.instance("Sound"), sound, { sound })
 	equals("an instance of the right class decodes", failure, nil)
@@ -356,6 +363,11 @@ do
 	check("and survives", value == inside)
 
 	rejects("one of the right class from somewhere else", contained, buffer.create(0), { outside })
+
+	local outgoing = Serdes.fromSchema(contained)
+	local wrote = pcall(outgoing.write, outside)
+	Buffer.take()
+	check("and the writer refuses it on the way out as well", not wrote)
 
 	--[[ A nested descendant, not only a direct child: `IsDescendantOf` is the question, and a game
 	     that meant "child of" would be asking a different one. ]]
