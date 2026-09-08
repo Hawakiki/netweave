@@ -64,6 +64,9 @@ try {
 	foreach ($step in $steps) {
 		$started = $clock.Elapsed
 		$exe, $rest = $step.Command
+		# A missing executable leaves $LASTEXITCODE at the previous step's value, so a tool that is
+		# not installed would read as green (measured). The sentinel makes "did not run" a failure.
+		$global:LASTEXITCODE = -1
 		$output = & $exe @rest 2>&1 | ForEach-Object { "$_" }
 		$code = $LASTEXITCODE
 		$seconds = ($clock.Elapsed - $started).TotalSeconds.ToString("0.0")
