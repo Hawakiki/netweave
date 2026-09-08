@@ -62,7 +62,7 @@ bench/                        the benchmark harness, with its own project file
   envelope.luau               the netweave batch envelope, checked under lune
   report.luau                 a run document to the tables in RESULTS.md
 tools/                        globalTypes.d.luau for the analyzer, and the checkers that read source off disk
-scripts/                      check.ps1 — every lune-side check in one command
+scripts/                      check.ps1 — every lune-side check in one command; hooks/ — the pre-commit that runs it
 _refsrc/                      READ-ONLY vendored competitor sources — never edit
   _generated/                 codegen output used as evidence in the research log
 ```
@@ -218,6 +218,16 @@ if a tool "is not found", check the manifest before assuming it is not installed
 filters by name, `-Show` prints every step's output. The runtime list is read from `tests/`, not kept
 in the script. Written for PowerShell because `bash` from pwsh on this machine is WSL's and cannot see
 the rokit shims. The one thing it cannot run is the Studio half, and it says so on its last line.
+
+The same script is the pre-commit hook. Hooks are not tracked, so enable it once per clone:
+
+```sh
+git config core.hooksPath scripts/hooks
+```
+
+A commit with a red step is refused with the step's output; `--no-verify` is for a commit that is
+meant to record a red tree, and the message should say so. Not husky: that needs Node and a
+`package.json`, and this repository's toolchain is rokit.
 
 ```sh
 lune run analyze              # type checking, both halves (see below)
