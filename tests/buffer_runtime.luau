@@ -144,7 +144,33 @@ do
 
 	Codec.beginRead(hostile, {})
 	Codec.readVarint()
-	check("varint of continuation bytes is rejected", Codec.rejected() == "varint too long")
+	check("varint of continuation bytes is rejected", Codec.rejected() == "varint past 32 bits")
+end
+
+--[[ Five bytes hold 35 bits and the value holds 32. The fifth byte's high bits were dropped by the
+     shift, so a varint past 2^32 read as one inside it — the same bytes as a legal value with no
+     rejection anywhere. The largest legal fifth byte is 0x0F. ]]
+do
+	local function fifth(byte: number): (number, string?)
+		local hostile = buffer.create(5)
+		for offset = 0, 3 do
+			buffer.writeu8(hostile, offset, 0xFF)
+		end
+		buffer.writeu8(hostile, 4, byte)
+
+		Codec.beginRead(hostile, {})
+		local value = Codec.readVarint()
+		return value, Codec.rejected()
+	end
+
+	local top, topReason = fifth(0x0F)
+	check("a varint of exactly 2^32 - 1 is read", top == 4294967295 and topReason == nil)
+
+	local over, overReason = fifth(0x1F)
+	check("a varint past 32 bits is rejected, not wrapped", overReason == "varint past 32 bits" and over == 0)
+
+	local far, farReason = fifth(0x7F)
+	check("however far past", farReason == "varint past 32 bits" and far == 0)
 end
 
 -- ---------------------------------------------------------------------------------------------
