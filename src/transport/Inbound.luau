@@ -943,7 +943,11 @@ function Inbound.new(config: Config): Inbound
 
 			local store = baselines
 
+			--[[ Reported, the way `change` reports it: an endpoint with no baselines cannot honour
+			     the ask, and returning without a word was the one silent exit on this path — found
+			     by the fuzzer the moment its corpus learned to write a resync (PLAN-M4-BUG phase 6). ]]
 			if not store then
+				report(channel, sender, "replicate", NO_BASELINES, bytes)
 				return
 			end
 

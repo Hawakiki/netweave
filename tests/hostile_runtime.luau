@@ -319,7 +319,36 @@ do
 	local survived = feed()
 	check("an overlong varint does not raise", survived)
 	equals("it is refused", #reports, 1)
-	check("without looping", true)
+end
+
+do
+	reset()
+
+	--[[
+		A payload that does not end where its length says. The reader for `t.struct({ s = ... })`
+		consumes the string and stops; three bytes the sender declared and nobody read used to be
+		stepped over in silence — padding a peer can add for free, and the shape that would hide a
+		reader consuming less than it should. G5 is per packet, and "consumed exactly what it
+		claimed" is its packet-level form (PLAN-M4-BUG phase 6). Refused, and the honest packet
+		behind it still arrives.
+	]]
+	Buffer.writeU8(Batch.VERSION)
+	Buffer.writeVarint(Counted.id)
+	Buffer.writeVarint(6)
+	Buffer.writeU8(2)
+	Buffer.writeU8(0x68)
+	Buffer.writeU8(0x69)
+	Buffer.writeU8(0)
+	Buffer.writeU8(0)
+	Buffer.writeU8(0)
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+
+	local stood = feed()
+	check("a padded payload does not raise", stood)
+	equals("the padded packet is refused", #reports, 1)
+	equals("at parse", first().stage, "parse")
+	check("naming the length", string.find(first().reason, "declared length", 1, true) ~= nil)
+	equals("and the packet behind it arrives", delivered, 1)
 end
 
 do
@@ -1107,6 +1136,35 @@ end
 
 do
 	reset()
+
+	--[[
+		A control body that fails to parse inside its own declared length. `01 00 02 01 89`: a resync
+		whose one-byte body is a varint asking for a second byte the length did not provide. The
+		read was refused inside the body's limit, and the refusal was then stepped over without a
+		word — the one silent exit on the control path, found by the fuzzer the round its corpus
+		learned to write a resync (PLAN-M4-BUG phase 6). Reported now, and the packet behind it
+		arrives.
+	]]
+	Buffer.writeU8(Batch.VERSION)
+	Buffer.writeVarint(0)
+	--[[ The kind as a literal rather than `Batch.RESYNC`, so the pre-fix tree — which does not export
+	     it — reaches the assertions instead of raising at the write. ]]
+	Buffer.writeU8(2)
+	Buffer.writeVarint(1)
+	Buffer.writeU8(0x89)
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+
+	local stood = feed()
+
+	check("a control body that ends mid-value does not raise", stood)
+	equals("it is reported rather than stepped over in silence", #reports, 1)
+	equals("at parse", first().stage, "parse")
+	check("naming the body", string.find(first().reason, "body ends before", 1, true) ~= nil)
+	equals("and the packet behind it arrives", delivered, 1)
+end
+
+do
+	reset()
 	at += 1000
 	budget.forget(mallory)
 	agreement.forget(mallory)
@@ -1295,6 +1353,26 @@ do
 
 	check("a resync for a channel that is not replicated does not raise", stood)
 	equals("both are refused", reportedAt("replicate"), 2)
+
+	--[[ And an endpoint holding no baselines at all, which returned without a word — the one silent
+	     exit on the path, found by the fuzzer the round its corpus learned to write a resync. ]]
+	reset()
+
+	local bare = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+	})
+
+	Batch.writeResync(Replicated.id)
+
+	local quiet = Buffer.take()
+	local held_ = pcall(bare.receive, quiet, nil, mallory)
+
+	check("a resync at an endpoint with no baselines does not raise", held_)
+	equals("and is reported rather than dropped", reportedAt("replicate"), 1)
 end
 
 do

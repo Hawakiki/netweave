@@ -59,6 +59,9 @@ Batch.VERSION = 1
 local ONE_BYTE_MAX = 127
 local TWO_BYTE_MAX = 16383
 
+--[[ Constant, because a peer chooses how often it is said. ]]
+local UNCONSUMED = "the payload does not end where its declared length says it does"
+
 --[=[
 	@interface Sink
 	@within Batch
@@ -142,7 +145,12 @@ local RESYNC = 2
      kinds this build does not read allocates one string rather than one per packet. ]]
 local ANOTHER_CONTROL_KIND = "another control kind this build does not read, in the same batch"
 
+--[[ A control body that fails to parse inside the length it declared. Constant, because a peer
+     chooses how often it is said. ]]
+local TRUNCATED_CONTROL_BODY = "a control packet's body ends before the value it carries does"
+
 Batch.HELLO = HELLO
+Batch.RESYNC = RESYNC
 
 --[=[
 	@prop OK number
@@ -549,14 +557,22 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 
 				if not Buffer.rejected() then
 					sink.hello(hash, size - packetStart)
+				else
+					sink.refuse(nil, "parse", TRUNCATED_CONTROL_BODY, length)
 				end
 			elseif kind == RESYNC and length >= 1 then
 				Buffer.setLimit(bodyEnd)
 
 				local wanted = Buffer.readVarint()
 
+				--[[ A body that fails to parse inside its own declared length — a resync id whose
+				     varint asks for a byte the length did not provide — was stepped over without a
+				     word. Found by the fuzzer the round its corpus learned to write a resync
+				     (PLAN-M4-BUG phase 6): `01 00 02 01 89`, one flipped bit. ]]
 				if not Buffer.rejected() then
 					sink.resync(wanted, size - packetStart)
+				else
+					sink.refuse(nil, "parse", TRUNCATED_CONTROL_BODY, length)
 				end
 			else
 				--[[ Named once per batch, counted every time. Every unknown kind is still reported —
@@ -759,6 +775,16 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 					end
 				else
 					local value, failure = codec.read()
+
+					--[[ The payload has to end where its length said it would. A reader that stopped
+					     short leaves bytes the sender declared and nobody read — padding a peer can
+					     add for free, and a shape that hides a reader consuming less than it should.
+					     G5 is per packet, and "consumed exactly what it claimed" is the packet-level
+					     form of it (PLAN-M4-BUG phase 6). A constant reason: it is a per-packet path
+					     a peer chooses the rate of. ]]
+					if not failure and Buffer.cursor() ~= payloadEnd then
+						failure = UNCONSUMED
+					end
 
 					if failure then
 						sink.refuse(channel, "parse", failure, bytes, call)
