@@ -177,6 +177,15 @@ function Baseline.new(bounded: boolean?): Baseline
 					against a limit of 256, with the store untouched: 265 bytes and 44 refusals every
 					idle frame, for ever (M4 report).
 
+					**And the full packet every tick stands, with the argument written out** (M4-1 asked
+					for a per-client "received the last snapshot" flag so an idle frame sends nothing).
+					A per-client flag cannot answer for a client that *enters* a subject's audience later:
+					the subject is settled, the client is over the line, and the flag would say "already
+					has it" about a subject it has never seen. The record that can answer is per
+					(client, subject) — and that is a baseline slot, which is exactly what this limit
+					bounds. So the resend is the honest cost of being over the limit, reported once below,
+					and the fix is the one the report names: raise the limit or narrow the audience.
+
 					**Said once per client per channel, not once per subject per tick.** The condition
 					is a state, not an event — 44 subjects over the line was 2,640 reports a second
 					describing one unchanging fact, which is a console nobody can read and an

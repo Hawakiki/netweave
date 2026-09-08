@@ -156,14 +156,23 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 5 — the tick
 
-- [ ] `snapshot` and `moved` walk the schema's fields, not the table; the cycle probe no longer overflows
-- [ ] a `select` audience that returns the roster takes the broadcast skip; `bench/tick` gains the rung
-- [ ] a client over `baselinesPerClient` is marked as holding the last snapshot; an idle frame sends nothing
-- [ ] a coalesced `RESYNC` reports at stage `replicate`, charges `bytes`, and `RESYNC_TICKS` is a
-      `Config` limit
-- [ ] the tick's calls into store, selector and audience are isolated, so a game raise loses one subject
-      and not the frame's flush (M4 finding 20)
-- [ ] a change past 16,383 bytes is reported once and the subject advances (M4 finding 24)
+- [x] `snapshot` and `moved` walk the schema's fields, not the table; the cycle probe no longer overflows
+      (`extra key` 31.02 → 1.69 ms)
+- [x] a `select` audience that returns the roster takes the broadcast skip; `bench/tick` gains the rung
+      (14.32 → 2.99 ms: the removal pass is skipped when the recipients are the roster, `among` is a set,
+      and `Recipients`' duplicate scan is a set)
+- [x] ~~a client over `baselinesPerClient` is marked as holding the last snapshot; an idle frame sends
+      nothing~~ **declined**: a per-client flag cannot answer for a client entering a subject's audience
+      later, and the record that can is per (client, subject) — a baseline slot, which is what the limit
+      bounds. The argument is in `Baseline.luau`; the once-reported resend stands
+- [x] a coalesced `RESYNC` reports at stage `replicate`, ~~charges `bytes`~~ and `RESYNC_TICKS` is a
+      `Config` limit (`resyncTicks`). Not charged: a replicated channel declares no `rate`, so there is no
+      budget to charge; the report is the observability
+- [x] the tick's calls into store, selector and audience are isolated, so a game raise loses ~~one subject~~
+      one channel's frame and not the flush (M4 finding 20) — per channel, because a `pcall` per subject
+      would need the loop's locals threaded through a closure
+- [x] a change past 16,383 bytes is reported once ~~and the subject advances~~ and the subject is left alone
+      until its value moves (M4 finding 24)
 
 ### Phase 6 — the suite
 
