@@ -113,30 +113,72 @@ end
 
 	Both comment forms, and the long form at any bracket level, because `--[=[ ]=]` is the moonwave
 	one and this file's siblings are full of it.
+
+	Strings are not coverage either, for the same reason with one more step: the M4-1 report removed
+	the `t.Ranged` entry and added a file holding `local _note = "t.Ranged is what t.u8 returns"`,
+	and the check said covered. A string satisfies the checker and removes nothing from the
+	analyzer, which is the exact hole the comment rule closed. So strings go in the same walk —
+	one walk, because a `--` inside a string is not a comment and a quote inside a comment is not
+	a string, and two passes would each be fooled by the other's construct.
+
+	What still counts and should not: a bare alias nobody reads (`type _Never = nw.Views<{}>`).
+	Requiring an annotation position is the fix and is not a character walk; deferred with a note
+	in PLAN-M4-BUG.
 ]]
-local function stripComments(source: string): string
+local function stripCommentsAndStrings(source: string): string
 	local out = {}
 	local at = 1
+	local length = #source
 
-	while at <= #source do
-		local start = string.find(source, "--", at, true)
+	while at <= length do
+		local char = string.sub(source, at, at)
+		local pair = string.sub(source, at, at + 1)
 
-		if not start then
-			table.insert(out, string.sub(source, at))
-			break
-		end
+		if pair == "--" then
+			local _, opened, level = string.find(source, "^%[(=*)%[", at + 2)
 
-		table.insert(out, string.sub(source, at, start - 1))
+			if opened then
+				local _, finish = string.find(source, `]{level}]`, opened + 1, true)
+				at = if finish then finish + 1 else length + 1
+			else
+				local newline = string.find(source, "\n", at, true)
+				at = if newline then newline else length + 1
+			end
+		elseif char == '"' or char == "'" or char == "`" then
+			--[[ A short string ends at the next unescaped matching quote. An interpolated one is
+			     treated the same way, which misreads a quote inside `{}`; nothing in tests/ writes
+			     a type name there, and the walk fails toward "not covered", which is the loud side. ]]
+			local cursor = at + 1
 
-		local _, opened, level = string.find(source, "^%[(=*)%[", start + 2)
+			while cursor <= length do
+				local next = string.sub(source, cursor, cursor)
 
-		if opened then
-			local closing = `]{level}]`
-			local _, finish = string.find(source, closing, opened + 1, true)
-			at = if finish then finish + 1 else #source + 1
+				if next == "\\" then
+					cursor += 2
+				elseif next == char or next == "\n" then
+					cursor += 1
+					break
+				else
+					cursor += 1
+				end
+			end
+
+			table.insert(out, " ")
+			at = cursor
+		elseif char == "[" then
+			local _, opened, level = string.find(source, "^%[(=*)%[", at)
+
+			if opened then
+				local _, finish = string.find(source, `]{level}]`, opened + 1, true)
+				table.insert(out, " ")
+				at = if finish then finish + 1 else length + 1
+			else
+				table.insert(out, char)
+				at += 1
+			end
 		else
-			local newline = string.find(source, "\n", start, true)
-			at = if newline then newline else #source + 1
+			table.insert(out, char)
+			at += 1
 		end
 	end
 
@@ -169,7 +211,7 @@ local ok = ""
 
 for _, name in fs.readDir("tests") do
 	if string.match(name, "_ok%.luau$") then
-		ok ..= stripComments(fs.readFile(`tests/{name}`))
+		ok ..= stripCommentsAndStrings(fs.readFile(`tests/{name}`))
 	end
 end
 
