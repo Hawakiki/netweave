@@ -78,6 +78,11 @@ end
 ]]
 local announced: { [any]: { dropped: boolean, duplicated: boolean } } = setmetatable({}, { __mode = "k" }) :: any
 
+--[[ Which players a `select` has already admitted this call, so a duplicate is one lookup rather
+     than a scan of everything admitted so far. Module-owned and cleared after each call: one table
+     for the life of the process, nothing per publish. ]]
+local chosenSet: { [any]: boolean } = {}
+
 local NOT_A_RECIPIENT = "an audience.select returned something that is not a player who is here — a "
 	.. "nil, a value of another type, or somebody who has left. It was not sent to. Return only "
 	.. "players from Players:GetPlayers(), and rebuild the list rather than keeping one across "
@@ -381,25 +386,22 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 			continue
 		end
 
-		--[[ Linear, because an audience is a handful of players and building a set to avoid it would
-		     allocate one per publish — the same trade `Tick.among` makes, for the same reason. ]]
-		local seen = false
-
-		for index = 1, count do
-			if out[index] == who then
-				seen = true
-				break
-			end
-		end
-
-		if seen then
+		--[[ ~~Linear, because an audience is a handful of players.~~ A `select` that returns the roster
+		     is the common `select` — everyone but spectators, a team — and the scan was O(n²) per
+		     subject: 500 subjects × 50 players was 1.25 million comparisons a tick, 7 ms of the
+		     14 the M4-1 report measured (`bench/tick`, `select-all`). One set, module-owned and
+		     cleared per call, so it still allocates nothing per publish. ]]
+		if chosenSet[who] then
 			duplicated = true
 			continue
 		end
 
+		chosenSet[who] = true
 		count += 1
 		out[count] = who
 	end
+
+	table.clear(chosenSet)
 
 	if dropped or duplicated then
 		announce(audience, channel, dropped, duplicated)

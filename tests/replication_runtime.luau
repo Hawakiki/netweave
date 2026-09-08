@@ -63,6 +63,10 @@ local owned: { [number]: any } = {}
      away without rebuilding the rig. ]]
 local departed: { [any]: boolean } = {}
 
+--[[ A fourth world whose one field is a byte array, so a subject can be made larger than a
+     packet's length prefix admits. ]]
+local bulky: { [number]: any } = {}
+
 local declared = Namespace.declare("game", {
 	entities = nw.replicate({
 		subject = t.u16,
@@ -107,6 +111,15 @@ local declared = Namespace.declare("game", {
 		store = nw.store.of(commons),
 	}),
 
+	--[[ A value that can outgrow a packet. The change writer refuses a payload past the two-byte
+	     length, and what the tick does with a subject it cannot send is a section below. ]]
+	bulk = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ blob = t.array(t.u8) }),
+		audience = nw.audience.everyone,
+		store = nw.store.of(bulky),
+	}),
+
 	--[[ The third audience kind, the one the M4-1 report found still trusting the roster's answer
 	     about a player the roster no longer has. ]]
 	personal = nw.replicate({
@@ -128,6 +141,7 @@ Namespace.seal()
 local channel = declared.channels.entities :: any
 local shared = declared.channels.commons :: any
 local mine = declared.channels.personal :: any
+local heavy = declared.channels.bulk :: any
 
 local function channelById(id: number): any?
 	if id == channel.id then
@@ -138,7 +152,11 @@ local function channelById(id: number): any?
 		return shared
 	end
 
-	return if id == mine.id then mine else nil
+	if id == mine.id then
+		return mine
+	end
+
+	return if id == heavy.id then heavy else nil
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -299,7 +317,7 @@ local serverIn = Inbound.new({
 local attempts = 0
 
 local watched = {
-	change = function(on: any, destination: any, subject: any, old: any, new: any): boolean
+	change = function(on: any, destination: any, subject: any, old: any, new: any): (boolean, string?)
 		attempts += 1
 		return serverOut.change(on, destination, subject, old, new)
 	end,
@@ -310,7 +328,7 @@ local tick = Tick.new({
 	baselines = serverBaselines,
 	roster = roster,
 	channels = function()
-		return { channel, shared, mine }
+		return { channel, shared, mine, heavy }
 	end,
 })
 
@@ -1043,6 +1061,181 @@ do
 	commons[950] = nil
 	commons[951] = nil
 	frame()
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The tick reads the schema's keys and nothing else
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		The phase 8 gate compared the game's whole table, so a key the schema never reads but which
+		changes every frame — `lastSeen = os.clock()`, a `Character` reference — made every subject
+		"moved" and brought back the per-pair attempt the gate removed: 31 ms a tick at 50 × 500
+		with nothing the schema reads moving (`bench/tick`, `extra key`, M4-1). A subtree the schema
+		never reads was cloned into every baseline. And a cycle through such a key overflowed the
+		stack, a fourth way for game data to abort the frame's flush.
+	]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	commons[960] =
+		{ hp = 1, gold = 1, pos = { x = 1, y = 1 }, tag = nil, lastSeen = 0, inventory = { 1, 2, 3 } }
+	commons[960].self = commons[960]
+
+	--[[ Under `pcall`, because the pre-fix walk overflowed the stack here and a raise would abort
+	     the file rather than fail the assertion. ]]
+	local survived = pcall(frame)
+
+	check("a cycle through a non-schema key does not abort the frame", survived)
+	equals("and the subject is sent", (peers[alice].broadcast[960] or {}).hp, 1)
+
+	local kept = serverBaselines.of(alice, shared, 960) or { lastSeen = "(no baseline)" }
+	check("its baseline carries only the schema's keys", kept.lastSeen == nil and kept.inventory == nil)
+	check("and not the cycle", kept.self == nil)
+
+	--[[ Removed before the frames below, so that over the pre-fix tick the rest of this section
+	     fails on its own assertions instead of overflowing again. ]]
+	commons[960].self = nil
+
+	for _ = 1, 5 do
+		commons[960].lastSeen += 1
+		attempts = 0
+		frame()
+	end
+
+	suite.failing()
+	equals("a non-schema key changing every frame costs no attempt", attempts, 0)
+	suite.passing()
+
+	commons[960].hp = 2
+	attempts = 0
+	frame()
+	equals("while a schema key moving still arrives", peers[alice].broadcast[960].hp, 2)
+	check("with one attempt per recipient", attempts == 2)
+
+	commons[960] = nil
+	frame()
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A raise inside game code loses one channel's frame, not every channel's flush
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		A store, a selector or a subject that is NaN raising inside the tick used to stall every
+		outbound channel for every player, because `Driver` runs the tick before `outbound.flush`
+		and nothing caught it (M4 report, finding 20). Each channel's tick is under its own guard
+		now: the raising channel is skipped and reported, the others go out.
+	]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	local blamed: { string } = {}
+
+	Observer.observe(function(rejection)
+		if rejection.stage == "replicate" then
+			table.insert(blamed, rejection.reason)
+		end
+	end)
+
+	local honest = mine.store
+	owned[975] = { hp = 5, gold = 5, pos = { x = 5, y = 5 }, tag = nil }
+
+	mine.store = {
+		subjects = honest.subjects,
+		read = function(subject: any): any
+			if subject == 975 then
+				error("the game's store raised")
+			end
+
+			return honest.read(subject)
+		end,
+	}
+
+	commons[961] = { hp = 7, gold = 7, pos = { x = 7, y = 7 }, tag = nil }
+
+	local survived = pcall(frame)
+
+	suite.failing()
+
+	check("the frame does not raise", survived)
+	equals("the other channel's change still went out", (peers[alice].broadcast[961] or {}).hp, 7)
+	equals("and the raise is one report", #blamed, 1)
+	check("naming what raised", string.find(blamed[1] or "", "the game's store raised", 1, true) ~= nil)
+
+	suite.passing()
+
+	mine.store = honest
+	owned[975] = nil
+	commons[961] = nil
+	frame()
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A subject no packet can carry is tried once per value, not once per recipient per frame
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		A change past the two-byte length prefix is refused by the writer, and the tick used to
+		attempt it again for every recipient on every frame, for ever, with the same report each
+		time (M4 report, finding 24: 5 of 5 false, the subject never advances). It is attempted
+		once per value now and left alone until it moves.
+	]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	local refusals = 0
+
+	Observer.observe(function(rejection)
+		if rejection.stage == "replicate" then
+			refusals += 1
+		end
+	end)
+
+	heavy.handler = function(subject: number, value: any)
+		receiving.mirror[subject] = value
+	end
+
+	local blob = table.create(20000, 1)
+	bulky[1] = { blob = blob }
+
+	attempts = 0
+	frame()
+
+	suite.failing()
+
+	equals("the first frame tries every recipient", attempts, 2)
+	check("and each attempt is reported", refusals >= 1)
+
+	local afterwards = 0
+	for _ = 1, 5 do
+		attempts = 0
+		frame()
+		afterwards += attempts
+	end
+
+	equals("the frames after it try nobody", afterwards, 0)
+	equals("nothing reached a client", mirrorOf(alice)[1], nil)
+
+	suite.passing()
+
+	--[[ When the value moves it is tried again, and a value that fits arrives. ]]
+	bulky[1] = { blob = { 1, 2, 3 } }
+	attempts = 0
+	frame()
+
+	equals("a value that fits is tried", attempts, 2)
+	equals("and arrives", #(mirrorOf(alice)[1] or { blob = {} }).blob, 3)
+
+	bulky[1] = nil
+	frame()
+	heavy.handler = nil
 	Observer.reset()
 end
 
