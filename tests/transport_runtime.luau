@@ -1993,6 +1993,47 @@ do
 	byId[81] = nil
 end
 
+do
+	reset()
+
+	--[[
+		The ceiling the M4 fix corrected: an array of structs carrying a flag opens a bitfield
+		scope per element, and the ceiling used to count none of them. `ir_runtime` pins the
+		arithmetic, but it has no failure-path floor; this is the same pin in the file that does,
+		and the packet that only the corrected ceiling admits — M4-1 measured this section green
+		with the scope bytes deleted from the sum.
+	]]
+	local channel =
+		outboundChannel(82, t.array(t.struct({ f = t.boolean, x = t.u8 }), 0, 10), { class = "signal" })
+	byId[82] = channel
+
+	equals("a scope per element is in the ceiling", channel.codec.maxSize, 21)
+
+	local got = 0
+	channel.handler = function()
+		got += 1
+	end
+
+	local inbound, reported = inboundOf(true, {})
+	local full = {}
+
+	for index = 1, 10 do
+		full[index] = { f = index % 2 == 0, x = index }
+	end
+
+	Batch.writePacket(channel, full)
+
+	local packed, instances = Buffer.take()
+	inbound.receive(packed, instances, alice)
+
+	equals("a full array, which only the corrected ceiling admits, arrives", got, 1)
+	equals("with nothing reported", #reported, 0)
+
+	channel.handler = nil
+	byId[82] = nil
+	Observer.reset()
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- A batch cannot hold more than it is allowed to (PLAN-M3 D-6)
 -- ---------------------------------------------------------------------------------------------

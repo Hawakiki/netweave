@@ -585,6 +585,23 @@ do
 	)
 
 	Buffer.load(nil)
+
+	--[[
+		**The bit fork, pinned by an assertion rather than by a require-time self-check.** A union's
+		branches share their flag bits — only one branch is ever present — so its scope is the tag
+		plus the *widest* branch, not the sum. `Ir.luau` asserts that at require time, which means
+		the mutation is caught by the module failing to load rather than by a test; M4-1 counted it
+		among the pins that are not tests. Three flags in one branch, one in the other, one tag bit:
+		four, where a summed layout says five.
+	]]
+	local forked = Ir.lower(t.struct({
+		act = t.union({
+			a = t.struct({ p = t.boolean, q = t.boolean, r = t.boolean }),
+			b = t.boolean,
+		}),
+	}))
+
+	equals("a union's scope is the tag plus the widest branch", (forked.scope :: any).bits, 4)
 end
 
 -- ---------------------------------------------------------------------------------------------
