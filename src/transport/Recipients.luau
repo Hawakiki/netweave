@@ -124,9 +124,11 @@ end
 	publish and a `state` channel publishes per subject per tick. Returning a table there would
 	allocate once per subject per frame for the life of the server.
 
-	`has` is optional and only `select` consults it. The other three rules build their answers out of
-	the roster itself, so what they return is a recipient by construction; `select` is the one that
-	hands the decision to the game and gets a table back.
+	`has` is optional, and every rule but `everyone` consults it. ~~The other three rules build their
+	answers out of the roster itself, so what they return is a recipient by construction.~~ `owner`
+	and `nearby` return what the roster answers, and the roster answers for a player who left the
+	tick before — a `Player` subject owns itself, connected or not (M4-1). Absent, they trust the
+	answer, and a rig that leaves it out runs that degraded path.
 ]=]
 export type Roster = {
 	all: () -> { any },
@@ -134,7 +136,7 @@ export type Roster = {
 	within: (subject: any, studs: number, out: { any }) -> number,
 
 	--[[ Optional so a rig that stands players in with tables need not answer it — under lune the
-	     shape test cannot tell a stand-in from a stray table, and only `select` asks. ]]
+	     shape test cannot tell a stand-in from a stray table. ]]
 	has: ((who: any) -> boolean)?,
 }
 
@@ -286,10 +288,20 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 		return -1
 	end
 
+	--[[
+		`owner` and `nearby` ask the roster the same question `select` asks of the game's list:
+		is this player still here. bc35060 closed it for `select` only, and the owner of a
+		`Player`-keyed subject is the instance itself, connected or not — a store that lists the
+		departed player's subject for one more tick (a profile save that yields) rebuilt the
+		baselines and the parked send record `forget` had just removed, for the life of the server
+		(M4 report, finding 19; M4-1).
+	]]
+	local here = roster.has
+
 	if kind == "owner" then
 		local player = roster.owner(subject)
 
-		if not player then
+		if not player or (here and not here(player)) then
 			return 0
 		end
 
@@ -298,7 +310,30 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 	end
 
 	if kind == "nearby" then
-		return roster.within(subject, audience.radius, out)
+		local count = roster.within(subject, audience.radius, out)
+
+		if not here then
+			return count
+		end
+
+		--[[ Compacted in place: `within` fills the caller's array, and a hole in it would be the
+		     `select` defect over again. ]]
+		local kept = 0
+
+		for index = 1, count do
+			local who = out[index]
+
+			if here(who) then
+				kept += 1
+				out[kept] = who
+			end
+		end
+
+		for index = kept + 1, count do
+			out[index] = nil
+		end
+
+		return kept
 	end
 
 	--[[

@@ -2251,6 +2251,36 @@ do
 	equals("a player who has left is not sent to", #left, 1)
 	check("while the one who stayed is", left[1] == alice)
 
+	--[[ The other two kinds ask the roster the same question. `owner` and `nearby` returned the
+	     roster's answer unchecked, so a departed owner and a departed neighbour were sent to and
+	     given baselines after `forget` (M4-1). ]]
+	local departed: Recipients.Roster = {
+		all = roster.all,
+		owner = function(): any
+			return carol
+		end,
+		within = function(_subject: any, _studs: number, into: { any }): number
+			into[1] = carol
+			into[2] = alice
+			into[3] = carol
+			into[4] = bob
+			return 4
+		end,
+		has = present.has,
+	}
+
+	table.clear(out)
+	equals(
+		"an owner who has left is nobody",
+		Recipients.of({ scope = "owner", kind = "owner" }, 1, departed, out),
+		0
+	)
+
+	table.clear(out)
+	local near = Recipients.of({ scope = "nearby", kind = "nearby", radius = 50 }, 1, departed, out)
+	equals("neighbours who have left are dropped", near, 2)
+	check("and the list is compacted, not holed", out[1] == alice and out[2] == bob and out[3] == nil)
+
 	--[[
 		And a roster that does not answer it still refuses what could never have been a recipient at
 		all — a number, a string, a boolean. That floor is a **kind** test and asks nothing about the
