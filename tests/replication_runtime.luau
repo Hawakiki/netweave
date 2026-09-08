@@ -924,6 +924,88 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A snapshot that arrives before anyone is listening
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		Every other class queues a packet for a handler attached one frame late. `replicate` bypassed
+		that queue: the snapshot was folded into the baseline, then dispatched to a nil handler —
+		reported as the game's own handler raising, with a traceback — and never sent again, because
+		the baseline already said the client had it. A static subject was invisible for the session,
+		on the join path, in exactly the module order the queue exists for (M4-1, 중대). The baseline
+		is the queue (PLAN-M4-BUG D-3), and `drain` walks it.
+
+		The report's five-step probe, on the broadcast channel so no audience is in play. Two
+		subjects: one that will change, so the patch path is seen to still work, and one that never
+		does, which is the one that used to vanish.
+	]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	local blamed = 0
+
+	Observer.observe(function(rejection)
+		if rejection.stage == "handler" then
+			blamed += 1
+		end
+	end)
+
+	--[[ What the game on that client was handed for the subject, or a stand-in that fails every
+	     assertion about it — indexing a subject that never arrived would abort the file instead. ]]
+	local NOTHING = { hp = "(never delivered)" }
+
+	local function handed(who: any, subject: number): any
+		return peers[who].broadcast[subject] or NOTHING
+	end
+
+	local listening = shared.handler
+	shared.handler = nil
+
+	commons[950] = { hp = 1, gold = 1, pos = { x = 1, y = 1 }, tag = nil }
+	commons[951] = { hp = 2, gold = 2, pos = { x = 2, y = 2 }, tag = nil }
+	frame()
+
+	suite.failing()
+
+	equals("no handler is blamed for a packet nobody was listening to", blamed, 0)
+	check(
+		"the client holds the first subject in its baseline",
+		peers[alice].baselines.of(nil, shared, 950) ~= nil
+	)
+	check("and the second", peers[alice].baselines.of(nil, shared, 951) ~= nil)
+	equals("and the game has seen neither", peers[alice].broadcast[950], nil)
+
+	suite.passing()
+
+	shared.handler = listening
+
+	for _, who in { alice, bob } do
+		receiving = peers[who]
+		peers[who].inbound.drain(shared)
+	end
+
+	equals("a listener attached late is handed the first subject", handed(alice, 950).hp, 1)
+	equals("and the second, which will never change", handed(alice, 951).hp, 2)
+	equals("on the other client too", handed(bob, 951).hp, 2)
+
+	commons[950].hp = 9
+
+	for _ = 1, 3 do
+		frame()
+	end
+
+	equals("a later change still arrives as a patch", handed(alice, 950).hp, 9)
+	equals("and the static subject is still what it was", handed(alice, 951).hp, 2)
+	equals("with nobody blamed along the way", blamed, 0)
+
+	commons[950] = nil
+	commons[951] = nil
+	frame()
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 channel.handler = nil
 shared.handler = nil

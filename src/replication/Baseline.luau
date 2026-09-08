@@ -68,6 +68,7 @@ type Channels = { [any]: Subjects }
 	.desync (who: any, channel: any) -> () -- everything this client had on this channel is gone
 	.forget (who: any) -> () -- they left
 	.held (who: any) -> number
+	.each (who: any, channel: any, visit: (subject: any, value: any) -> ()) -> () -- every subject they hold on this channel
 	.reset () -> ()
 ]=]
 export type Baseline = {
@@ -77,6 +78,7 @@ export type Baseline = {
 	desync: (who: any, channel: any) -> (),
 	forget: (who: any) -> (),
 	held: (who: any) -> number,
+	each: (who: any, channel: any, visit: (subject: any, value: any) -> ()) -> (),
 	reset: () -> (),
 }
 
@@ -260,6 +262,23 @@ function Baseline.new(bounded: boolean?): Baseline
 
 		held = function(who: any): number
 			return counts[keyOf(who)] or 0
+		end,
+
+		--[[ A callback rather than the table, because the table is the record. The one caller is
+		     `Inbound.drain`, which on a client treats these baselines as the queue for a listener
+		     attached late (PLAN-M4-BUG D-3); it fills a list inside the visit and dispatches after,
+		     so nothing here is mutated mid-walk. ]]
+		each = function(who: any, channel: any, visit: (any, any) -> ())
+			local channels = records[keyOf(who)]
+			local subjects = if channels then channels[channel] else nil
+
+			if not subjects then
+				return
+			end
+
+			for subject, value in subjects do
+				visit(subject, value)
+			end
 		end,
 
 		reset = function()
