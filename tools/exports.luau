@@ -71,16 +71,11 @@ local SURFACES = {
 	been written yet. An entry is removed by writing the coverage, not by editing this table — the
 	check below fails if a listed name turns out to be covered, so the list cannot outlive the gap.
 ]]
-local UNCOVERED: { [string]: string } = {
-	["t.Ranged"] = "the return of t.u8 and friends, never written by hand.",
-	["t.Classed"] = "the return of t.instance, never written by hand.",
-	["t.Encoding"] = "names the eight storages for internal tables; a game never writes one.",
-	["t.Kind"] = "the discriminant of Descriptor, internal for the same reason.",
-	["t.StructPayload"] = "reached through t.struct's signature rather than written.",
-	["t.EnumPayload"] = "reached through t.enum's signature rather than written.",
-	["t.UnionPayload"] = "reached through t.union's signature rather than written; a game names it "
-		.. "with t.PayloadOf, which tests/types_ok.luau writes on both sides of a channel.",
-}
+--[[ Empty since PLAN-M4-BUG phase 6. The seven entries it held — `t.Ranged`, `t.Classed`,
+     `t.Encoding`, `t.Kind` and the three payload type functions — were all "never written by hand",
+     and the M4-1 report measured every one annotating cleanly with an annotation that really checks.
+     A habit is not an inability, and this list is for inabilities. ]]
+local UNCOVERED: { [string]: string } = {}
 
 -- ---------------------------------------------------------------------------------------------
 

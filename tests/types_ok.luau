@@ -267,4 +267,41 @@ local _userId: (Player) -> number = userIdOf
 local _where: t.InstanceOptions = { descendantOf = workspace }
 local _contained: t.Type<Instance> = t.instance("BasePart", _where)
 
+--[[
+	**The seven `tools/exports` called known gaps, written.** Every reason in that list was "never
+	written by hand" or "reached through a signature", and the M4-1 report measured all seven
+	annotating cleanly with annotations that really check — five wrong values in the non-trivial
+	positions produced five diagnostics. A habit is not an inability, and the list exists for
+	inabilities. So they are here, and a wrong value in any of them is a build break.
+]]
+local _ranged: t.Ranged<number> = t.u8
+local _classed: t.Classed = t.instance
+local _encoding: t.Encoding = "u16"
+local _kind: t.Kind = "vector3"
+
+local _structPayload: t.StructPayload<{ hp: typeof(t.u8), name: typeof(t.string) }> = { hp = 1, name = "x" }
+local _enumPayload: t.EnumPayload<{ red: true, blue: true }> = "red"
+
+--[[
+	**A union payload checks a literal only after the alias has been used as a parameter type.**
+	Measured while writing this: `local _: Union = { tag = "wait", value = 3 }` as the alias's first
+	use fails with `Expected '"wait"', but got '"move" | "wait"'` — the literal's tag is widened to
+	every branch's — and the same line passes once a function taking the alias has been called with
+	a literal, which is the order `Action` above happens to be written in. Both negative controls
+	(a wrong value inside a branch, a tag that names no branch) fail either way. A solver behaviour,
+	recorded here and in PLAN-M5 rather than worked around in `src/`.
+]]
+type UnionShape = t.UnionPayload<typeof({ move = t.struct({ x = t.u8 }), wait = t.u8 })>
+
+local function takeUnion(action: UnionShape): number
+	if action.tag == "move" then
+		return action.value.x
+	end
+
+	return action.value
+end
+
+local _took: number = takeUnion({ tag = "wait", value = 3 })
+local _unionPayload: UnionShape = { tag = "move", value = { x = 1 } }
+
 return nil
