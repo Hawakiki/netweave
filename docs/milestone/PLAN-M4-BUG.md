@@ -130,11 +130,13 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 3 — the two library 중대, and G5
 
-- [ ] `Inbound`: `change` skips the pending entry when `channel.handler == nil`; `drain` of a `replicate`
+- [x] `Inbound`: `change` skips the pending entry when `channel.handler == nil`; `drain` of a `replicate`
       channel delivers every held baseline; the five-step probe from the report's appendix as the test
-- [ ] `MapPayload(key, value)` type function; `t.map(t.u16, Entity)`, `t.map(t.enum(…), t.u8)` and
+- [x] `MapPayload(key, value)` type function — and `OptionalPayload`, `ArrayPayload`, because
+      `t.optional(Entity)` and `t.array(Entity)` were measured at `Type<unknown?>` / `Type<{unknown}>`
+      outside a spec literal on the same seam; `t.map(t.u16, Entity)`, `t.map(t.enum(…), t.u8)` and
       `t.map(t.u8, t.union(…))` in `types_ok`; `t.optional(struct)` outside a spec keeps its payload
-- [ ] `Inbound` dispatch: a raising handler loses its own packet and nothing behind it (M4 finding 32)
+- [x] `Inbound` dispatch: a raising handler loses its own packet and nothing behind it (M4 finding 32)
 
 ### Phase 4 — residue of phase 8
 

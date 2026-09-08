@@ -1429,6 +1429,58 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A raise between the guards loses its own packet and nothing behind it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+	suite.failing()
+
+	--[[
+		`call` runs the policy and the handler under `xpcall`, and `dispatch` runs the whole walk
+		under one `pcall`. Between those two layers sits code that is under neither — the call-id
+		record, the context, the reply — and a raise there used to reach the outer guard, which
+		protects the list and not the entries behind the one that raised: the rest of the batch was
+		dropped, with a report naming no channel and no player (M4 report, finding 32). G5 is per
+		packet in the read phase, and this section says it is per packet here too.
+
+		The fault is injected where the report injected it, into `queries.enter`, because nothing in
+		the tree raises there today: the guard is for the raise nobody has thought of yet.
+	]]
+	local sabotaged = setmetatable({
+		enter = function()
+			error("injected: a raise between the two guards")
+		end,
+	}, { __index = queries })
+
+	local endpoint = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		queries = sabotaged :: any,
+	})
+
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+	Batch.writeRequest(Asked, 7, { n = 1 })
+	Batch.writePacket(Fixed, { a = 3, b = 4 })
+
+	local packed, carried = Buffer.take()
+	local survived = pcall(endpoint.receive, packed, carried, mallory)
+
+	check("the raise does not escape the batch", survived)
+	equals("the packet behind it still arrives", delivered, 2)
+	equals("and the raise is one report", #reports, 1)
+	equals("at handler", first().stage, "handler")
+	check("naming the channel it happened on", first().channel == Asked.qualified)
+	check("and saying what raised", string.find(first().reason, "injected", 1, true) ~= nil)
+	equals("measuring the packet it cost", first().bytes > 0, true)
+
+	suite.passing()
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 for _, channel in declared.channels do
 	channel.handler = nil
