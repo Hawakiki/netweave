@@ -292,6 +292,33 @@ do
 		check("the record is reused rather than allocated", first == second)
 	end
 
+	--[[
+		A write into the production record, which the Studio guard alone used to catch. Until M4
+		phase 8 every `acquire` overwrote `character` and `humanoid`, so a stray write was corrected
+		by the next packet; the lazy lookup fires only while the key is absent, so the write sat in
+		the shared record and reached every later policy for that player (M4-1). The three cases:
+		a key that never existed, `character` before anything looked it up, and `player`, the one
+		key that always exists and so cannot be caught by `__newindex` — `acquire` resets it.
+	]]
+	local third = Context.acquire(player, "combat.fireWeapon") :: any
+
+	check("a key nobody declared cannot be written", not (pcall(function()
+		third.cooldown = 42
+	end)))
+
+	check("nor can character be forged before it was looked up", not (pcall(function()
+		third.character = "forged"
+	end)))
+
+	third.player = { Name = "impostor" }
+	Context.release(player)
+
+	local fourth = Context.acquire(player, "combat.aim") :: any
+	equals("a stray key does not reach the next packet", fourth.cooldown, nil)
+	equals("the character was not forged", fourth.character, nil)
+	equals("and the player is the player again", fourth.player, player)
+
+	Context.release(player)
 	Context.forget(player)
 end
 

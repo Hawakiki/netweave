@@ -186,6 +186,24 @@ local function recordFor(player: any): Record
 
 			return rawget(self, key)
 		end,
+
+		--[[
+			The production record refuses a write, not only the Studio guard. Before M4 phase 8
+			every `acquire` overwrote `character` and `humanoid`, so a handler that wrote into
+			`ctx` was corrected on the next packet; the lazy lookup above fires only while the key
+			is absent, so a write sat in the shared record and was handed to every later policy
+			and handler for that player until `forget` — `ctx.character = …` believed by
+			`originNearCharacter`, with no message in production (M4-1). A key that exists is
+			still assignable, and `acquire` resets each of those every packet.
+		]]
+		__newindex = function(_, key: any)
+			error(
+				`a ctx is read-only, so ctx.{tostring(key)} = ... is not a place to keep anything: `
+					.. `the record is reused for this player's next packet and the write would leak `
+					.. `into it. Keep per-request state in your own table, keyed by ctx.player.`,
+				2
+			)
+		end,
 	})
 
 	record.live = live :: Ctx
@@ -208,6 +226,9 @@ function Context.acquire(player: any, channel: string): Ctx
 	local record = recordFor(player)
 	local live = record.live
 
+	--[[ `player` too, though it never changes: it is the one key a handler can overwrite without
+	     `__newindex` noticing, because it exists. Three plain stores per packet. ]]
+	live.player = player
 	live.channel = channel
 	live.now = os.clock()
 
