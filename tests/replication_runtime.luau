@@ -54,6 +54,15 @@ local commons: { [number]: any } = {}
      subject's audience is one assignment here, where in a game it is a position. ]]
 local visible: { [number]: { [any]: boolean } } = {}
 
+--[[ A third world, each subject owned by one player. The tick asks the roster who that is, and
+     the roster's `owner` below always answers alice — so the only thing that decides whether
+     she is sent to is whether the roster still `has` her. ]]
+local owned: { [number]: any } = {}
+
+--[[ Who has left. The roster's `has` consults it, which is what lets this file take a player
+     away without rebuilding the rig. ]]
+local departed: { [any]: boolean } = {}
+
 local declared = Namespace.declare("game", {
 	entities = nw.replicate({
 		subject = t.u16,
@@ -97,19 +106,39 @@ local declared = Namespace.declare("game", {
 		audience = nw.audience.everyone,
 		store = nw.store.of(commons),
 	}),
+
+	--[[ The third audience kind, the one the M4-1 report found still trusting the roster's answer
+	     about a player the roster no longer has. ]]
+	personal = nw.replicate({
+		subject = t.u16,
+		data = t.struct({
+			hp = t.u8,
+			gold = t.u16,
+			pos = t.struct({ x = t.u8, y = t.u8 }),
+			tag = t.optional(t.u8),
+		}),
+
+		audience = nw.audience.owner,
+		store = nw.store.of(owned),
+	}),
 })
 
 Namespace.seal()
 
 local channel = declared.channels.entities :: any
 local shared = declared.channels.commons :: any
+local mine = declared.channels.personal :: any
 
 local function channelById(id: number): any?
 	if id == channel.id then
 		return channel
 	end
 
-	return if id == shared.id then shared else nil
+	if id == shared.id then
+		return shared
+	end
+
+	return if id == mine.id then mine else nil
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -137,8 +166,20 @@ local function linkInto(queue: { Frame }): Link.Link
 end
 
 local roster: Recipients.Roster = {
+	--[[ Whoever has not left, the way `Players:GetPlayers()` answers it. A broadcast's recipients
+	     *are* this list, so a roster that kept naming a departed player would send her snapshots
+	     from every `everyone` channel and the departed-owner section below would be measuring
+	     the rig. ]]
 	all = function()
-		return { alice, bob }
+		local present = {}
+
+		for _, who in { alice, bob } do
+			if not departed[who] then
+				table.insert(present, who)
+			end
+		end
+
+		return present
 	end,
 
 	owner = function(): any?
@@ -155,7 +196,7 @@ local roster: Recipients.Roster = {
 	     that path was also runtime-dependent, so this file passed on every lune run and went red the
 	     moment the place was opened. ]]
 	has = function(who: any): boolean
-		return who == alice or who == bob
+		return (who == alice or who == bob) and not departed[who]
 	end,
 }
 
@@ -269,7 +310,7 @@ local tick = Tick.new({
 	baselines = serverBaselines,
 	roster = roster,
 	channels = function()
-		return { channel, shared }
+		return { channel, shared, mine }
 	end,
 })
 
@@ -1002,6 +1043,58 @@ do
 	commons[950] = nil
 	commons[951] = nil
 	frame()
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A player who has left stays gone, through the real tick
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		`Baseline.forget` has no guard against `keep` recreating the entry, so what keeps a departed
+		player's baselines gone is the tick never naming them again. bc35060 made that true for a
+		`select` audience; `owner` returned the roster's answer unchecked, and the roster's answer
+		for a `Player`-keyed subject is the instance itself, connected or not. A store that lists
+		the departed player's subject for one more tick — a profile save that yields — rebuilt one
+		baseline per subject and one parked send record, for the life of the server (M4 report,
+		finding 19; M4-1). No test ran `forget` against the real `Tick` and looked the next frame.
+	]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	mine.handler = function(subject: number, value: any)
+		receiving.mirror[subject] = value
+	end
+
+	owned[970] = { hp = 3, gold = 30, pos = { x = 7, y = 7 }, tag = nil }
+	frame()
+
+	equals("the owner is sent her subject", mirrorOf(alice)[970].hp, 3)
+	check("and holds a baseline for it", serverBaselines.of(alice, mine, 970) ~= nil)
+
+	--[[ She leaves, the way `Driver` sees it: the roster stops having her and every store forgets
+	     her — but the game's own store still lists her subject for this tick. ]]
+	departed[alice] = true
+	serverBaselines.forget(alice)
+	serverOut.forget(alice)
+
+	local sent = frame()
+
+	suite.failing()
+
+	equals("nothing is sent to a player who has left", sent, 0)
+	equals("and no baseline is rebuilt for her", serverBaselines.held(alice), 0)
+
+	frame()
+	equals("nor on the frame after", serverBaselines.held(alice), 0)
+
+	suite.passing()
+
+	departed[alice] = nil
+	owned[970] = nil
+	frame()
+	mine.handler = nil
 	Observer.reset()
 end
 
