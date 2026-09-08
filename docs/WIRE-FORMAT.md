@@ -207,7 +207,9 @@ a replicated channel declares no `rate`, so there is nothing for the token bucke
 control packet is read before the budget is consulted at all.
 
 The bound is now a **coalesce over frames**: an ask is honoured at once if the peer has not had one
-in the last thirty ticks, and remembered and honoured by the tick if it has. Nothing is ever
+in the last `resyncTicks` ticks (thirty by default; a `Config` limit since PLAN-M4-BUG phase 5, when it
+was a constant a game could not tune), and remembered and honoured by the tick if it has — and the
+deferred ask is reported at stage `replicate`, so a peer asking every frame is visible. Nothing is ever
 dropped, which matters more than it sounds — a client asks once, at the moment it gave up on the
 channel, and nothing retries, so a refusal would leave it holding nothing while the server believed
 it held everything. An attacker gets one full resend per window however fast they ask; a client that
