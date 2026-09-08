@@ -85,8 +85,9 @@ within one byte of Zap on `FlagIdiomatic`.
 | `FlagIdiomatic` | 218 | 218 | 204 | **234** | 233 |
 | `FlagNaive` | **238** | 232 | 232 | 222 | 208 |
 
-**netweave misses acceptance criterion 5 on the array family.** The criterion is 1.3x of the best
-library per schema family; netweave is at 1.64x of Blink and 1.36x of Zap on `ArrayHeavy`. On both
+~~**netweave misses acceptance criterion 5 on the array family.**~~ The criterion is 1.3x of the best
+library per schema family; ~~netweave is at 1.64x of Blink and 1.36x of Zap on `ArrayHeavy`~~
+**netweave is at 1.15x of Blink on `ArrayHeavy` since M4 phase 8 — see the correction below**. On both
 flag families it passes, and on `FlagNaive` it is the fastest mode measured.
 
 The direction of the miss is specific, and the other two directions say where it is not:
@@ -97,9 +98,36 @@ The direction of the miss is specific, and the other two directions say where it
 | Down — the client **decodes** | **80** | 71 | 70 | 55 |
 | FireAll — the client decodes | 77 | **79** | 69 | 58 |
 
-**netweave decodes the array payload faster than any of them and encodes it slower than two of
-them.** Decode is where `table.clone(TEMPLATE)` pays off (`RESEARCH §3.8-S`), and this is the
+~~**netweave decodes the array payload faster than any of them and encodes it slower than two of
+them.**~~ Decode is where `table.clone(TEMPLATE)` pays off (`RESEARCH §3.8-S`), and this is the
 first measurement of that as a framerate rather than as an allocation count.
+
+**Corrected 2026-09-08, from `bench/runs/2026-09-06-m4p8.json` (`460aa41`).** The M4 phase 8 run
+reverses both sentences above, and this file did not say so for two days while the artifact sat
+next to it (SECURITY-REPORT-M4-1, bench 중대 1 and 2). Read directly from the two run documents,
+p50 with [p0..p100]:
+
+| `ArrayHeavy` | netweave | Blink | Zap | ByteNet |
+|---|---|---|---|---|
+| Up, phase 7 | 85 [84..87] | **133** [129..135] | 112 [110..114] | 118 [117..119] |
+| Up, phase 8 | **115 [114..116]** | **132** [129..133] | 113 [110..114] | 116 [114..117] |
+| Down, phase 7 | **79** [78..83] | 78 [71..97] | 63 [58..83] | 59 [56..82] |
+| Down, phase 8 | **55 [52..76]** | 69 [67..96] | 69 [64..88] | 64 [59..84] |
+| FireAll, phase 7 | **79** [78..81] | 73 [69..93] | 62 [57..82] | 57 [52..82] |
+| FireAll, phase 8 | 57 [50..82] | **82** [73..95] | 67 [63..89] | 64 [62..82] |
+
+- **Criterion 5 is met on the array family, 1.15x** (132 against 115), for the first time. The
+  control group moved −0.8% (Blink), +0.9% (Zap), −1.7% (ByteNet), −3.3% (raw) between the two
+  runs, the ranges do not overlap, and the bytes are identical (601.005). The mechanism is
+  server-side and not separable between decode fusion (`03a11a3`) and the lazy `Context.acquire`
+  (`a57653e`), which landed in the same window.
+- **The decode claim is reversed and unexplained.** Down 79 → 55 puts netweave last, and FireAll
+  moves the same way (79 → 57). The control moves on the Down axis are wider than on Up
+  (−11.5% to +9.5%), so one pair does not settle it — but −30% is 2.6x the largest control move
+  and repeats on FireAll. Two mechanisms were checked and both fail: the Down cell is `nw.event`,
+  so `Inbound.harden` never touches it; and the client never reaches `Context.acquire`. Nothing in
+  the phase-8 diff has a mechanism on the client decode path. It needs repeats, and PLAN-M4-BUG
+  phase 7 is where they run.
 
 ### The codegen gap, per schema family
 
@@ -689,7 +717,7 @@ netweave's decode figure also includes the Studio-only `ctx` guard, which was on
 | 2 | Round-trip at every constraint boundary | **met** — `tests/serdes_runtime.luau`, `tests/roblox_runtime.luau` |
 | 3 | No adversarial input reaches `error()` | **met** — adversarial suite plus 4,200-case fuzz |
 | 4 | Bytes equal to Blink and Zap on `ArrayHeavy`, within one byte of Zap on `FlagIdiomatic` | **met** — 601, and 8 against 7 |
-| 5 | Framerate within 1.3x of the best library per schema family | **missed on `ArrayHeavy`** — 1.69x of Blink at the re-measurement, **1.56x at M4 phase 7** (85 against 133), where the codec was made 1.31x faster on that VM and the framerate did not move at all. Met on both flag families, where every library is inside the harness's own 14% noise |
+| 5 | Framerate within 1.3x of the best library per schema family | ~~**missed on `ArrayHeavy`** — 1.69x of Blink at the re-measurement, **1.56x at M4 phase 7** (85 against 133), where the codec was made 1.31x faster on that VM and the framerate did not move at all.~~ **Met, 1.15x at M4 phase 8** (115 against 132, `bench/runs/2026-09-06-m4p8.json`, controls within 3.3%). Met on both flag families, where every library is inside the harness's own 14% noise |
 | 6 | Decode allocation at or below ByteNet's | **met against ByteNet**, 389 against 520 — see the caveat above |
 | 7 | No allocation on the receive hot path | **receive path met; send path improved, not closed** — the adapter's two tables per send are gone (flag encode 609.3 B to 81.92 B, Zap's figure), but `Serdes` still allocates per field |
 

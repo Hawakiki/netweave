@@ -629,6 +629,10 @@ API to write an example against.
       runtime modules green in the same Play. `ArrayHeavy` Up: **85** against Blink's 133 —
       **1.56x**, criterion 5 missed by the margin it was already missed by. netweave's own spread is
       84..87 and the control group moved 2-4%, so this is not resolution and not the machine.
+      **Phase 8 moved it: 115 [114..116] against 132, 1.15x, on `bench/runs/2026-09-06-m4p8.json`
+      (`460aa41`), controls within 3.3% — criterion 5 met on the array family for the first time.
+      The same run puts the client-decode direction 30% lower with no mechanism found;
+      `bench/RESULTS.md` carries both, and PLAN-M4-BUG phase 7 repeats the run.**
 - [x] **The optimisation is real; the frame did not care.** Measured on the same VM in the same
       session: the codec 38,434 → 29,314 ns per packet, **1.31x** (lune said 1.88x), which is
       1.8-2.3 ms removed from an 11.76 ms frame. The fastcall finding also reproduces on that VM —
