@@ -2222,6 +2222,21 @@ do
 	equals("a hole does not decide how many there are", #hole, 2)
 	check("and neither side of it is lost", hole[1] == alice and hole[2] == bob)
 
+	--[[
+		The hole a constructor cannot make. `{ alice, nil, bob }` gives `#` = 3 under lune, so a `#`
+		walk and the `pairs` walk see the same two players and the two assertions above cannot tell
+		them apart — M4-1 measured the walk reverted to `#` passing them, with the `has` filter doing
+		the whole job. Built by assignment, `#` is 1 (measured): the border stops at the first nil,
+		and a `#` walk never reaches bob. This is the case that pins the walk rather than the filter.
+	]]
+	local holed: { any } = {}
+	holed[1] = alice
+	holed[3] = bob
+
+	local past = resolve(holed)
+	equals("a hole `#` stops at does not hide who is past it", #past, 2)
+	check("and the one past it is reached", past[1] == alice and past[2] == bob)
+
 	equals("a value that is not a recipient is not one", #resolve({ 5, "text", {} }), 0)
 	equals("nor is nothing at all", #resolve({}), 0)
 
