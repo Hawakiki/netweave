@@ -39,7 +39,14 @@ local harness = require("./harness")
 local nw = require("../src/netweave")
 local t = require("../src/types")
 
-local suite = harness.suite("fuzz_runtime", 0.9)
+--[[
+	~~0.9~~ **0.25, which is the honest share of assertions.** The floor was met by counting the nine
+	"was exercised" self-checks and the run-shape checks as refusals (M4-1); tagged honestly, the failure
+	paths here are the invariants — eleven assertions standing for fourteen thousand mutated batches, each
+	of which is a failure path. The assertion count is the wrong measure of this file, and the number
+	is what it is rather than what a floor would like (PLAN-M4-BUG D-5).
+]]
+local suite = harness.suite("fuzz_runtime", 0.25)
 local check, equals, fail = suite.check, suite.equals, suite.fail
 
 --[[ Seeded, and the seed is printed. A fuzz failure nobody can reproduce is an anecdote. ]]
@@ -85,6 +92,31 @@ local declared = Namespace.declare("f", {
 	listed = nw.signal({ data = t.array(t.u16, 0, 40), rate = 100000, maxBytes = 64 }),
 	carried = nw.signal({ data = t.struct({ who = t.instance, n = t.u8 }), rate = 100000 }),
 	guarded = nw.command({ data = t.struct({ n = t.u8 }), rate = 100000, authorize = allows }),
+	--[[ The M4 phase 8 kinds, which the corpus did not carry until M4-1 measured two G4 fixes —
+	     a union tag past the last branch, an optional map key — invisible to it. A tagged union, a
+	     quantised float, a wide integer, a string with both constraints, and a map with an enum
+	     key. Componented vectors need a `Vector3` and are Studio's. ]]
+	united = nw.signal({
+		data = t.struct({
+			act = t.union({ move = t.struct({ x = t.u8, y = t.u8 }), wait = t.u16, stop = t.boolean }),
+			n = t.u8,
+		}),
+		rate = 100000,
+	}),
+	quantised = nw.signal({
+		data = t.struct({ yaw = t.quantized(-180, 180, 0.25), lean = t.quantized(-1, 1, 2 / 254) }),
+		rate = 100000,
+	}),
+	wide = nw.signal({ data = t.struct({ id = t.u53, delta = t.i53 }), rate = 100000 }),
+	constrained = nw.signal({
+		data = t.struct({ name = t.string(1, 16, { utf8 = true, pattern = "[%w_]+" }), n = t.u8 }),
+		rate = 100000,
+	}),
+	keyed = nw.signal({
+		data = t.map(t.enum({ red = true, green = true, blue = true }), t.u8),
+		rate = 100000,
+		maxBytes = 64,
+	}),
 	asked = nw.query({
 		args = t.struct({ n = t.u8 }),
 		returns = t.struct({ v = t.u8 }),
@@ -118,6 +150,11 @@ local Listed = declared.channels.listed
 local Carried = declared.channels.carried
 local Guarded = declared.channels.guarded
 local Asked = declared.channels.asked
+local United = declared.channels.united
+local Quantised = declared.channels.quantised
+local Wide = declared.channels.wide
+local Constrained = declared.channels.constrained
+local Keyed = declared.channels.keyed
 
 --[[ A stand-in that answers `:IsA`, which is the only thing the instance reader asks of one and
      therefore the only thing a stand-in has to be (`tests/harness.luau`). ]]
@@ -175,6 +212,53 @@ local shapes: { Shape } = {
 			return { n = math.random(0, 255) }
 		end,
 	},
+	{
+		channel = United,
+		make = function()
+			local roll = math.random(1, 3)
+			local act = if roll == 1
+				then { tag = "move", value = { x = math.random(0, 255), y = math.random(0, 255) } }
+				elseif roll == 2 then { tag = "wait", value = math.random(0, 65535) }
+				else { tag = "stop", value = math.random() < 0.5 }
+
+			return { act = act, n = math.random(0, 255) }
+		end,
+	},
+	{
+		channel = Quantised,
+		make = function()
+			return { yaw = math.random(-720, 720) * 0.25, lean = (math.random(0, 254) - 127) * (2 / 254) }
+		end,
+	},
+	{
+		channel = Wide,
+		make = function()
+			--[[ Past 2^32 in two halves, because `math.random` takes 32-bit bounds: a value the
+			     narrowed-u32 path cannot carry, so the f64-with-wholeness path is what is fuzzed. ]]
+			local high = math.random(0, 2 ^ 20) * 2 ^ 20 + math.random(0, 2 ^ 20)
+			return { id = high, delta = if math.random() < 0.5 then -high else high }
+		end,
+	},
+	{
+		channel = Constrained,
+		make = function()
+			return { name = string.rep("a", math.random(1, 16)), n = math.random(0, 255) }
+		end,
+	},
+	{
+		channel = Keyed,
+		make = function()
+			local out: { [string]: number } = {}
+
+			for _, colour in { "red", "green", "blue" } do
+				if math.random() < 0.6 then
+					out[colour] = math.random(0, 255)
+				end
+			end
+
+			return out
+		end,
+	},
 }
 
 -- ---------------------------------------------------------------------------------------------
@@ -227,17 +311,52 @@ local agreement = Protocol.new({
 	isServer = true,
 })
 
+--[[ A resync is the third thing a batch can do besides deliver and report: an honoured one clears a
+     baseline and says nothing, like a hello. Counted through the store it clears, so the corpus can
+     carry resyncs without invariant 3 calling every honoured one a silence. ]]
+local resynced = 0
+local serverBaselines = Baseline.new(true)
+
+local countingBaselines: any = setmetatable({
+	desync = function(who: any, channel: any)
+		resynced += 1
+		return serverBaselines.desync(who, channel)
+	end,
+}, { __index = serverBaselines })
+
 local inbound = Inbound.new({
 	resolve = Namespace.channelById,
 	admit = budget.admit,
 	isServer = true,
 	queries = queries,
 	agreement = agreement,
+	baselines = countingBaselines,
 })
 
 Observer.reset()
-Observer.observe(function()
+--[[
+	**The safety net is not a refusal.** `Inbound` runs the read phase and the dispatch under a `pcall`
+	of last resort, so a reader that raises on wire data — G4 broken inside the decoder — surfaces as
+	an ordinary report saying "the read phase raised" and the receive call returns true. Invariant 1
+	cannot see that; this counter can. Measured before it existed: the union reader's tag guard
+	deleted, the widened corpus still green, every raise netted and counted as a refusal (PLAN-M4-BUG
+	phase 6).
+]]
+local netted = 0
+
+Observer.observe(function(rejection)
 	reported += 1
+
+	if
+		string.find(rejection.reason, "phase raised", 1, true)
+		or string.find(rejection.reason, "dispatch raised", 1, true)
+	then
+		netted += 1
+
+		if #violations < 8 then
+			table.insert(violations, `the safety net caught a raise on wire data: {rejection.reason}`)
+		end
+	end
 end)
 
 --[[
@@ -292,6 +411,10 @@ local function encode(): Sample
 			Batch.writeHello(protocol.hash)
 		elseif roll < 0.2 then
 			Batch.writeRequest(Asked, math.random(1, 16000), { n = math.random(0, 255) })
+		elseif roll < 0.25 then
+			--[[ The one control kind a client sends that makes the server work, which the corpus
+			     never wrote until M4-1. Its id is mutated like any other byte. ]]
+			Batch.writeResync(declared.channels.mirrored.id)
 		else
 			local shape = shapes[math.random(1, #shapes)]
 			Batch.writePacket(shape.channel, shape.make())
@@ -411,6 +534,25 @@ local mutations: { Mutation } = {
 		end,
 	},
 	{
+		name = "sidecar entry replaced",
+		apply = function(sample: Sample): Sample
+			--[[ The sidecar's *contents*, which the two mutations above never touch: the count was
+			     fuzzed and the entries were always real (M4-1). A bare table, a number and a string
+			     in the slot an instance was claimed for — what `FireServer(buffer, { {} })` puts
+			     there. ]]
+			if #sample.instances == 0 then
+				return sample
+			end
+
+			local replaced: { Instance } = table.clone(sample.instances)
+			local slot = math.random(1, #replaced)
+			local junk: any = ({ {}, 12345, "text" })[math.random(1, 3)]
+			replaced[slot] = junk
+
+			return { packed = sample.packed, instances = replaced }
+		end,
+	},
+	{
 		name = "replayed",
 		apply = function(sample: Sample): Sample
 			--[[ The batch concatenated with itself, version byte and all. The second version byte
@@ -488,7 +630,7 @@ for round = 1, ROUNDS do
 	exercised[mutation.name] += 1
 
 	local sample = mutation.apply(encode())
-	local before = delivered + reported + greeted
+	local before = delivered + reported + greeted + resynced
 	local refusedBefore = reported
 
 	local survived = pcall(inbound.receive, sample.packed, sample.instances, mallory)
@@ -508,11 +650,18 @@ for round = 1, ROUNDS do
 		and that is correct. Counting a hello was the fix; loosening the invariant would not have
 		been.
 	]]
-	if buffer.len(sample.packed) > 1 and delivered + reported + greeted == before then
+	if buffer.len(sample.packed) > 1 and delivered + reported + greeted + resynced == before then
 		silent += 1
+		--[[ The bytes, so a silence can be reproduced without re-running the seed to that round. ]]
+		local hex = {}
+
+		for offset = 0, buffer.len(sample.packed) - 1 do
+			table.insert(hex, string.format("%02x", buffer.readu8(sample.packed, offset)))
+		end
+
 		note(
 			`round {round}: {mutation.name} produced {buffer.len(sample.packed)} bytes that neither `
-				.. `arrived nor were reported`
+				.. `arrived nor were reported: {table.concat(hex, " ")}`
 		)
 	end
 
@@ -538,6 +687,7 @@ end
 suite.failing()
 
 equals(`{ROUNDS} mutated batches raise nothing on the receive path`, raises, 0)
+equals("and nothing raised under the safety net either", netted, 0)
 equals("no batch with bytes in it vanishes without a word", silent, 0)
 equals("an honest batch still arrives after every one of them", canaries, ROUNDS)
 equals("and nothing decoded into a value its own schema refuses", #violations, 0)
@@ -549,6 +699,11 @@ end
 for index = 1, math.min(#violations, 8) do
 	fail(`  seed {SEED}: {violations[index]}`)
 end
+
+--[[ Everything from here is about the run's shape — that each mutation ran, that each broke
+     something, that the counters add up — and not a refusal. Tagged as success-path since M4-1
+     measured the file meeting its floor only by counting these nine self-checks as failures. ]]
+suite.passing()
 
 --[[ A fuzz run that only ever hit one mutation is not a fuzz run, and a count nobody prints is a
      count nobody checks. ]]
@@ -571,6 +726,7 @@ local damaging = {
 	"extended with noise",
 	"channel id substituted",
 	"sidecar overstated",
+	"sidecar entry replaced",
 	"replayed",
 	"noise",
 }
@@ -596,8 +752,6 @@ end
 
 equals("every refusal reached the counters", counted, diagnostics.total)
 check("and the run refused a great many things", reported > ROUNDS / 4)
-
-suite.passing()
 
 check(
 	"the corpus covers every framing mode",
@@ -840,6 +994,7 @@ end
 suite.failing()
 
 equals(`{CHANGES} mutated changes raise nothing on the receive path`, changeRaises, 0)
+equals("and nothing raised under the safety net either", netted, 0)
 equals("no change with bytes in it vanishes without a word", changeSilent, 0)
 equals("an honest change still arrives after every one of them", changeCanaries, CHANGES)
 equals("and nothing merged into a value its own schema refuses", #violations, 0)
@@ -863,6 +1018,15 @@ end
 	passing for the wrong reason, and the fix is to not make the claim rather than to make it
 	loosely.
 ]]
+--[[ **A refusal is a desync.** A change this endpoint could not read leaves it holding a baseline
+     the sender has already moved past, so every change after it would merge into the wrong value —
+     which is worse than losing one, and is why the channel is given up on rather than patched
+     over. ]]
+check("and gave up on the channel rather than merging into it", desyncs > 0)
+
+--[[ The run's shape, not a refusal — see the same line in the batch run above. ]]
+suite.passing()
+
 local bytewise = {
 	"bit flip",
 	"byte substituted",
@@ -876,14 +1040,6 @@ local bytewise = {
 for _, name in bytewise do
 	check(`{name} broke a change too`, changeBroke[name] > 0)
 end
-
---[[ **A refusal is a desync.** A change this endpoint could not read leaves it holding a baseline
-     the sender has already moved past, so every change after it would merge into the wrong value —
-     which is worse than losing one, and is why the channel is given up on rather than patched
-     over. ]]
-check("and gave up on the channel rather than merging into it", desyncs > 0)
-
-suite.passing()
 
 --[[ The canary's subject, at the end of the run, still holds what the canary says it holds. A
      mutated change that merged into somebody else's baseline would show here and in no assertion
