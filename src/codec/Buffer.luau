@@ -1111,14 +1111,18 @@ end
 	@function readVarint
 	@return number
 
-	Rejects rather than looping forever on a run of continuation bytes: five is all a 32-bit value
-	can need, and a sixth means the stream is not what it claims to be.
+	Five bytes is all a 32-bit value can need, and the fifth carries four bits. A fifth byte with
+	anything else set — the high bits, or the continuation bit that would ask for a sixth — is
+	rejected rather than wrapped: `bit32.lshift` by 28 drops the high bits silently, so
+	`ff ff ff ff 1f` used to read as 2^32 − 1 and a length or an id past the format's range came
+	out as one inside it (M4 report, finding 8). A run of continuation bytes is the same case and
+	does not loop.
 ]=]
 function Codec.readVarint(): number
 	local result = 0
 	local shift = 0
 
-	for _ = 1, VARINT_MAX_BYTES do
+	for _ = 1, VARINT_MAX_BYTES - 1 do
 		local byte = Codec.readU8()
 		result = bit32.bor(result, bit32.lshift(bit32.band(byte, 0x7F), shift))
 
@@ -1129,8 +1133,14 @@ function Codec.readVarint(): number
 		shift += 7
 	end
 
-	Codec.reject("varint too long")
-	return 0
+	local last = Codec.readU8()
+
+	if last > 0x0F then
+		Codec.reject("varint past 32 bits")
+		return 0
+	end
+
+	return bit32.bor(result, bit32.lshift(last, shift))
 end
 
 --[=[

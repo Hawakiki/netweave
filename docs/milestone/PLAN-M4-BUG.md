@@ -117,13 +117,16 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 2 — what a client can trigger
 
-- [ ] `refineText`: a scanner that refuses `%b`, `%f`, `%<digit>`, an unbalanced `(` or `[`, a trailing `%`
-- [ ] `refineText`: refuse more than one unbounded item (`*`, `-`, `+` on a class) unless `max <= 64`; the
-      rule and the reason in the docstring
-- [ ] `refineText`: the anchor check reads `%$` as a literal; a mid-pattern `^` or `$` is refused
-- [ ] `readVarint` refuses a fifth continuation byte instead of wrapping (M4 finding 8)
-- [ ] a probe in `spike/` reproducing the 34 s stall against the pre-fix tree, and the declaration refused
-      after
+- [x] `refineText`: a scanner that refuses a malformed `%b` or `%f`, `%<digit>`, an unbalanced `(` or `[`, a
+      trailing `%` — a well-formed `%b()` and `%f[set]` are allowed, since the grammar admits them
+- [x] `refineText`: ~~refuse more than one unbounded item unless `max <= 64`~~ refuse when `max^k` for `k`
+      unbounded items passes 2^16 steps (two items allow 256, three allow 40); measured at the boundary,
+      0.4 ms; the rule and the reason in the docstring
+- [x] `refineText`: the anchor check reads `%$` as a literal; ~~a mid-pattern `^` or `$` is refused~~ a
+      mid-pattern `^` or `$` is the literal character in Lua and stays accepted
+- [x] `readVarint` refuses a fifth byte above `0x0F` instead of wrapping (M4 finding 8)
+- [x] a probe in `spike/pattern/` reproducing the curve to 16 KB (2.1 s) against the pre-fix tree, and the
+      declaration refused after
 
 ### Phase 3 — the two library 중대, and G5
 
