@@ -99,7 +99,7 @@ export type Outbound = {
 	--[[ One replicated subject's change, for one recipient. Answers whether anything was written,
 	     because a recipient that is already up to date costs nothing and has to be distinguishable
 	     from one that was sent something. ]]
-	change: (channel: any, destination: any, subject: any, old: any, new: any) -> boolean,
+	change: (channel: any, destination: any, subject: any, old: any, new: any) -> (boolean, string?),
 	resync: (channel: any) -> (),
 	broadcast: (channel: any, value: any) -> (),
 	request: (channel: any, call: number, value: any) -> (),
@@ -285,19 +285,29 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			The subject is skipped and the recipient keeps the baseline it had, so the next tick
 			tries again — which is right, because the store may have been mid-update.
 		]]
-		change = function(channel: any, destination: any, subject: any, old: any, new: any): boolean
+		change = function(
+			channel: any,
+			destination: any,
+			subject: any,
+			old: any,
+			new: any
+		): (boolean, string?)
 			switchTo(destination)
 
 			local used, instances = Buffer.mark()
 			local ok, result = pcall(attemptChange, channel, subject, old, new)
 
+			--[[ The reason travels back as well as being reported, because "wrote nothing" means
+			     two things: the recipient is up to date, or the change cannot be written at all —
+			     past the two-byte length, an encoder raise. The tick treats the second as a subject
+			     to leave alone until it moves (M4 report, finding 24). ]]
 			if not ok then
 				Buffer.rollback(used, instances)
 				Observer.emit(channel.qualified, destination, "replicate", tostring(result), 0)
-				return false
+				return false, tostring(result)
 			end
 
-			return result
+			return result, nil
 		end,
 
 		--[[ This endpoint has lost track of a replicated channel and is asking for all of it again.
