@@ -1029,6 +1029,16 @@ local function arrayWriter(node: Node): Writer
 	local exact = node.count
 	local elements = node.elements
 
+	--[[
+		An exact array of optionals is never measured. `#` on a table with nils is a border the VM
+		chooses, so `{1, 2, 3, nil}` on a length of four was refused as "got 3" while
+		`{1, nil, nil, 4}` was accepted — the same shape, decided by how the table was built (M4-1).
+		Every position is written, and a missing one is what the element's flag is for. A
+		non-optional element keeps the count check, because there `#` is exact and the message
+		names the length rather than a nil three fields in.
+	]]
+	local sparse = (node.element :: Node).kind == "optional"
+
 	if elements then
 		--[[ An exact length whose element carries flags was unrolled: one node per position, each
 		     owning its own bit slots, so the writers are not interchangeable. ]]
@@ -1040,7 +1050,9 @@ local function arrayWriter(node: Node): Writer
 		end
 
 		return function(value: any, flags: Flags)
-			writeLength(#value, "array")
+			if not sparse then
+				writeLength(#value, "array")
+			end
 
 			for index = 1, count do
 				writers[index](value[index], flags)
@@ -1052,7 +1064,9 @@ local function arrayWriter(node: Node): Writer
 
 	if exact then
 		return function(value: any, flags: Flags)
-			writeLength(#value, "array")
+			if not sparse then
+				writeLength(#value, "array")
+			end
 
 			for index = 1, exact do
 				writeElement(value[index], flags)

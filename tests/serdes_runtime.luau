@@ -1621,6 +1621,52 @@ do
 	refuses("and it still requires the dollar", t.string(1, 8, { pattern = "%d+%$" }), "12")
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- An exact array of optionals is never measured
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		`#` on a table with nils is a border the VM chooses from how the table was built, so
+		`{1, 2, 3, nil}` on a length of four was refused as "got 3" while `{1, nil, nil, 4}` was
+		accepted — the same shape, decided by Luau's array part (M4-1). With an exact length every
+		position is written and nothing is measured; a trailing nil is a position like any other.
+	]]
+	local four = t.array(t.optional(t.u8), 4)
+
+	--[[ Built by assignment so the border is 3, the case a literal cannot make. ]]
+	local trailing: { any } = {}
+	trailing[1] = 1
+	trailing[2] = 2
+	trailing[3] = 3
+
+	local codec = Serdes.fromSchema(four)
+	local ok, packed = pcall(encode, codec, trailing)
+	check("a trailing nil is a position, not a short array", ok)
+
+	if ok then
+		Buffer.beginRead(packed, {})
+		local back = codec.read()
+		check("and comes back as absent", back[1] == 1 and back[3] == 3 and back[4] == nil)
+	end
+
+	local leading: { any } = {}
+	leading[4] = 4
+
+	local okLeading, packedLeading = pcall(encode, codec, leading)
+	check("a leading run of nils is written as absent", okLeading)
+
+	if okLeading then
+		Buffer.beginRead(packedLeading, {})
+		local back = codec.read()
+		check("with the last position intact", back[4] == 4 and back[1] == nil)
+	end
+
+	--[[ A non-optional exact array keeps the count check, because there `#` is exact and "must
+	     hold exactly 4" beats "a non-optional field is nil" three fields in. ]]
+	refuses("a short array of non-optionals is still refused by its count", t.array(t.u8, 4), { 1, 2, 3 })
+end
+
 do
 	--[[
 		The half the finding is about: a **peer's** string is the one that reaches `SetAsync`,
