@@ -61,7 +61,8 @@ bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
   report.luau                 a run document to the tables in RESULTS.md
-tools/                        globalTypes.d.luau for the analyzer
+tools/                        globalTypes.d.luau for the analyzer, and the checkers that read source off disk
+scripts/                      check.ps1 — every lune-side check in one command
 _refsrc/                      READ-ONLY vendored competitor sources — never edit
   _generated/                 codegen output used as evidence in the research log
 ```
@@ -212,6 +213,11 @@ if a tool "is not found", check the manifest before assuming it is not installed
 - `luau-lsp` — **type checking, which is part of the test suite**, not a convenience
 
 ### Checks
+
+`pwsh scripts/check.ps1` runs everything below and exits with the number of failed steps; `-Only fuzz`
+filters by name, `-Show` prints every step's output. The runtime list is read from `tests/`, not kept
+in the script. Written for PowerShell because `bash` from pwsh on this machine is WSL's and cannot see
+the rokit shims. The one thing it cannot run is the Studio half, and it says so on its last line.
 
 ```sh
 lune run analyze              # type checking, both halves (see below)
