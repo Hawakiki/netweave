@@ -544,11 +544,26 @@ function Inbound.new(config: Config): Inbound
 			if status >= 0 then
 				local waiting = queries
 
+				--[[ Not guarded: `answered` resumes a thread, and a resume returns false rather
+				     than raising. ]]
 				if waiting then
 					waiting.answered(channel, id, status, value)
 				end
 			else
-				call(channel, who, value, sizes[index], id, subject)
+				--[[
+					Guarded per entry, not only per batch. `call` runs the policy and the handler
+					under `xpcall`, but the code between those two — the call-id record, the
+					context, the reply — is not, and a raise there used to reach `dispatch`'s one
+					`pcall`, which protects the list and not the entries behind the one that raised:
+					the rest of the batch was dropped with a report naming no channel and no player
+					(M4 report, finding 32). G5 is per packet in the read phase; this makes it per
+					packet here too. `pcall` with arguments allocates no closure.
+				]]
+				local ok, failure = pcall(call, channel, who, value, sizes[index], id, subject)
+
+				if not ok then
+					report(channel, who, "handler", `dispatch raised: {tostring(failure)}`, sizes[index])
+				end
 			end
 		end
 
