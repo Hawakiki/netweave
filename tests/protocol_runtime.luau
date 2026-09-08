@@ -373,6 +373,8 @@ do
 		step = 0.25,
 		utf8 = true,
 		pattern = "%d+",
+		--[[ `t.u53` against `t.f64(0, 2^53)`: same storage, one refuses a fraction (M4-1). ]]
+		whole = true,
 	}
 
 	local function channelWith(mutate: ((Ir.Node) -> ())?): any
