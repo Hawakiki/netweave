@@ -36,7 +36,13 @@ local Store = require("../src/replication/Store")
 local harness = require("./harness")
 local t = require("../src/types")
 
-local suite = harness.suite("store_runtime", 0.25)
+--[[
+	~~0.25~~ **No floor.** M4-1 re-read every failure-path tag in this file and found all of them on nil
+	reads and no-op ticks; the honest share is zero, and that is not a gap: a store seam has no adversary,
+	the same argument `ir_runtime` makes for its 13%. Padding it to reach a number is the failure mode of
+	every metric (CLAUDE.md §9). PLAN-M4-BUG D-5.
+]]
+local suite = harness.suite("store_runtime", 0)
 local check, equals = suite.check, suite.equals
 
 local function sorted(list: { any }): { any }
@@ -79,8 +85,6 @@ do
 	equals("and the seam offers two functions, not three", offered, 2)
 end
 
-suite.failing()
-
 do
 	local world: { [any]: any } = { alpha = { hp = 10 }, beta = { hp = 4 } }
 	local store = Store.of(world)
@@ -95,8 +99,6 @@ do
 	equals("an empty store lists nothing", #store.subjects(), 0)
 	equals("and reads nothing", store.read("beta"), nil)
 end
-
-suite.passing()
 
 -- ---------------------------------------------------------------------------------------------
 -- Charm's shape: a getter, and nothing else
@@ -182,8 +184,6 @@ do
 	equals("a replica created later is a subject", #store.subjects(), 3)
 end
 
-suite.failing()
-
 do
 	local replicas: { [any]: { Data: any } } = { [1] = { Data = { hp = 1 } }, [2] = { Data = { hp = 2 } } }
 	local store = Store.replica(replicas)
@@ -196,8 +196,6 @@ do
 	replicas[1] = nil
 	equals("an empty set lists nothing", #store.subjects(), 0)
 end
-
-suite.passing()
 
 -- ---------------------------------------------------------------------------------------------
 -- The seam driving what it is for
@@ -273,18 +271,14 @@ do
 	equals("without disturbing its neighbour", views[2].hp, 1)
 	check("and cost less than the first tick", second < first)
 
-	suite.failing()
 	local third = tick()
 	equals("an unchanged tick sends nothing", third, 0)
-	suite.passing()
 
 	--[[ A subject appearing is a client with no baseline for it, which is the snapshot path — the
 	     same one a join and a desync take. ]]
 	world[3] = { hp = 2, gold = 99 }
 	tick()
 	equals("a new subject arrives whole", views[3].gold, 99)
-
-	suite.failing()
 
 	world[2] = nil
 	tick()

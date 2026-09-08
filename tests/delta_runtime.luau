@@ -31,7 +31,13 @@ local Serdes = require("../src/codec/Serdes")
 local harness = require("./harness")
 local t = require("../src/types")
 
-local suite = harness.suite("delta_runtime", 0.1)
+--[[
+	~~0.1~~ **0.03, which is the honest share.** M4-1 re-read every failure-path tag in this file and found
+	the floor met by tagging removal packets and "an equal union writes nothing" as failure-path. PLAN-M4-BUG D-5: a floor met by relabelling is lowered
+	to what the file measures, not defended; the number here is what counting only refusals, bounds,
+	hostile input and failure isolation gives, and it moves up when real refusal cases are written.
+]]
+local suite = harness.suite("delta_runtime", 0.03)
 local check, equals = suite.check, suite.equals
 
 --[[ Structural equality, because a merged value shares subtrees with its baseline and is a fresh
@@ -292,7 +298,7 @@ end
 -- Removal, which is the case a patch table cannot express
 -- ---------------------------------------------------------------------------------------------
 
-suite.failing()
+suite.passing()
 
 do
 	local schema = t.struct({ hp = t.u8, target = t.optional(t.u16) })
@@ -414,7 +420,7 @@ do
 	equals("including an optional that is absent", arrived.tag, nil)
 end
 
-suite.failing()
+suite.passing()
 
 do
 	local schema = t.struct({ hp = t.u8, gold = t.u16 })
@@ -488,6 +494,8 @@ do
 
 	local held = { hp = 5, gold = 10 }
 
+	suite.failing()
+
 	Buffer.take()
 	Buffer.load(nil)
 	check("one field moving is a patch", delta.write(held, { hp = 6, gold = 10 }))
@@ -524,6 +532,8 @@ do
 	Buffer.load(nil)
 end
 
+suite.passing()
+
 -- ---------------------------------------------------------------------------------------------
 -- What "the same" means for a union
 -- ---------------------------------------------------------------------------------------------
@@ -548,14 +558,10 @@ do
 	Buffer.take()
 	Buffer.load(nil)
 
-	suite.failing()
-
 	check("an equal union writes nothing", not delta.write(base, {
 		n = 1,
 		act = { tag = "move", value = { x = 1, y = 2 } },
 	}))
-
-	suite.passing()
 
 	Buffer.load(nil)
 	check(
