@@ -102,10 +102,16 @@ Ordered by phase; sized when the milestone opens.
 
 ### Phase 4 — optimisation residue
 - [ ] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe
+- [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
+      generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
+      match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to
+      find which of its four readings is the outlier (`bench/RESULTS.md`, "The Down cell")
 
 ### Phase 5 — additions
 - [ ] `t.string` `{ charset = … }`, linear by construction
 - [ ] recipient-set caching per tick, measured on `bench/tick`'s `select-all` and a `nearby` rung
+- [ ] the delta crossover `PLAN-M4` acceptance 8 asked for and never measured: a replication mode in the
+      matrix, and the subject size below which a diff loses to a resend written into `bench/RESULTS.md`
 - [ ] the nice-to-have types, each with an `_ok`/`_reject` pair
 
 ### Phase 6 — the tooling
