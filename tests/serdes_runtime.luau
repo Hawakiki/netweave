@@ -1678,7 +1678,24 @@ do
 		reader refused the same bytes (M4 report, finding 23; M4-1). Stand-ins here answer the two
 		methods the writer asks; the real Instances are in `tests/roblox_runtime.luau`.
 	]]
+	--[[ A real Instance inside Roblox, because the writer asks `typeof(value) == "Instance"` there
+	     and a table answering two methods is exactly the double §9 warns about: the first Studio
+	     pass after this section was written failed on it, in the dimension the code under test
+	     checks. Under lune the table is what an instance is. ]]
+	local ROBLOX = typeof(game) == "Instance"
+	local container: any = if ROBLOX then Instance.new("Folder") else { Name = "Workspace" }
+
 	local function standIn(className: string, inside: boolean): any
+		if ROBLOX then
+			local real = Instance.new(className :: any)
+
+			if inside then
+				real.Parent = container
+			end
+
+			return real
+		end
+
 		return {
 			ClassName = className,
 			IsA = function(_self: any, class: string): boolean
@@ -1690,9 +1707,9 @@ do
 		}
 	end
 
-	--[[ The declaration refuses a container that is not an Instance, so the descriptor is built by
-	     hand — the path a schema built at runtime takes, and the one the reader's own tests take. ]]
-	local container: any = { Name = "Workspace" }
+	--[[ The declaration refuses a container that is not an Instance under lune, so the descriptor is
+	     built by hand — the path a schema built at runtime takes, and the one the reader's own tests
+	     take. ]]
 	local contained: any = { kind = "instance", class = "Part", descendantOf = container }
 
 	refuses("a wrong class on the way out", t.instance("Sound"), standIn("Part", true))

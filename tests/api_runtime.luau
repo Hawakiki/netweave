@@ -310,7 +310,17 @@ do
 		third.character = "forged"
 	end)))
 
-	third.player = { Name = "impostor" }
+	--[[ `player` is the one key that exists, so on the production record the write lands and
+	     `acquire` undoes it; in Studio the guard proxy refuses it outright. Both are right, and the
+	     first Studio pass after this section was written found the write raising there. ]]
+	local wrotePlayer = pcall(function()
+		third.player = { Name = "impostor" }
+	end)
+
+	check(
+		"writing the player either lands or is refused, never raises elsewhere",
+		wrotePlayer == not Context.guarded()
+	)
 	Context.release(player)
 
 	local fourth = Context.acquire(player, "combat.aim") :: any
