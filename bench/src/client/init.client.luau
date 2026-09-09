@@ -307,6 +307,17 @@ local function runDown(mode: string, schema: Modes.SchemaName, startCommand: str
 
 	control:FireServer(startCommand, mode, schema)
 
+	--[[ The same warm-up Up gets. The server starts sending at once; the window below opens only
+	     after it, with both ends' counters cleared, so a mode's first frames of JIT and buffer
+	     growth are not in the sample (M4-1: `WARMUP_SECONDS` applied to Up only). ]]
+	task.wait(Config.WARMUP_SECONDS)
+	downReceived[currentKey] = 0
+	downCorrect[currentKey] = nil
+	if tap then
+		tap.reset()
+	end
+	control:FireServer(Config.COMMAND.RESET_DOWN, mode, schema)
+
 	local _clientBandwidth, framerate = sample(function()
 		return 0
 	end)
@@ -324,7 +335,7 @@ local function runDown(mode: string, schema: Modes.SchemaName, startCommand: str
 	local serverSide = getResults:InvokeServer("down")
 
 	return {
-		sent = 0,
+		sent = serverSide.sent,
 		received = received,
 		correct = downCorrect[currentKey],
 		bandwidth = serverSide.bandwidth,
@@ -336,8 +347,15 @@ local function runDown(mode: string, schema: Modes.SchemaName, startCommand: str
 	}
 end
 
+--[[ Which tree the place was built from, written by `bench/build.luau`; `unknown` when the place
+     was built with plain `rojo build`. A run that cannot be attributed to a tree is the reason M4-1
+     could not re-derive the phase-7 conclusions. ]]
+local treeModule = Shared:FindFirstChild("Tree")
+local tree = if treeModule then require(treeModule) else { commit = "unknown", dirty = false, builtAt = "" }
+
 local results = {
 	generatedAt = os.time(),
+	tree = tree,
 	config = {
 		packetsPerFrame = Config.PACKETS_PER_FRAME,
 		runSeconds = Config.RUN_SECONDS,
@@ -388,7 +406,19 @@ do
 	)
 end
 
-for mode, adapter in adapters do
+--[[ Sorted, so two runs visit the cells in the same order. Hash order put a different mode first
+     each run, and the first cell after the suite is the one that pays for JIT and buffer growth
+     (M4-1). ]]
+local modeNames: { string } = {}
+
+for mode in adapters do
+	table.insert(modeNames, mode)
+end
+
+table.sort(modeNames)
+
+for _, mode in modeNames do
+	local adapter = adapters[mode];
 	(results.versions :: any)[mode] = adapter.version
 
 	for _, schema in Modes.SCHEMAS do

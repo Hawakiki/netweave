@@ -1,4 +1,5 @@
 --!strict
+--!optimize 2
 
 --[[
 	The batch envelope `bench/src/shared/Modes/netweave.luau` builds, checked without Studio.
@@ -11,14 +12,17 @@
 	The second is `CLAUDE.md` §5 — never report a number that was not produced by a committed,
 	re-runnable script. The bytes per packet that `bench/RESULTS.md` prints for netweave are the
 	ones asserted here, and they are asserted against the same channel declarations the adapter
-	uses, not a copy of them.
+	uses, not a copy of them — ~~and written and read by a copy of the framing.~~ **Written and read
+	by `Batch` itself** since PLAN-M4-BUG phase 7: the copy this file carried had drifted from the
+	real writer's instance-count reservation and two-byte widening, and matched the real bytes only
+	because neither schema carries an instance (M4-1). A model that would keep passing after a
+	framing change is not a check of the framing.
 ]]
 
-local nw = require("../src/netweave")
+local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
+local nw = require("../src/netweave")
 local t = require("../src/types")
-
-local WIRE_VERSION = 1
 local failures = 0
 
 local function check(name: string, condition: boolean)
@@ -112,93 +116,45 @@ equals("and its size is fixed", channels.ArrayHeavyUp.codec.fixedSize, 600)
 equals("FlagIdiomatic is counted", channels.FlagIdiomaticUp.codec.framing, "counted")
 
 -- ---------------------------------------------------------------------------------------------
--- Writing, exactly as the adapter does
+-- Writing and reading, through the real envelope
 -- ---------------------------------------------------------------------------------------------
 
 local function write(channel: any, value: any)
-	if Buffer.used() == 0 then
-		Buffer.writeU8(WIRE_VERSION)
-	end
-
-	Buffer.writeVarint(channel.id)
-
-	if channel.codec.framing == "counted" then
-		local at = Buffer.reserve(1)
-		local start = Buffer.used()
-
-		channel.codec.write(value)
-
-		local length = Buffer.used() - start
-		check("a counted payload fits one length byte", length <= 127)
-		Buffer.patchU8(at, length)
-	else
-		channel.codec.write(value)
-	end
+	Batch.writePacket(channel, value)
 end
 
 local received: { { name: string, value: any } } = {}
 
+--[[ The sink `Batch.read` calls, collecting what arrived and what was refused in one list so the
+     order across both is asserted. Everything else is a server that admits everything and serves
+     nothing: the envelope is what is under test, not the transport around it. ]]
+local sink: Batch.Sink = {
+	resolve = function(id: number): any
+		return byId[id]
+	end,
+
+	answers = true,
+
+	admit = function(): (string?, string?)
+		return nil, nil
+	end,
+
+	deliver = function(channel: any, value: any)
+		table.insert(received, { name = channel.qualified, value = value })
+	end,
+
+	change = function() end,
+	reply = function() end,
+	hello = function() end,
+	resync = function() end,
+
+	refuse = function(channel: any?, _stage: string, reason: string)
+		table.insert(received, { name = if channel then channel.qualified else "?", value = reason })
+	end,
+}
+
 local function receive(packed: buffer)
-	local size = buffer.len(packed)
-	Buffer.beginRead(packed, nil)
-
-	local version = Buffer.readU8()
-
-	if Buffer.rejected() or version ~= WIRE_VERSION then
-		return
-	end
-
-	while Buffer.cursor() < size do
-		Buffer.setLimit(size)
-
-		local id = Buffer.readVarint()
-		local channel = byId[id]
-
-		if Buffer.rejected() or not channel then
-			return
-		end
-
-		local finish = size
-
-		if channel.codec.framing == "counted" then
-			local length = Buffer.readVarint()
-
-			if Buffer.rejected() then
-				return
-			end
-
-			finish = Buffer.cursor() + length
-
-			if finish > size then
-				return
-			end
-
-			Buffer.setLimit(finish)
-		end
-
-		local value, failure = channel.codec.read()
-		local recoverable = channel.codec.framing == "counted"
-
-		if recoverable then
-			--[[
-				Skip to this packet's end and clear the rejection. Both halves matter: a rejection is
-				sticky, so without the clear the *next* packet's id read reports the previous
-				packet's failure and the batch stops — which is exactly the G5 failure the length
-				prefix is paid for. Measured here before it could be measured in Studio.
-			]]
-			Buffer.seek(finish)
-			Buffer.setLimit(size)
-			Buffer.clearRejection()
-		end
-
-		table.insert(received, { name = channel.qualified, value = if failure then failure else value })
-
-		if failure and not recoverable then
-			--[[ A `static` packet has no length to resynchronise on, and the cursor is wherever the
-			     failed read stopped. This is the honest limit of what framing can recover. ]]
-			return
-		end
-	end
+	Batch.read(packed, nil, sink)
 end
 
 local entities = {}

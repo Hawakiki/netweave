@@ -6,7 +6,9 @@
 
 	0.4.3 rather than `master`: master requires three modules that do not exist in the
 	repository, so it cannot load at all (RESEARCH §3.6-B8). The vendored copy is the `v0.4.3`
-	tag, recorded in `_refsrc/README.md`.
+	tag, which is commit `d826282`; `_refsrc/README.md` records the clone at `fbdb156` on `master`,
+	not the tag, and the vendored tree was checked against `git archive v0.4.3` and found identical
+	(M4-1).
 
 	ByteNet has no enum type and no bitfield type, so `weapon` and `team` are `uint8` and the
 	idiomatic and naive flag variants are identical — the canonical payload is used unchanged.
