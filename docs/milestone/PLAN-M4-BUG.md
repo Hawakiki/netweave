@@ -224,10 +224,15 @@ fix lands, and the commit message says which mutation was used.
       `direction`, 6 `handler`. The first two are the `error` severity doing what it says on refusals a
       fuzz corpus produces by design (mutated hashes, swapped ids), three per channel and stage, so the
       suppression holds and the severity is misapplied for that file; `fuzz_runtime` now configures both
-      rules to `warn` and resets. The six `handler` traces carry a deliberately broken handler's own
-      error, which is the trace a game wants. Also read: a dozen G2 "rate = 100000" warnings from the
-      corpus declarations, one line each; the two "batch version 0 is not 1" refusals from the puppet's
-      junk, naming the sender; nothing unexplained.
+      rules to `warn` and resets. Measured again on the benchmark place after the change: 486 lines, 26
+      traced — `protocol` 10, `direction` 10, `handler` 6. The twenty are the deliberate probes of
+      `hostile_runtime`, `transport_runtime` and `protocol_runtime`, whose sections reset their own
+      configuration, and the six `handler` traces carry a deliberately broken handler's own error, which
+      is the trace a game wants. Also read: a dozen G2 "rate = 100000" warnings from the corpus
+      declarations, one line each; the two "batch version 0 is not 1" refusals from the puppet's junk,
+      naming the sender; on the benchmark place the player has no character and the context section says
+      so; nothing unexplained. The benchmark then loaded all five modes behind the suite, so the puppet
+      and the reset-then-declare sequence leave the place usable.
 
 ### Phase 7 — the record
 

@@ -56,9 +56,10 @@ local check, equals, fail = suite.check, suite.equals, suite.fail
 	pass carried sixty-five stack traces, forty-nine of them `protocol` and most of the rest
 	`direction`, nearly all from this file, three per corpus channel and stage. Read as the suppression
 	working and the severity misapplied; the traces are what a real one would have hidden behind
-	(`CLAUDE.md` §9, "the Studio pass is where the console is"). The six that remain after this are
-	`handler` refusals carrying a deliberately broken handler's own error, which is the trace a game
-	wants.
+	(`CLAUDE.md` §9, "the Studio pass is where the console is"). Measured after: 26 remain, twenty of
+	them the deliberate `direction` and `protocol` probes of `hostile_runtime`, `transport_runtime` and
+	`protocol_runtime`, which reset their own configuration between sections, and six `handler`
+	refusals carrying a deliberately broken handler's own error, which is the trace a game wants.
 ]]
 nw.configure({ rules = { direction = "warn", protocol = "warn" } })
 
