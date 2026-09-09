@@ -187,6 +187,16 @@ local downConnection: RBXScriptConnection? = nil
 local downBandwidth: { number } = {}
 local downFramerate: { number } = {}
 
+--[[ How many packets this direction's sender fired, which is the denominator the client cannot
+     know. `runDown` recorded `sent = 0` for every Down and FireAll cell in every run (M4-1). ]]
+local downSent = 0
+
+local function resetDown()
+	table.clear(downBandwidth)
+	table.clear(downFramerate)
+	downSent = 0
+end
+
 local function stopDown()
 	if downConnection then
 		downConnection:Disconnect()
@@ -204,8 +214,7 @@ end
 ]]
 local function startDown(player: Player, mode: string, schema: Modes.SchemaName, viaFireAll: boolean?)
 	stopDown()
-	table.clear(downBandwidth)
-	table.clear(downFramerate)
+	resetDown()
 
 	local adapter = adapters[mode]
 	if not adapter then
@@ -240,6 +249,8 @@ local function startDown(player: Player, mode: string, schema: Modes.SchemaName,
 		for _ = 1, packetsPerFrame do
 			send(payload)
 		end
+
+		downSent += packetsPerFrame
 	end)
 end
 
@@ -293,6 +304,8 @@ control.OnServerEvent:Connect(function(player, command, mode, schema)
 		startDown(player, mode, schema, true)
 	elseif command == Config.COMMAND.STOP_DOWN then
 		stopDown()
+	elseif command == Config.COMMAND.RESET_DOWN then
+		resetDown()
 	elseif command == Config.COMMAND.START_PROBE then
 		startProbe()
 	elseif command == Config.COMMAND.STOP_PROBE then
@@ -386,6 +399,7 @@ getResults.OnServerInvoke = function(_player, command: string, mode: string?, sc
 		return {
 			bandwidth = Metrics.summarize(downBandwidth),
 			framerate = Metrics.summarize(downFramerate),
+			sent = downSent,
 		}
 	elseif command == "probe" then
 		return { framerate = Metrics.summarize(probeFramerate), samples = #probeFramerate }

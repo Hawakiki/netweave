@@ -24,6 +24,10 @@ export type Summary = {
 	p90: number,
 	p95: number,
 	p100: number,
+	--[[ How many samples the percentiles were taken over. The allocation column gained a survivor
+	     count after the M3 incident and the framerate column did not (M4-1); a percentile over two
+	     samples is not one. ]]
+	n: number,
 }
 
 --[[
@@ -51,6 +55,7 @@ function Metrics.summarize(samples: { number }): Summary
 		p90 = Metrics.percentile(sorted, 90),
 		p95 = Metrics.percentile(sorted, 95),
 		p100 = Metrics.percentile(sorted, 100),
+		n = #sorted,
 	}
 end
 

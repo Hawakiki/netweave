@@ -63,8 +63,10 @@ local FRAME_MS = 1000 / 60
 
 --[[
 	What this file printed on the tree before the phase 8 gate existed — the same script, one commit
-	earlier, which is what makes it a number rather than a memory. Check out the parent of the phase
-	8 commit and run this to reproduce them.
+	earlier, which is what makes it a number rather than a memory. This file did not exist on that
+	tree, so to reproduce them copy it there: `git worktree add ../before 37937c7~1`, copy this file
+	into that tree's `bench/`, and run it. M4-1 did, and got every row 3–5% above the values here —
+	the session, not the tree; the same offset moved every rung.
 
 	`idle 50x500` is the report's 47.28 ms row, reproduced by this script rather than quoted from it.
 ]]
@@ -396,3 +398,6 @@ end
 
 print("")
 print(if failed then "FAIL    tick" else "OK      tick")
+
+--[[ A module inside Roblox has to return exactly one value; under lune this is ignored. ]]
+return true

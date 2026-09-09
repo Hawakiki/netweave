@@ -123,6 +123,10 @@ return table.freeze({
 		START_DOWN = "startDown",
 		START_FIREALL = "startFireAll",
 		STOP_DOWN = "stopDown",
+		--[[ Clears the server's Down samples and send count after the warm-up, so the window the
+		     client then samples starts from zero on both ends (M4-1: Down had no warm-up and no
+		     denominator). ]]
+		RESET_DOWN = "resetDown",
 		START_PROBE = "startProbe",
 		STOP_PROBE = "stopProbe",
 	}),

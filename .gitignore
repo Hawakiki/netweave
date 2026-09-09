@@ -24,3 +24,6 @@ _refsrc/*
 
 # Rojo/luau-lsp scratch
 sourcemap.json
+
+# Written by bench/build.luau: which tree the benchmark place was built from
+bench/src/shared/Tree.luau

@@ -15,9 +15,13 @@ lune run bench/schemas/generate
 # 2. Sanity: every file under bench/ parses.
 lune run bench/check
 
-# 3. Build the place.
-rojo build bench/default.project.json -o bench/Benchmark.rbxl
+# 3. Build the place, with the commit it was built from written into it.
+lune run bench/build
 ```
+
+`bench/build` writes `bench/src/shared/Tree.luau` (ignored by git) and then runs `rojo build`; the
+run document records that commit as `tree`, so an archived run can be attributed. A plain
+`rojo build bench/default.project.json -o bench/Benchmark.rbxl` works too and records `unknown`.
 
 Then open `bench/Benchmark.rbxl` in Roblox Studio and start a play session. The client script
 drives the whole matrix and prints the result document to the output window between
@@ -42,9 +46,9 @@ and run the report generator over it.
 
 ## Expected runtime
 
-Twelve cells (four modes x three schemas), each with an allocation probe and three 10 s runs
-(`Up`, `Down`, `FireAll`) separated by drain waits. The committed baseline took about
-**12 minutes**.
+Fifteen cells (five modes x three schemas), each with an allocation probe and three 10 s runs
+(`Up`, `Down`, `FireAll`) with a warm-up each, separated by drain waits. A full run takes about
+**fifteen minutes**.
 
 `PACKETS_PER_FRAME` in `src/shared/Config.luau` is 200. Blink uses 1000, which assumes ~60 FPS;
 Studio runs uncapped and measured 200-240 FPS, where 1000/frame is ~138 MB/s of offered load on

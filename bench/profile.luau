@@ -92,33 +92,28 @@ local REPEATS = 51
 local WARMUP = 5
 
 --[[
-	The Studio numbers, from `bench/runs/2026-09-05-m4p7.json` — the matrix run *after* the fused
-	writer landed. They are constants here so the arithmetic at the bottom is re-runnable rather than
-	done by hand in a commit message.
+	~~The Studio numbers are constants here so the arithmetic at the bottom is re-runnable.~~ They were
+	pasted from an ad-hoc `execute_luau` session, which is a number nobody can re-run (M4-1, bench
+	위험). This file runs inside Studio now — `bench/default.project.json` maps it to
+	`ReplicatedStorage.netweave.bench.profile`, and a `require` of that module from the Server
+	datamodel prints the same ladder on the Studio VM. The numbers that used to sit here are produced
+	that way and quoted in `bench/RESULTS.md` beside the commit they were measured on.
 
-	They are also the reason that arithmetic no longer predicts anything. See the bottom of the file.
+	One line of provenance is kept: the pre-phase-7 Studio figure of 38,940 ns was measured with the
+	**real** pre-phase-7 writer rather than a stand-in — past eight fields `fusedStructWriter` hands
+	back to the loop `structWriter` that preceded it, and the loop costs 64.9 ns a value there. A
+	hand-built reconstruction said 38,434, faithful to 1.3%.
 ]]
-local NETWEAVE_FPS = 85
-local RIVAL_FPS = 133
+local ROBLOX = typeof(game) == "Instance"
+local VM = if ROBLOX then "Studio" else "lune"
 
 --[[
-	The same encode, timed inside Studio in the same session, so the ratio between this file's VM and
-	the one the framerate came from is on record rather than assumed.
-
-	`STUDIO_BEFORE` is measured with the **real** pre-phase-7 writer rather than a stand-in: past
-	eight fields `fusedStructWriter` hands back to the loop `structWriter` that preceded it, and the
-	loop costs 64.9 ns a value there (58,891 ns at nine fields, 77,277 at twelve). Six fields of it
-	is 38,940. The hand-built reconstruction that first answered this said 38,434 — faithful to 1.3%,
-	which is worth recording because the reconstruction was the part of this file most likely to be
-	wrong and turned out not to be.
+	What this file printed for the `netweave` rung under lune on the tree before
+	`Serdes.fusedStructWriter` existed. That tree has no `Buffer.claim`, so this file does not run on
+	it at all; the number was produced by timing `codec.write` directly there, the way the
+	`netweave` rung does, and M4-1 reproduced it three times the same way as 24,195 / 24,608 / 24,210.
+	The route is a stand-in; the number is not.
 ]]
-local STUDIO_NOW = 29314
-local STUDIO_BEFORE = 38940
-
---[[ What this file printed for the `netweave` rung on the tree before `Serdes.fusedStructWriter`
-     existed — the same script, one commit earlier, which is what makes it a number rather than a
-     memory (`CLAUDE.md` §5). Check out the parent of the phase 7 commit and run this to reproduce
-     it. ]]
 local BEFORE = 23992
 
 -- ---------------------------------------------------------------------------------------------
@@ -606,21 +601,25 @@ print(
 ]]
 print("")
 print(
-	`        on this VM: {BEFORE} -> {string.format("%.0f", netweaveCost)} ns/packet across phase 7 `
-		.. `({string.format("%.2f", BEFORE / netweaveCost)}x), which at {PACKETS} packets is `
-		.. `{string.format("%.2f", netweaveCost * PACKETS / 1e6)} ms a frame against generated code's `
-		.. `{string.format("%.2f", inlineCost * PACKETS / 1e6)} ms`
+	`        on this VM ({VM}): netweave {string.format("%.0f", netweaveCost)} ns/packet, which at {PACKETS} `
+		.. `packets is {string.format("%.2f", netweaveCost * PACKETS / 1e6)} ms a frame against generated `
+		.. `code's {string.format("%.2f", inlineCost * PACKETS / 1e6)} ms`
 )
-print(
-	`        the same encode timed inside Studio: {STUDIO_BEFORE} -> {STUDIO_NOW} ns/packet across `
-		.. `phase 7 ({string.format("%.2f", STUDIO_BEFORE / STUDIO_NOW)}x, `
-		.. `{string.format("%.2f", (STUDIO_BEFORE - STUDIO_NOW) * PACKETS / 1e6)} ms a frame removed)`
-)
-print(
-	`        and the matrix that followed: {NETWEAVE_FPS} FPS against {RIVAL_FPS} — `
-		.. `{string.format("%.2f", (1000 / NETWEAVE_FPS) / (1000 / RIVAL_FPS))}x, unmoved. `
-		.. `The frame probe puts 54% of that frame in the send loop; see bench/RESULTS.md.`
-)
+
+if ROBLOX then
+	print("        this is the Studio VM; quote this line in bench/RESULTS.md with the commit it ran on")
+else
+	print(
+		`        under lune the pre-phase-7 tree printed {BEFORE} ({string.format(
+			"%.2f",
+			BEFORE / netweaveCost
+		)}x). `
+			.. `For the Studio VM, require ReplicatedStorage.netweave.bench.profile in a Play session.`
+	)
+end
 
 print("")
 print(if failed then "FAIL    profile" else "OK      profile")
+
+--[[ A module inside Roblox has to return exactly one value; under lune this is ignored. ]]
+return true

@@ -64,7 +64,9 @@ local WARMUP = 5
 
 --[[ What this file printed on the tree before `Serdes.fusedStructReader` existed — the same script,
      one commit earlier, which is what makes it a number rather than a memory (`CLAUDE.md` §5).
-     Check out the parent of the phase 8 decode commit and run this to reproduce them. ]]
+     This file did not exist on that tree, so to reproduce them copy it there: `git worktree add
+     ../before 03a11a3~1`, copy this file into that tree's `bench/`, and run it. M4-1 did, and got
+     32,740 against the 32,731 here. ]]
 local BEFORE: { [string]: number } = {
 	["inline"] = 6369,
 	["inline + range"] = 8100,
@@ -401,3 +403,6 @@ print("        bench/profile prices the encode of this same payload. Read the tw
 
 print("")
 print(if failed then "FAIL    decode" else "OK      decode")
+
+--[[ A module inside Roblox has to return exactly one value; under lune this is ignored. ]]
+return true
