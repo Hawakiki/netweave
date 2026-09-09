@@ -325,20 +325,22 @@ elseif replication ~= quotedReplication then
 	print(`  test:     {#replication} characters`)
 end
 
---[[ The README quotes both examples too, and rots the same way. Same fence markers, same rule. ]]
-local readme = fs.readFile("README.md")
+--[[ Both READMEs quote both examples too, and rot the same way. Same fence markers, same rule. ]]
+for _, path in { "README.md", "README.ko.md" } do
+	local readme = fs.readFile(path)
 
-local quotedInReadme =
-	region(readme, "<!-- example: tests/example_runtime.luau -->\n```lua\n", "```", "README.md")
-local quotedReplicationInReadme =
-	region(readme, "<!-- example: tests/example_runtime.luau replication -->\n```lua\n", "```", "README.md")
+	local quotedInReadme =
+		region(readme, "<!-- example: tests/example_runtime.luau -->\n```lua\n", "```", path)
+	local quotedReplicationInReadme =
+		region(readme, "<!-- example: tests/example_runtime.luau replication -->\n```lua\n", "```", path)
 
-if quotedInReadme ~= example then
-	fail("the example in README.md is not the one tests/example_runtime.luau runs")
-end
+	if quotedInReadme ~= example then
+		fail(`the example in {path} is not the one tests/example_runtime.luau runs`)
+	end
 
-if quotedReplicationInReadme ~= replication then
-	fail("the replication example in README.md is not the one tests/example_runtime.luau runs")
+	if quotedReplicationInReadme ~= replication then
+		fail(`the replication example in {path} is not the one tests/example_runtime.luau runs`)
+	end
 end
 
 local lines = #string.split(example, "\n") - 1

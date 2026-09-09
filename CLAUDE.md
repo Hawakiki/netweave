@@ -18,7 +18,8 @@ library can be published and read by the Roblox community without translation.
 
 | Artifact | Language |
 |---|---|
-| `CLAUDE.md`, `README.md` | **English** |
+| `CLAUDE.md`, `README.md`, `docs/tutorial/` | **English** |
+| `README.ko.md` | **Korean** — the one translation, kept in step with `README.md` by hand; its two code blocks are checked like the English ones |
 | `docs/milestone/PLAN-M*.md` | **English** |
 | All Luau source, comments, identifiers, error messages | **English** |
 | All TypeScript definitions and JSDoc | **English** |
@@ -36,6 +37,7 @@ Do not mix languages inside one file. A Korean comment in a `.luau` file is a de
 CLAUDE.md                     this file
 README.md                     the front page: what it guarantees, the worked example, what it costs;
                               its two code blocks are checked against tests/example_runtime.luau
+README.ko.md                  the same page in Korean, checked the same way
 default.project.json          the library as a package: rojo build -o netweave.rbxm
 test.project.json             a Studio place for tests that need Roblox datatypes
 analyze.luau                  type checking, which is part of the test suite
@@ -55,6 +57,8 @@ docs/
   RESEARCH-AND-PLAN.md        research log + roadmap (Korean, append-only in spirit)
   DESIGN-API.md               the agreed API shape and the guarantees behind it
   WIRE-FORMAT.md              frozen wire format, v1
+  tutorial/                   step1-….md to step7-….md, from an empty place to a replicated store;
+                              prose and code are hand-kept against DESIGN-API and tests/api_ok.luau
   milestone/
     PLAN-M0.md                one file per milestone, English
     PLAN-M1.md … PLAN-M4.md
