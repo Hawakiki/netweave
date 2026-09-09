@@ -51,13 +51,40 @@ model is not the client's to learn.
 `ctx` is the context for this request. It carries `player`, the sender; `channel`, the qualified
 name; `now`, the clock at receipt; and `character` and `humanoid`, looked up from the player the
 first time something reads them and not before, so a channel whose policies never ask pays nothing.
-It is valid only for the synchronous duration of the handler that received it: a `ctx` kept in an
-upvalue and read on the next packet raises in Studio and is refused in production, because the
-record is reused per player and the read would hand over another request's data
+Inside a handler `ctx.player` is typed `unknown`, because the type that builds the handler's
+signature cannot name `Player`; it passes anywhere `unknown` is accepted, `publish` included, and
+where you need the real type you write `ctx.player :: Player` (`docs/DESIGN-API.md` §8).
+It is valid only for the synchronous duration of the handler that received it. The record is reused
+per player, so a `ctx` kept in an upvalue and read during a later packet's handler would quietly
+hand over *that* request's data; in Studio every acquisition is wrapped in a guard that raises on
+exactly that read, with a message that says to copy the fields you need instead. Production hands
+out the bare record and pays nothing, which is why the Studio pass is where this mistake is found
 (`docs/DESIGN-API.md` §8).
 
 `ctx` is read-only. `ctx.cooldown = 42` raises, in production as well as in Studio, with a message
 that says to keep per-request state in your own table keyed by `ctx.player`.
+
+## A value you already hold
+
+Sometimes the thing to authorize did not come off the wire: a value read from a datastore, or built
+by another system, that you want to hand to a function annotated `Trusted<T>`.
+`nw.validate(schema, value)` is the one way to produce that type without a packet:
+
+```lua
+local trusted, reason = nw.validate(Equip, { slot = 2 })
+
+if trusted then
+	equipTrusted(trusted)   -- takes Trusted<{ slot: number }>
+else
+	warn(reason)
+end
+```
+
+It decides by running the encoder, so it is exactly as strict as the encoder is and no stricter,
+and it returns a copy rather than the table you passed in. It runs no policy: `Trusted<T>` from
+`validate` means "this value fits the schema", and the `T` from a `command` handler means that
+*and* "the declared policy allowed it from this player". Both are useful, and they are not the same
+claim (`docs/DESIGN-API.md` §6).
 
 ## Compose them
 

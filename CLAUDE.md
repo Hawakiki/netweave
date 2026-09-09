@@ -58,7 +58,8 @@ docs/
   DESIGN-API.md               the agreed API shape and the guarantees behind it
   WIRE-FORMAT.md              frozen wire format, v1
   tutorial/                   step1-….md to step7-….md, from an empty place to a replicated store;
-                              prose and code are hand-kept against DESIGN-API and tests/api_ok.luau
+                              every snippet's declarations and calls are in tests/tutorial_ok.luau,
+                              which analyze has to accept — the prose is hand-kept against DESIGN-API
   milestone/
     PLAN-M0.md                one file per milestone, English
     PLAN-M1.md … PLAN-M4.md

@@ -68,7 +68,8 @@ and on the sending end it is the programmer's error to see, not the peer's.
 
 Sends are batched per frame and flushed on `PostSimulation`, into one buffer per recipient. A packet
 is a channel id, an optional length prefix, and the payload; a batch is a version byte and packets.
-Packets on one channel from one peer arrive in the order they were sent. The length prefix is what
+On a reliable channel, packets from one peer arrive in the order they were sent; an `unreliable`
+one promises neither order nor arrival, which is what makes it cheap. The length prefix is what
 lets a refused packet be skipped and the one behind it decoded, which is guarantee G5 and the one
 byte netweave pays on small payloads that the generators do not (`docs/WIRE-FORMAT.md` §2).
 

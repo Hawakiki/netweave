@@ -80,8 +80,8 @@ handler and every `send` on that channel is typed from it. You never write the p
 Delete `rate = 5` and the analyzer prints, at the `nw.command` line, that a command declares a rate
 budget and there is no unlimited spelling of one. Delete `authorize = allow` and it prints that a
 command needs `authorize`, and how to build one. Add `authorize` to the `event` and it prints
-that the server is the sender, so there is nobody to authorize. Write `rate = 5` on the `event` and it
-prints the same thing about the rate. Each of those messages names what to write instead, because
+that a channel that authorizes is a command or a query. Write `rate = 5` on the `event` and it
+prints that the server is the sender on this class, so there is nobody to budget. Each of those messages names what to write instead, because
 half of them print verbatim in *your* declaration file, on the line that is wrong.
 
 These are guarantees G1, G2 and G3 in `docs/DESIGN-API.md` §2, and `tests/api_reject.luau` counts
