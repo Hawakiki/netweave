@@ -58,7 +58,8 @@ getLoadout = nw.query({
 ```lua
 -- server
 combat.server.getLoadout:handle(function(ctx, slot)
-	return loadouts[ctx.player][slot]   -- may yield: a datastore read, a WaitForChild
+	local player = ctx.player :: Player
+	return loadouts[player][slot + 1]   -- may yield: a datastore read, a WaitForChild
 end)
 
 -- client
@@ -94,28 +95,51 @@ playerState = nw.state({
 combat.server.playerState:publish(subject, { entityId = 1, grounded = true })
 ```
 
-`state` carries the current state of a subject to whoever should see it, and it coalesces per subject
-per tick, so publishing twice in a frame sends the newer value once. It does not diff — that is
-`replicate`, Step 6 — and the two share no method: `state` is `publish(subject, value)` with the game
-holding the value, `replicate` is a store with the game never calling netweave. `unreliable` is legal
-here, because a dropped packet costs one tick of staleness and the next packet corrects it, and
-positional data is where that trade is right. It is refused on `replicate`, where the same drop would
-be permanent.
+`state` carries the current state of a subject to whoever should see it, every time you publish it.
+It does not diff, and it does not remember what each client has — that is `replicate`, Step 6 — and
+the two share no method: `state` is `publish(subject, value)` with the game holding the value,
+`replicate` is a store with the game never calling netweave. `unreliable` is legal here, because a
+dropped packet costs one tick of staleness and the next publish corrects it, and positional data
+sent every frame is where that trade is right. It is refused on `replicate`, where the same drop
+would be permanent.
 
 ## `event` — a fact, downward
 
-The `loadout` channel from Step 2. Like `state` but delivered as sent, one packet per publish, for
-things that happen rather than things that are.
+The `loadout` channel from Step 2: something that happened, delivered as sent. Mechanically it is
+the same publish as `state`; the class name says whether a reader should expect the latest value of
+something or a thing that occurred once, and that is what a reviewer needs to know.
 
 ## What every downward class shares
 
-`audience` is required. `everyone` gives the channel `broadcast(value)`; `owner` sends to the player
-who owns the subject; `nearby(studs)` to players within that distance of it; `select(fn)` to whatever
+`audience` is required, and it is evaluated against the subject you publish for. `everyone` gives
+the channel `broadcast(value)` and ignores the subject. `owner` sends to the player who owns the
+subject, where a `Player` owns themselves and a character owns its player. `nearby(studs)` measures
+from the subject — a `Player`'s character, a `Model`'s root, or a `BasePart` — to each player's
+character, and a player with no character is not near anything. `select(fn)` sends to whatever
 list your function returns, checked against the players who are actually here, with duplicates and
-departed players dropped and reported. Making the recipient set a declaration rather than a call site
-turns "who can see this" into a reviewable line, which is how positional data stops leaking to
-wallhacks by accident.
+departed players dropped and reported at stage `send`. Making the recipient set a declaration rather
+than a call site turns "who can see this" into a reviewable line, which is how positional data stops
+leaking to wallhacks by accident.
 
-That is the whole surface. The README has it on one page, `docs/DESIGN-API.md` has the contract, and
-`tests/api_ok.luau` is a file that uses every class and analyses clean, which is the place to look
-when a spelling here does not match what you see.
+## The numbers a declaration can tune
+
+Every inbound class takes a `burst` beside its `rate`, the depth of the token bucket, defaulting to
+one second's worth and never allowed below `rate`. Every inbound class whose payload has a length
+prefix takes a `maxBytes`, which can only *tighten* the ceiling the schema derived, and is refused
+where it could not be consulted. Everything else is a limit in `nw.configure`, with a default and a
+range: `queueCapacity` (packets held for a channel nobody is listening on yet), `pendingPerBatch`
+(packets the server admits from one batch), `callsInFlight` (a player's parked query handlers),
+`unreliableBytes` (lowerable from 908, never raisable), `baselinesPerClient` and `resyncTicks`
+(Step 6), and `repeatsPerDiagnostic` (how many times the console prints one channel and stage). A
+name that is not one of those is refused at the call site.
+
+## Two peers, one declaration
+
+Both sides compute a hash over every channel's name, class and schema, and a client whose hash
+differs from the server's is refused at stage `protocol` on its first batch, before any of its
+packets decode as the wrong channel. `nw.protocol().hash` is the number, and `nw.signature()` is
+the text it is hashed from, which is what to diff when a deploy went out half-way.
+
+That is the whole surface. The README has it on one page, `docs/DESIGN-API.md` has the contract,
+and `tests/tutorial_ok.luau` is every snippet in these seven steps in one file the analyzer has to
+accept, which is the place to look when a spelling here does not match what you see.
