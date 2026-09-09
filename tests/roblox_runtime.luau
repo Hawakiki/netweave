@@ -21,9 +21,17 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local RunService = game:GetService("RunService")
+
 local Buffer = require("../src/codec/Buffer")
+local Context = require("../src/api/Context")
+local Link = require("../src/transport/Link")
+local Namespace = require("../src/api/Namespace")
+local Observer = require("../src/api/Observer")
 local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
+local Transport = require("../src/api/Transport")
+local nw = require("../src/netweave")
 local t = require("../src/types")
 
 local failures = 0
@@ -76,6 +84,36 @@ local function rejects(name: string, descriptor: any, bytes: buffer, instances: 
 	if failure == nil then
 		fail(`{name}: decode accepted bytes it should have rejected`)
 	end
+end
+
+--[[
+	The suite runs the moment the server starts, and the player joins after it — measured: the
+	first Studio pass of the roster section printed its skip line every time, with a player in the
+	Play by the time anyone read the console. So the sections that need one wait for one, briefly,
+	and say so once when none comes rather than once per section.
+]]
+local PLAYER_TIMEOUT = 15
+
+local function waitForPlayer(): Player?
+	local deadline = os.clock() + PLAYER_TIMEOUT
+
+	while os.clock() < deadline do
+		local players = Players:GetPlayers()
+
+		if players[1] then
+			return players[1]
+		end
+
+		task.wait(0.1)
+	end
+
+	return nil
+end
+
+local player = waitForPlayer()
+
+if not player then
+	print(`        skip: no player joined within {PLAYER_TIMEOUT} s, so nothing that needs one was asserted`)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -408,13 +446,11 @@ do
 	--[[ `t.player` is `t.instance("Player")` with the payload type Luau cannot get from a class
 	     name. What Studio can check is the runtime half: a Player passes, and anything else does
 	     not. ]]
-	local players = Players:GetPlayers()
-
-	if #players > 0 then
-		local value, failure = roundTrip(t.player, players[1], { players[1] })
+	if player then
+		local value, failure = roundTrip(t.player, player, { player })
 
 		equals("a player decodes", failure, nil)
-		check("and survives", value == players[1])
+		check("and survives", value == player)
 	end
 
 	local part = Instance.new("Part")
@@ -495,21 +531,486 @@ do
 	equals("nor does a value that is not an Instance at all", roster.owner(12345), nil)
 
 	--[[ And the one that does resolve: a player is their own owner, which is the case
-	     `nw.audience.owner` takes on a `command`'s `ctx.player`. ]]
-	local players = roster.all()
-
-	--[[ Said when it cannot run. A server-only Play has no player, and a probe that did not run and
-	     printed OK is the opposite of §9's "a probe that finds nothing is written down" (M4-1). ]]
-	if #players > 0 then
-		equals("a player owns themselves", roster.owner(players[1]), players[1])
-	else
-		print("        skip: no player in this Play, so `owner(player)` was not asserted")
+	     `nw.audience.owner` takes on a `command`'s `ctx.player`. Said when it cannot run: a probe
+	     that did not run and printed OK is the opposite of §9's "a probe that finds nothing is
+	     written down" (M4-1). ]]
+	if player then
+		equals("a player owns themselves", roster.owner(player), player)
+		check("and the roster lists them", table.find(roster.all(), player) ~= nil)
 	end
 
 	part:Destroy()
 	folder:Destroy()
 	model:Destroy()
 end
+
+-- ---------------------------------------------------------------------------------------------
+-- The other end of the wire (PLAN-M4-BUG phase 6)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Everything below needs a client, and the suite has none: it runs on the server, from
+	`run.server.luau`. `tests/puppet.client.luau` is the client — a script that waits for the
+	`NETWEAVE_PUPPET` remote this section creates, obeys it, and echoes what it sees on the netweave
+	remotes and on a probe remote of its own. The sections ask it questions the server cannot answer
+	alone: did the batch arrive, at how many bytes, with how many instances, and does Roblox really
+	drop an unreliable payload at 908.
+]]
+
+local PUPPET_TIMEOUT = 10
+
+local puppet = Instance.new("RemoteEvent")
+puppet.Name = "NETWEAVE_PUPPET"
+
+local probe = Instance.new("UnreliableRemoteEvent")
+probe.Name = "NETWEAVE_PUPPET_UNRELIABLE"
+
+--[[ Everything the puppet says, in order, each as the argument list it was fired with. ]]
+local said: { { any } } = {}
+
+puppet.OnServerEvent:Connect(function(_who: Player, ...: any)
+	table.insert(said, { ... })
+end)
+
+puppet.Parent = ReplicatedStorage
+probe.Parent = ReplicatedStorage
+
+--[[ Waits for a line of the puppet's that the predicate accepts, and hands it back; nil when
+     nothing acceptable arrives in time. Lines are consumed from a cursor so a section cannot read
+     an earlier section's answer as its own. ]]
+local cursor = 0
+
+local function hear(seconds: number, accept: ({ any }) -> boolean): { any }?
+	local deadline = os.clock() + seconds
+
+	while os.clock() < deadline do
+		while cursor < #said do
+			cursor += 1
+
+			if accept(said[cursor]) then
+				return said[cursor]
+			end
+		end
+
+		task.wait(0.05)
+	end
+
+	return nil
+end
+
+local function heard(seconds: number, first: any): { any }?
+	return hear(seconds, function(line)
+		return line[1] == first
+	end)
+end
+
+local function frames(count: number)
+	for _ = 1, count do
+		RunService.PostSimulation:Wait()
+	end
+end
+
+local ready = if player then heard(PUPPET_TIMEOUT, "ready") ~= nil else false
+
+--[[ Narrowed once: `player` is optional and the `ready` guard above does not narrow it. ]]
+local client = player :: Player
+
+if player and not ready then
+	print(
+		`        skip: the puppet client did not answer within {PUPPET_TIMEOUT} s; the wire sections were not asserted`
+	)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Link.roblox, against the real remotes
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ Requiring netweave inside Roblox installed the transport, and the link it built created the
+	     remotes. Both are facts about `Driver.install` that lune can never see. ]]
+	check("requiring netweave in Roblox installs the transport", Transport.installed())
+
+	local folder = ReplicatedStorage:FindFirstChild("NETWEAVE")
+	check("and creates the remote folder", folder ~= nil)
+
+	if folder then
+		local reliable = folder:FindFirstChild("NETWEAVE_RELIABLE")
+		local unreliable = folder:FindFirstChild("NETWEAVE_UNRELIABLE")
+
+		check("with a RemoteEvent for reliable traffic", reliable ~= nil and reliable:IsA("RemoteEvent"))
+		check(
+			"and an UnreliableRemoteEvent for the rest",
+			unreliable ~= nil and unreliable:IsA("UnreliableRemoteEvent")
+		)
+		equals("and nothing else", #folder:GetChildren(), 2)
+
+		--[[ A second link finds the remotes it already made rather than making two more, which is
+		     what lets this section build one of its own beside the driver's. ]]
+		local again = Link.roblox()
+		equals("a second Link.roblox reuses the remotes", #folder:GetChildren(), 2)
+
+		if ready then
+			puppet:FireClient(client, "arm")
+			local armed = heard(PUPPET_TIMEOUT, "armed")
+			check("the puppet found the netweave remotes", armed ~= nil and armed[2] == true)
+
+			--[[ Five bytes, reliable, to the player: the puppet reports the remote it came on, the
+			     length, and how many instances the sidecar delivered. ]]
+			again.send(true, player, buffer.create(5), {})
+			local first = heard(2, "netweave")
+			check("a reliable send reaches the client", first ~= nil)
+			if first then
+				equals("on the reliable remote", first[2], true)
+				equals("at its length", first[3], 5)
+				equals("with an empty sidecar", first[4], 0)
+			end
+
+			again.send(false, player, buffer.create(7), {})
+			local second = heard(2, "netweave")
+			check("an unreliable send reaches the client", second ~= nil)
+			if second then
+				equals("on the unreliable remote", second[2], false)
+				equals("at its length", second[3], 7)
+			end
+
+			again.sendAll(true, buffer.create(6), {})
+			local third = heard(2, "netweave")
+			check("sendAll reaches the client", third ~= nil)
+			if third then
+				equals("at its length", third[3], 6)
+			end
+
+			--[[
+				The sidecar, on a real remote. An instance the client can see arrives; one it cannot
+				— unparented, so never replicated — arrives as **nil**, and the sidecar the client
+				reads is shorter than the one the server wrote. That is the case the reader's
+				"a missing instance" refusal above exists for, and this is the only place it can be
+				shown to happen.
+			]]
+			local visible = Instance.new("Part")
+			visible.Parent = workspace
+
+			again.send(true, player, buffer.create(1), { visible })
+			local carried = heard(2, "netweave")
+			check("a visible instance survives the sidecar", carried ~= nil and carried[4] == 1)
+
+			local hidden = Instance.new("Part")
+
+			again.send(true, player, buffer.create(1), { hidden })
+			local dropped = heard(2, "netweave")
+			check("an instance the client cannot see arrives as nil", dropped ~= nil and dropped[4] == 0)
+
+			visible:Destroy()
+			hidden:Destroy()
+
+			--[[
+				And the way in. `Link.roblox`'s receive drops what is not a buffer before the decoder
+				sees it and normalises a sidecar that is not a table; what is a buffer is handed on,
+				to this section's own handler and to the driver's — whose `Inbound` refuses it and
+				reports the sender by name, without raising, which is G4 on a real remote.
+			]]
+			local arrived: { { any } } = {}
+
+			again.receive(function(packed: buffer, instances: { Instance }, sender: any?)
+				table.insert(arrived, { buffer.len(packed), instances, sender })
+			end)
+
+			local refusals: { Observer.Rejection } = {}
+			local stop = Observer.observe(function(rejection)
+				table.insert(refusals, rejection)
+			end)
+
+			puppet:FireClient(client, "junk")
+			local junked = heard(PUPPET_TIMEOUT, "junked")
+			check("the puppet sent its junk", junked ~= nil and junked[2] == true)
+
+			task.wait(0.5)
+			stop()
+
+			equals("a string is dropped before any handler; two buffers are handed on", #arrived, 2)
+
+			for _, line in arrived do
+				equals("each at its length", line[1], 3)
+				check("with a sidecar that is a table", type(line[2]) == "table")
+				check("and the sender is the player", line[3] == player)
+			end
+
+			check("the driver refused what it was handed", #refusals >= 1)
+			check("and named the sender", #refusals >= 1 and refusals[1].player == player)
+
+			puppet:FireClient(client, "disarm")
+			heard(PUPPET_TIMEOUT, "disarmed")
+		end
+	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- The 908 limit, measured
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`Outbound` refuses an unreliable payload over 908 bytes because Roblox drops one silently, and
+	`DESIGN-API.md` §9 records that Roblox's own page says 1000 while the devforum measured 908. Neither
+	number had been measured by this repository. The first half sends raw buffers of several sizes over
+	an `UnreliableRemoteEvent` and records which arrive; the second sends through netweave and asserts
+	the refusal happens at the send, with a report, rather than on the wire, in silence.
+]]
+
+if ready then
+	--[[ Past the two documented figures and well past them, because the first pass delivered every
+	     size up to 1100 and the question became whether Studio's loopback drops at all. ]]
+	local SIZES = { 900, 908, 909, 950, 1000, 1001, 1100, 2000, 4000, 16000, 65536 }
+	local REPEATS = 3
+	local arrivedAt: { [number]: number } = {}
+
+	for _, size in SIZES do
+		arrivedAt[size] = 0
+
+		for _ = 1, REPEATS do
+			probe:FireClient(client, buffer.create(size), {})
+			task.wait()
+		end
+	end
+
+	task.wait(1)
+
+	while true do
+		local line = heard(0.2, "got")
+
+		if not line then
+			break
+		end
+
+		local size = line[2]
+
+		if arrivedAt[size] then
+			arrivedAt[size] += 1
+		end
+	end
+
+	local largestDelivered = 0
+	local smallestDropped = math.huge
+	local report = {}
+
+	for _, size in SIZES do
+		table.insert(report, `{size}:{arrivedAt[size]}/{REPEATS}`)
+
+		if arrivedAt[size] > 0 then
+			largestDelivered = math.max(largestDelivered, size)
+		else
+			smallestDropped = math.min(smallestDropped, size)
+		end
+	end
+
+	print(`        unreliable payloads delivered, bytes:arrived — {table.concat(report, " ")}`)
+	print(
+		`        largest delivered {largestDelivered}, smallest dropped `
+			.. `{if smallestDropped == math.huge then "none" else smallestDropped}`
+	)
+
+	--[[ The ceiling netweave enforces has to be deliverable, or every packet at the limit is lost
+	     while the library says nothing. What Roblox does above it is recorded, not asserted: the
+	     documented figure and the measured one disagree and this is the measurement. ]]
+	equals("a payload at netweave's 908-byte ceiling is delivered every time", arrivedAt[908], REPEATS)
+
+	--[[ And the sidecar's overhead, which `Outbound` says the number does not model: 908 bytes with
+	     one visible instance beside them. ]]
+	local visible = Instance.new("Part")
+	visible.Parent = workspace
+
+	for _ = 1, REPEATS do
+		probe:FireClient(client, buffer.create(908), { visible })
+		task.wait()
+	end
+
+	task.wait(0.5)
+
+	local withInstance = 0
+
+	while true do
+		local line = heard(0.2, "got")
+
+		if not line then
+			break
+		end
+
+		if line[2] == 908 and line[3] == 1 then
+			withInstance += 1
+		end
+	end
+
+	print(`        908 bytes plus one instance in the sidecar: {withInstance}/{REPEATS} delivered`)
+	visible:Destroy()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Driver: a declaration to a client, through the real transport, and again after a reset
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Every other test that sends installs a loopback in place of the driver, so until this section
+	nothing had ever gone from `nw.event` to a `RemoteEvent` under assertion. The reset half is the
+	regression: the driver kept its own "sealed" flag, and `Namespace.reset()` — which every test file
+	calls — left it believing a protocol that no longer existed was still agreed, so a namespace
+	declared after a real send was never numbered. Confirmed to fail before the fix by running this
+	section in Studio (PLAN-M4-BUG phase 6).
+]]
+
+if ready then
+	local refusals: { Observer.Rejection } = {}
+	local stop = Observer.observe(function(rejection)
+		table.insert(refusals, rejection)
+	end)
+
+	Namespace.reset()
+
+	local studio = nw.namespace("studio", {
+		hello = nw.event({ data = t.u8, audience = nw.audience.owner }),
+		wide = nw.event({ data = t.array(t.u8), audience = nw.audience.owner, unreliable = true }),
+	})
+
+	puppet:FireClient(client, "arm")
+	heard(PUPPET_TIMEOUT, "armed")
+
+	studio.server.hello:publish(player, 7)
+	frames(2)
+
+	local batch = heard(2, "netweave")
+	check("a publish through the real driver reaches the client", batch ~= nil)
+
+	local declared = Namespace.get("studio")
+	local helloId = if declared then declared.channels.hello.id else nil
+
+	if batch then
+		equals("on the reliable remote", batch[2], true)
+		check(`as a batch of {batch[3]} bytes`, batch[3] >= 2 and batch[3] <= 8)
+		equals("starting with the version byte", batch[5], 1)
+		equals("then the channel's wire id", batch[6], helloId)
+		check("which is not the reserved control id", helloId ~= 0)
+	end
+
+	--[[ Under the ceiling: a batch on the unreliable remote, longer than its payload by the
+	     envelope and shorter than the limit. Over it: refused at the send, reported at the `send`
+	     stage with the size in the reason, and nothing on the wire. ]]
+	studio.server.wide:publish(player, table.create(880, 1))
+	frames(2)
+
+	local fits = heard(2, "netweave")
+	check("an unreliable payload under the ceiling arrives", fits ~= nil and fits[2] == false)
+
+	if fits then
+		check(`between its payload and the ceiling: {fits[3]} bytes`, fits[3] >= 880 and fits[3] <= 908)
+	end
+
+	local before = #refusals
+
+	studio.server.wide:publish(player, table.create(1200, 1))
+	frames(2)
+
+	equals("an unreliable payload over the ceiling is reported", #refusals, before + 1)
+
+	local last = refusals[#refusals]
+
+	if #refusals > before then
+		equals("at the send stage", last.stage, "send")
+		check("naming the limit", string.find(last.reason, "908 byte limit", 1, true) ~= nil)
+		equals("on the channel", last.channel, "studio.wide")
+	end
+
+	check("and nothing reached the client", heard(0.5, "netweave") == nil)
+
+	--[[ The reset. A test file's tear-down, and the driver has to survive it. ]]
+	Namespace.reset()
+
+	local later = nw.namespace("later", {
+		hello = nw.event({ data = t.u16, audience = nw.audience.owner }),
+	})
+
+	local sent = pcall(function()
+		later.server.hello:publish(player, 300)
+	end)
+
+	check("a namespace declared after a reset can publish", sent)
+	frames(2)
+
+	--[[ The bytes arriving is not the assertion — they arrived before the fix too. What the old
+	     driver sent was the packet under channel id **0**, the reserved control id, because nothing
+	     had numbered the new declaration; a real client would have read it as a malformed hello.
+	     The id is the observable. ]]
+	local numbered = Namespace.get("later")
+	local id = if numbered then numbered.channels.hello.id else nil
+	local afterReset = heard(2, "netweave")
+
+	check("and its batch reaches the client", afterReset ~= nil)
+
+	if afterReset then
+		check(
+			`carrying the id the new declaration was given, {tostring(id)}, not 0: got {afterReset[6]}`,
+			afterReset[6] == id and id ~= 0
+		)
+	end
+
+	stop()
+	puppet:FireClient(client, "disarm")
+	heard(PUPPET_TIMEOUT, "disarmed")
+
+	Namespace.reset()
+	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Context.acquire on a real Player
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`tests/api_runtime.luau` runs the context against a table with a `Character` field, and says so.
+	What only a real `Player` can show is that `character` and `humanoid` are found through the
+	real properties, that the guard is on in Studio, and that a real player's record is dropped by
+	`forget` the way `Players.PlayerRemoving` calls it.
+]]
+
+if player then
+	local character = (player :: any).Character
+	local ctx: any = Context.acquire(player, "studio.hello")
+
+	check("the guard is on in Studio", Context.guarded())
+	check("ctx.player is the real player", ctx.player == player)
+	check("ctx.character is what the player has right now", ctx.character == character)
+	check(
+		"and the humanoid is found through it",
+		ctx.humanoid == (if character then character:FindFirstChildOfClass("Humanoid") else nil)
+	)
+
+	if character then
+		print("        the player had a character; the humanoid path was asserted")
+	else
+		print("        the player had no character; both fields were asserted nil")
+	end
+
+	check("a write to ctx.player is refused by the guard", not (pcall(function()
+		ctx.player = "impostor"
+	end)))
+
+	Context.release(player)
+
+	check("the released ctx is refused", not (pcall(function()
+		return ctx.player
+	end)))
+
+	local detached: any = Context.detached(player, "studio.hello")
+	check("a detached context carries the same player", detached.player == player)
+	check("and finds the same character", detached.character == character)
+
+	Context.forget(player)
+
+	local fresh: any = Context.acquire(player, "studio.hello")
+	check("after forget, a new acquisition still works", fresh.player == player)
+	Context.release(player)
+	Context.forget(player)
+end
+
+puppet:Destroy()
+probe:Destroy()
 
 -- ---------------------------------------------------------------------------------------------
 

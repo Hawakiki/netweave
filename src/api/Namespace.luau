@@ -389,6 +389,20 @@ end
 
 --[=[
 	@within Namespace
+	@function sealed
+	@return boolean
+	@private
+
+	Whether the numbering is fixed. The transport asks this rather than keeping its own flag,
+	because [Namespace.reset] would otherwise leave the driver believing a protocol that no longer
+	exists is still agreed.
+]=]
+function Namespace.sealed(): boolean
+	return sealed
+end
+
+--[=[
+	@within Namespace
 	@function reset
 	@private
 

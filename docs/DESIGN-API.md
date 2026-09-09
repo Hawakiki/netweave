@@ -910,7 +910,12 @@ than the rule. `unreliableBytes` can only be *lowered*: ~~908 is Roblox's ceilin
 netweave enforces. Roblox's own page for `UnreliableRemoteEvent` says 1000 bytes; 908 is the figure
 measured on the devforum and recorded in `RESEARCH-AND-PLAN.md` §2, and `§3.7-F` records only that
 no surveyed library checks any limit. The conservative number is kept; the attribution was wrong
-(M4-1).
+(M4-1). **And it cannot be measured in Studio**: `tests/roblox_runtime.luau` fires raw unreliable
+payloads of 900 to 65,536 bytes to a real client in Play mode and every one arrives, with or without an
+instance in the sidecar — the loopback enforces no limit at all, so the figure is a property of the
+production network that this repository can only cite. What the suite does assert is netweave's half:
+908 is deliverable, and 1,206 is refused at the send with a report rather than dropped on the wire
+(PLAN-M4-BUG phase 6).
 
 **Two layers check a settings table, and they catch different things.** `Settings` catches the
 values — a severity that is not one of the three, a limit that is not a number, a `contextGuard`

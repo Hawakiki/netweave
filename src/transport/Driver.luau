@@ -133,15 +133,19 @@ function Driver.install()
 
 		The receive path seals through `Namespace.channelById` for the same reason.
 	]]
-	local ready = false
-
+	--[[
+		Asked of `Namespace` rather than remembered here. A flag of this driver's own stayed true
+		across `Namespace.reset()`, so a suite that had sent one packet through the real transport
+		left every namespace declared after it unsealed and unnumbered — found writing the Studio
+		half of the suite, where the benchmark declares its channels after the tests have run
+		(`PLAN-M4-BUG` phase 6).
+	]]
 	local function ensure()
-		if ready then
+		if Namespace.sealed() then
 			return
 		end
 
 		Namespace.seal()
-		ready = true
 
 		--[[
 			The client's hello goes out here, the moment the protocol is real and before anything
