@@ -28,6 +28,13 @@
 
         "tests": {
           "$path": "../tests"
+        },
+
+        "bench": {
+          "$className": "Folder",
+          "profile": { "$path": "profile.luau" },
+          "decode": { "$path": "decode.luau" },
+          "tick": { "$path": "tick.luau" }
         }
       },
 

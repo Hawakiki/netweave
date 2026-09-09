@@ -89,9 +89,10 @@ export type Severity = "off" | "warn" | "error"
 	.protocol Severity? -- a peer joined on a different set of channel definitions
 	.query Severity? -- a call came back without an answer
 	.direction Severity? -- a peer sent on a channel it is the receiver of
+	.replicate Severity? -- a replicated channel is holding more baselines than its limit allows
 	.rateUnbounded Severity? -- a `rate` so large it cannot bind, declared as if it were a limit
 
-	Nine of the ten are the stages of [Observer.Stage], because a rejection already carries the
+	Ten of the eleven are the stages of [Observer.Stage], because a rejection already carries the
 	stage it happened at and inventing a second vocabulary for the same things would only make them
 	drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the game's own
 	code, and is the only rule here that raises at `"error"`.
@@ -106,6 +107,7 @@ export type Rules = {
 	protocol: Severity?,
 	query: Severity?,
 	direction: Severity?,
+	replicate: Severity?,
 	rateUnbounded: Severity?,
 }
 
@@ -113,10 +115,12 @@ export type Rules = {
 	@interface Limits
 	@within Config
 	.queueCapacity number? -- packets held for a channel whose listener has not attached yet
-	.pendingPerBatch number? -- decoded packets held live while a batch is read, before any is dispatched
+	.pendingPerBatch number? -- decoded packets held live while a batch is read, before any is dispatched. **Server only**
 	.unreliableBytes number? -- the largest unreliable payload that will be sent
 	.repeatsPerDiagnostic number? -- how many times one channel and stage prints before it goes quiet
 	.callsInFlight number? -- unanswered `nw.query` calls one player may hold at once
+	.baselinesPerClient number? -- `(channel, subject)` pairs one client's replication may hold
+	.resyncTicks number? -- ticks a peer waits between resyncs that are acted on; a second ask inside the window is honoured when it closes
 
 	Numbers, not severities, and kept in their own field so that a limit can never be mistaken for a
 	switch.
@@ -126,12 +130,14 @@ export type Rules = {
 	| Limit | Read |
 	|---|---|
 	| `queueCapacity` | when a channel's queue is first created, which is its first refusal to a missing listener. A queue that already exists keeps the depth it was made with |
-	| `pendingPerBatch` | at the start of every batch |
+	| `pendingPerBatch` | at the start of every batch, **on a server**. A client does not apply it: the batch's size is chosen by an untrusted peer only when the peer is a client, and enforcing it against the server drops traffic the game asked for — on a replicated channel, permanently (`src/transport/Inbound.luau`, `refreshCeiling`) |
 	| `unreliableBytes` | on every unreliable send, so it takes effect immediately and can only *lower* the ceiling — 908 is Roblox's limit, not netweave's |
 	| `repeatsPerDiagnostic` | on every report |
 	| `callsInFlight` | on every `invoke` and on every request the server accepts, so it takes effect immediately |
+| `baselinesPerClient` | on every baseline a replicated channel is about to keep, so lowering it stops new ones rather than releasing held ones |
+	| `resyncTicks` | on every resync request and every tick, so it takes effect immediately. It was a constant until PLAN-M4-BUG phase 5: with a 30 KB replicated state each hostile client could extract 60 KB/s of encode for 10 B/s up, and a game could not tune it (M4-1) |
 
-	Configuring before the first channel is declared makes all three behave the same way, which is
+	Configuring before the first channel is declared makes all of them behave the same way, which is
 	why that is the advice rather than the rule.
 ]=]
 export type Limits = {
@@ -140,6 +146,8 @@ export type Limits = {
 	unreliableBytes: number?,
 	repeatsPerDiagnostic: number?,
 	callsInFlight: number?,
+	baselinesPerClient: number?,
+	resyncTicks: number?,
 }
 
 --[=[
@@ -230,6 +238,7 @@ export type function CheckedSettings(spec, snapshot)
 		protocol = true,
 		query = true,
 		direction = true,
+		replicate = true,
 		rateUnbounded = true,
 	}
 	--[[ Every key of `Limits`, and it has to be spelled out because a type function body cannot read
@@ -243,6 +252,8 @@ export type function CheckedSettings(spec, snapshot)
 		unreliableBytes = true,
 		repeatsPerDiagnostic = true,
 		callsInFlight = true,
+		baselinesPerClient = true,
+		resyncTicks = true,
 	}
 
 	--[[ Annotated `any` throughout: inside a type function the values are the analyzer's own type
@@ -337,9 +348,44 @@ export type function CheckedSettings(spec, snapshot)
 		return value:is("number")
 	end
 
+	--[[
+		**Every field this function reads is declared optional, so every field it reads is a union.**
+
+		`Settings.rules` is `Rules?`, `Limits.queueCapacity` is `number?`, `contextGuard` is
+		`boolean?`. Against a table *literal* that never showed: `{ limits = { queueCapacity = 32 } }`
+		gives properties typed `table` and `number`. Against a value typed with the library's own
+		exported types it shows immediately — `local s: nw.Settings = { ... }; nw.configure(s)` was a
+		type error saying "`rules` takes a table of rules, got that", because `:is("table")` is false
+		for a union and `named()` has no word for one either.
+
+		The exported type could not build the argument it names, and the only file that called
+		`nw.configure` at all was the rejection file, where a diagnostic is what success looks like.
+		That is the `nw.configure` incident of M3 phase 0 in a second form, and M4's report is what
+		found it (`tools/exports.luau` now requires an `_ok` for every exported type, which is what
+		closes it for good).
+
+		Stripping `nil` is the whole fix: what is left is the type the field would have had if it
+		were required, and every test below already handles that.
+	]]
+	local function present(value: any): any
+		if not value or not value:is("union") then
+			return value
+		end
+
+		local rest = nil
+
+		for _, component in value:components() do
+			if not component:is("nil") then
+				rest = if rest then types.unionof(rest, component) else component
+			end
+		end
+
+		return rest
+	end
+
 	local function values(container: any, field: any, ok: any, expected: any)
 		for key, property in container:properties() do
-			local value: any = property.read
+			local value: any = present(property.read)
 
 			if value and not ok(value) then
 				local name: any = (key :: any):value()
@@ -351,7 +397,7 @@ export type function CheckedSettings(spec, snapshot)
 	reject(settings, "setting", sections)
 
 	local function section(name: any, field: any, allowed: any, ok: any, expected: any)
-		local declared: any = settings:readproperty(types.singleton(name))
+		local declared: any = present(settings:readproperty(types.singleton(name)))
 
 		if not declared then
 			return
@@ -368,7 +414,7 @@ export type function CheckedSettings(spec, snapshot)
 	section("rules", "rule", ruleNames, isSeverity, `a severity: "off", "warn" or "error"`)
 	section("limits", "limit", limitNames, isNumber, "a number")
 
-	local guard: any = settings:readproperty(types.singleton("contextGuard"))
+	local guard: any = present(settings:readproperty(types.singleton("contextGuard")))
 
 	if guard and not guard:is("boolean") then
 		error(`nw.configure: \`contextGuard\` takes a boolean, got {named(guard)}`)
@@ -473,6 +519,18 @@ local RULES: { [string]: Rule } = {
 		wire = true,
 		summary = "a peer sent on a channel it is the receiver of",
 	},
+	replicate = {
+		--[[ A game's own volume rather than a peer's: how many subjects it replicates and to how
+		     many people. Past the limit netweave stops holding a baseline for that subject, which
+		     means it sends that client a whole snapshot every tick instead of a patch — **correct
+		     and expensive**, which is the right way for a bound to fail and is exactly what
+		     `nw.state` does for a living. Warn rather than error for the same reason `queue` does:
+		     it is a number the game can raise once it has seen it. ]]
+		default = "warn",
+		floor = "off",
+		wire = true,
+		summary = "a replicated channel is holding more baselines than its limit allows",
+	},
 	rateUnbounded = {
 		default = "warn",
 		floor = "off",
@@ -492,6 +550,18 @@ local LIMITS: { [string]: { default: number, min: number, max: number } } = {
 	     outstanding. They are the same number because they are the same player counted from either
 	     end (`PLAN-M3` D-13). ]]
 	callsInFlight = { default = 16, min = 1, max = 4096 },
+
+	--[[ How many `(channel, subject)` baselines one client's replication may hold. Not a defence
+	     against a peer — the audience decides who sees what, so a client cannot ask for more — but
+	     against a game that replicates thousands of subjects without noticing that the cost is
+	     multiplied by everyone who can see them (`PLAN-M3` D-6, applied to L3). ]]
+	baselinesPerClient = { default = 256, min = 1, max = 65536 },
+
+	--[[ How many ticks a peer waits between resyncs that are acted on. Half a second at 60 Hz by
+	     default: an honest client's first ask is always honoured at once, so this is only the gap
+	     before a second one. The bound on what a hostile peer can extract is one full resend per
+	     window per channel, and a game with a large replicated state raises this to shrink it. ]]
+	resyncTicks = { default = 30, min = 1, max = 3600 },
 }
 table.freeze(LIMITS)
 
@@ -599,7 +669,7 @@ end
 	:::caution Configure before you declare
 	Limits are read when the thing they limit needs them, and that is not the same moment for each —
 	see [Config.Limits]. Raising `queueCapacity` after a channel has already built its queue moves
-	the number this function reports and not that queue. Configuring first makes all three behave
+	the number this function reports and not that queue. Configuring first makes all of them behave
 	alike.
 	:::
 ]=]

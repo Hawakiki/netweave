@@ -179,6 +179,25 @@ if Config.SMOKE then
 	warn("[bench] SMOKE run: short windows, few samples. These numbers do not belong in RESULTS.md.")
 end
 
+--[[
+	The frame probe replaces the matrix rather than running beside it — fifteen minutes against one,
+	and a probe without drains inside the run it is trying to explain would contaminate the thing it
+	is measuring. Everything it needs is built by this point: the adapters, the drain, and the two
+	remotes.
+
+	`PLAN-M4` phase 7 is why it exists. See `bench/src/client/frame.luau`.
+]]
+if Config.FRAME_PROBE then
+	require(script.frame)({
+		adapters = adapters,
+		drain = drain,
+		control = control,
+		getResults = getResults,
+	})
+
+	return
+end
+
 local taps: { [string]: WireTap.Tap? } = {}
 for mode in adapters do
 	taps[mode] = WireTap.forMode(mode)
@@ -288,6 +307,17 @@ local function runDown(mode: string, schema: Modes.SchemaName, startCommand: str
 
 	control:FireServer(startCommand, mode, schema)
 
+	--[[ The same warm-up Up gets. The server starts sending at once; the window below opens only
+	     after it, with both ends' counters cleared, so a mode's first frames of JIT and buffer
+	     growth are not in the sample (M4-1: `WARMUP_SECONDS` applied to Up only). ]]
+	task.wait(Config.WARMUP_SECONDS)
+	downReceived[currentKey] = 0
+	downCorrect[currentKey] = nil
+	if tap then
+		tap.reset()
+	end
+	control:FireServer(Config.COMMAND.RESET_DOWN, mode, schema)
+
 	local _clientBandwidth, framerate = sample(function()
 		return 0
 	end)
@@ -305,7 +335,7 @@ local function runDown(mode: string, schema: Modes.SchemaName, startCommand: str
 	local serverSide = getResults:InvokeServer("down")
 
 	return {
-		sent = 0,
+		sent = serverSide.sent,
 		received = received,
 		correct = downCorrect[currentKey],
 		bandwidth = serverSide.bandwidth,
@@ -317,8 +347,15 @@ local function runDown(mode: string, schema: Modes.SchemaName, startCommand: str
 	}
 end
 
+--[[ Which tree the place was built from, written by `bench/build.luau`; `unknown` when the place
+     was built with plain `rojo build`. A run that cannot be attributed to a tree is the reason M4-1
+     could not re-derive the phase-7 conclusions. ]]
+local treeModule = Shared:FindFirstChild("Tree")
+local tree = if treeModule then require(treeModule) else { commit = "unknown", dirty = false, builtAt = "" }
+
 local results = {
 	generatedAt = os.time(),
+	tree = tree,
 	config = {
 		packetsPerFrame = Config.PACKETS_PER_FRAME,
 		runSeconds = Config.RUN_SECONDS,
@@ -331,9 +368,57 @@ local results = {
 	versions = {},
 	unavailable = unavailable,
 	cells = {},
+
+	--[[
+		The control group, filled in below.
+
+		A frame window contains a real engine frame, so Studio's own allocation — rendering,
+		physics, replication — is inside every encode cell. This measures a frame that sends
+		nothing, in the same units and with the same window count, so the engine's share is a number
+		in the run document rather than an unknown inside each cell. A cell whose median is not
+		comfortably above this one is measuring Studio (M4 phase 0).
+
+		`CLAUDE.md` §9: when a number looks like a change, the first question is what the code that
+		did not change did in the same run. Here the code that did not change is the engine.
+	]]
+	idle = {},
 }
 
-for mode, adapter in adapters do
+do
+	--[[ Before any mode runs, so no library's leftovers are still draining into it. ]]
+	local idleFrame = function()
+		RunService.PostSimulation:Wait()
+	end
+
+	local idle = Alloc.frames(idleFrame, Config.PACKETS_PER_FRAME, Config.ALLOC_WINDOWS)
+
+	results.idle = {
+		bytesPerPacket = idle.bytesPerCall,
+		bytesLow = idle.low,
+		bytesHigh = idle.high,
+		allocSamples = idle.usableSamples,
+		allocWindows = idle.repeats,
+	}
+
+	print(
+		`[bench] idle frame: {idle.bytesPerCall} B per packet-equivalent, `
+			.. `{idle.usableSamples}/{idle.repeats} windows`
+	)
+end
+
+--[[ Sorted, so two runs visit the cells in the same order. Hash order put a different mode first
+     each run, and the first cell after the suite is the one that pays for JIT and buffer growth
+     (M4-1). ]]
+local modeNames: { string } = {}
+
+for mode in adapters do
+	table.insert(modeNames, mode)
+end
+
+table.sort(modeNames)
+
+for _, mode in modeNames do
+	local adapter = adapters[mode];
 	(results.versions :: any)[mode] = adapter.version
 
 	for _, schema in Modes.SCHEMAS do
@@ -343,12 +428,25 @@ for mode, adapter in adapters do
 		local payload = adapter.payloads[schema]
 
 		--[[
-			Encode allocation. Bound to the exact payload so no wrapper closure allocates on top
-			of what the library does (PLAN-M0 R-3).
+			Encode allocation, one frame per window.
+
+			Built once, outside the measurement, so no closure is allocated per window — and bound to
+			the exact payload so no wrapper allocates on top of what the library does (PLAN-M0 R-3).
+
+			The `Wait` is the whole point rather than pacing: it ends the frame, so netweave's
+			`PostSimulation` flush and every competitor's equivalent run *inside* the window. Without
+			it the probe measures an outgoing buffer that is never emptied, which is what the M3
+			matrix was reporting (M4 phase 0, `bench/src/shared/Alloc.luau`).
 		]]
-		local encodeAlloc = Alloc.measure(function()
-			fire(payload)
-		end, Config.ALLOC_ITERATIONS, Config.ALLOC_REPEATS)
+		local encodeFrame = function()
+			for _ = 1, Config.PACKETS_PER_FRAME do
+				fire(payload)
+			end
+
+			RunService.PostSimulation:Wait()
+		end
+
+		local encodeAlloc = Alloc.frames(encodeFrame, Config.PACKETS_PER_FRAME, Config.ALLOC_WINDOWS)
 		drain()
 
 		local up = runUp(mode, adapter, schema)

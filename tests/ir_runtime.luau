@@ -84,6 +84,128 @@ do
 	equals("floats are not narrowed", layout.fixedSize, 4)
 end
 
+do
+	--[[ A quantised number carries no encoding of its own — the storage is chosen here, from how
+	     many steps the range holds, which is the only place that knows. That is the whole difference
+	     from `t.f32`, whose range validates and never narrows. ]]
+	local byte = Ir.lower(t.quantized(-1, 1, 2 / 254))
+	equals("254 levels fit a byte", byte.root.storage, "u8")
+	equals("the lower bound is the offset", byte.root.offset, -1)
+	equals("and the step travels with the node", byte.root.step, 2 / 254)
+	equals("one byte", byte.fixedSize, 1)
+
+	local pair = Ir.lower(t.quantized(-180, 180, 0.25))
+	equals("1440 levels take two", pair.root.storage, "u16")
+	equals("two bytes", pair.fixedSize, 2)
+
+	local wide = Ir.lower(t.quantized(0, 1, 1 / 100000))
+	equals("100,000 of them take four", wide.root.storage, "u32")
+	equals("four bytes", wide.fixedSize, 4)
+
+	--[[ The bound the *reader* is held to is the top level it can reconstruct, not the declaration —
+	     for 2.8% of evenly-dividing ranges the two differ by a rounding, and the declaration is the
+	     smaller one. `tests/serdes_runtime.luau` has the case that proves it matters. ]]
+	local eleven = Ir.lower(t.quantized(0, 100, 100 / 11))
+	check("the node's ceiling is the top level, not the declared maximum", (eleven.root.max :: number) >= 100)
+end
+
+do
+	--[[
+		`u53` and `i53` are the only declared encodings with no storage of their own: a span that
+		fits four bytes narrows exactly like `u32`, and one that does not is carried in an `f64`,
+		where every integer to 2^53 is exact.
+
+		**`offset` is zero on the wide path and has to be.** `value - min` for a bare `t.i53` spans
+		2^54, and an odd integer above 2^53 is not representable as a double — so subtracting the
+		bound would round the very values the encoding exists to carry.
+	]]
+	local wide = Ir.lower(t.u53)
+	equals("a bare u53 is carried in a double", wide.root.storage, "f64")
+	equals("eight bytes", wide.fixedSize, 8)
+	equals("with no offset subtracted", wide.root.offset, 0)
+	check("and it is a whole number", wide.root.whole == true)
+
+	local signed = Ir.lower(t.i53)
+	equals("so is a bare i53", signed.root.storage, "f64")
+	equals("and it subtracts nothing either", signed.root.offset, 0)
+
+	local narrow = Ir.lower(t.u53(1, 1000))
+	equals("a narrowed u53 takes the storage its span needs", narrow.root.storage, "u16")
+	equals("the lower bound is subtracted there", narrow.root.offset, 1)
+	equals("two bytes", narrow.fixedSize, 2)
+
+	--[[ The distinction the node has to carry and the storage cannot: both of these are `f64` on the
+	     wire, and only one of them is a whole number. ]]
+	check("a float is not whole", Ir.lower(t.f64).root.whole == false)
+	check("and a quantised number is not either", Ir.lower(t.quantized(-1, 1, 0.5)).root.whole == false)
+	check("while an ordinary integer is", Ir.lower(t.u16).root.whole == true)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A union forks the bit budget and takes the widest branch
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ One tag bit and five flags, forked: `1 + 5`. Summed it would be `1 + 10`, which is the extra
+	     byte `tests/serdes_runtime.luau` measures. Zap sums (`RESEARCH §3.9-Y`). ]]
+	local forked = Ir.lower(t.union({
+		a = t.struct({ p = t.boolean, q = t.boolean, r = t.boolean, s = t.boolean, u = t.boolean }),
+		b = t.struct({ v = t.boolean, w = t.boolean, x = t.boolean, y = t.boolean, z = t.boolean }),
+	}))
+
+	equals("a tag bit plus the widest branch", forked.root.bits, 6)
+	equals("and the flags are one byte", forked.maxSize, 1)
+
+	--[[ Both branches numbered from the same slot, which is what "forked" means where it can be
+	     read: the first flag of either branch is the bit after the tag. ]]
+	local branches = forked.root.branches :: { Ir.Field }
+	local first = (branches[1].node.fields :: { Ir.Field })[1].node
+	local second = (branches[2].node.fields :: { Ir.Field })[1].node
+
+	equals("the two branches share their first bit", first.mask, second.mask)
+	equals("in the same chunk", first.chunkIndex, second.chunkIndex)
+
+	--[[ Bytes cannot fork, because a byte offset is a position in a run rather than a slot in a
+	     bitfield. So a fixed size survives only where every branch agrees on one. ]]
+	local same = Ir.lower(t.union({ a = t.u16, b = t.i16 }))
+	equals("branches of one width keep a fixed size", same.root.fixedSize, 2)
+	equals("and the payload stays static", same.framing, "static")
+
+	local mixed = Ir.lower(t.union({ a = t.u8, b = t.u16 }))
+	equals("branches of two widths do not", mixed.root.fixedSize, nil)
+	equals("and the ceiling is the widest, not the sum", mixed.maxSize, 3)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A vector is its component schema, that many times over
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ Bare is what it always was. Named, everything a number node knows applies per component:
+	     a narrowed range takes a smaller storage, a quantisation step divides. ]]
+	equals("a bare vector3 is twelve bytes", Ir.lower(t.vector3).fixedSize, 12)
+	equals("and a bare vector2 is eight", Ir.lower(t.vector2).fixedSize, 8)
+
+	local placed = Ir.lower(t.vector3(t.i16(-2048, 2048)))
+	equals(
+		"a narrowed component takes the storage its span needs",
+		(placed.root.element :: Ir.Node).storage,
+		"u16"
+	)
+	equals("so three of them are six bytes", placed.fixedSize, 6)
+	equals("with the bound subtracted per axis", (placed.root.element :: Ir.Node).offset, -2048)
+
+	local flat = Ir.lower(t.vector2(t.i16(-1024, 1024)))
+	equals("and two are four", flat.fixedSize, 4)
+
+	--[[ The spelling the docstring recommends for a direction: three bytes where the bare one is
+	     twelve, because a component is a whole number type and `t.quantized` is one. ]]
+	local direction = Ir.lower(t.unitVector3(t.quantized(-1, 1, 2 / 254)))
+	equals("a quantised direction is three bytes", direction.fixedSize, 3)
+	check("and stays a unit vector", direction.root.unit == true)
+	equals("with the step on the component", (direction.root.element :: Ir.Node).step, 2 / 254)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- The M0 benchmark schemas, in the byte counts the competitors produced
 -- ---------------------------------------------------------------------------------------------
@@ -364,7 +486,7 @@ do
 
 		--[[ Every one of these opens a scope per element, which is the case the ceiling missed. ]]
 		{ name = "an array of booleans", schema = t.array(t.boolean, 0, 10) },
-		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 0, 10) },
+		{ name = "an array of optionals", schema = t.array(t.optional(t.u8), 10) },
 		{
 			name = "an array of structs carrying a flag",
 			schema = t.array(t.struct({ f = t.boolean, x = t.u8 }), 0, 10),

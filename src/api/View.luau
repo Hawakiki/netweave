@@ -51,17 +51,51 @@ local View = {}
 	call across modules — it has only the `types` library. The two must agree, and
 	`tests/api_ok.luau` asserts they do by assigning one to the other.
 ]]
+--[[
+	The same rule as `Trust.luau`'s `branded`, and a copy rather than a call: a type function's body
+	cannot reach a value from another module, so `Trust.Trusted` is not callable from in here. The
+	two are held together by `tests/api_ok.luau`, which asserts a handler's parameter is assignable
+	to `nw.Untrusted<Req?>` — if either copy drifts, that stops compiling.
+
+	Why it handles a union: `T?` is one, and testing `value:is("table")` alone left an optional
+	payload unbranded, so a `signal` handed its handler a value that satisfied a `Trusted<Req?>`
+	parameter (M4 report). Each table component is branded and the union rebuilt, which keeps the
+	brand across the `if r then` a game has to write anyway.
+]]
 type function brandedAs(payload, name)
 	local value = types.copy(payload)
 
-	if not value:is("table") then
-		return value
+	local function tagged(inner)
+		local tag = types.newtable()
+		tag:setproperty(types.singleton(name), types.singleton(true))
+		return types.intersectionof(inner, tag)
 	end
 
-	local tag = types.newtable()
-	tag:setproperty(types.singleton(name), types.singleton(true))
+	if value:is("table") then
+		return tagged(value)
+	end
 
-	return types.intersectionof(value, tag)
+	if value:is("union") then
+		local rebuilt = nil
+		local marked = false
+
+		for _, component in value:components() do
+			local part = component
+
+			if component:is("table") then
+				part = tagged(component)
+				marked = true
+			end
+
+			rebuilt = if rebuilt then types.unionof(rebuilt, part) else part
+		end
+
+		if marked and rebuilt then
+			return rebuilt
+		end
+	end
+
+	return value
 end
 
 type function channelView(channel, side)
@@ -77,6 +111,7 @@ type function channelView(channel, side)
 	local audience = channel:readproperty(types.singleton("__audience")):value()
 	local payload = channel:readproperty(types.singleton("__payload"))
 	local response = channel:readproperty(types.singleton("__response"))
+	local subject = channel:readproperty(types.singleton("__subject"))
 
 	local view = types.newtable()
 	local server = side:value() == "server"
@@ -167,6 +202,29 @@ type function channelView(channel, side)
 				)
 			)
 		end
+	elseif class == "replicate" then
+		--[[
+			The server view has **nothing on it**, and that absence is the class's argument made
+			mechanical rather than documented. A replicated channel is fed by its `store`; if
+			`publish` existed here there would be two ways in, and the one that skipped the baseline
+			would leave clients wrong in a way nothing could detect.
+
+			The client half is `listen`, the same as `state`, because a client that has to know
+			whether it was sent a change or a whole value is a client the library has failed.
+		]]
+		if not server then
+			--[[ Two arguments, and the subject first. A replicated client keeps one value per
+			     subject, so a listener that could not tell them apart would be useless — and typing
+			     it here is what stops the signature from taking one argument at analysis and two at
+			     runtime, which is worse than either. ]]
+			view:setproperty(
+				types.singleton("listen"),
+				returns({
+					types.unknown,
+					types.newfunction({ head = { subject, payload } }, { head = {} }),
+				})
+			)
+		end
 	else
 		if server then
 			view:setproperty(types.singleton("publish"), returns({ types.unknown, types.unknown, payload }))
@@ -251,6 +309,29 @@ end
 	does **not** reduce for a module that requires it. It becomes `any`, with no diagnostic — so
 	`combat.server.fireWeapon:send(...)` would compile, and every direction violation in
 	`tests/api_reject.luau` would stop erroring while the file still claimed to test them.
+
+	**And there is one way to write it down that does the same thing.** `local ns: Views<D> = <a
+	namespace>` — an annotated local with a value assigned into it — makes the file stop reporting
+	anything about `ns`, retroactively and to the end of the file. Measured at
+	`--flag:LuauSolverV2=true` against the same declarations, counting the two diagnostics a
+	direction violation and a wrong-typed handler produce:
+
+	  | written as | diagnostics |
+	  |---|---|
+	  | no annotation | 2 |
+	  | `type V = Views<D>`, never assigned through | 2 |
+	  | `local v = ns :: Views<D>` | 2 |
+	  | `local v: Views<D>` with no value | 2 |
+	  | `local v: typeof(ns) = ns` | 2 |
+	  | a parameter typed `Views<D>`, called with `ns` | 2 |
+	  | **`local v: Views<D> = ns`** | **0** |
+
+	Six spellings keep the guarantees and one removes them, so the answer is to write one of the six
+	— a parameter, a cast, or `typeof` — and `tests/api_ok.luau` pins all three. The seventh is
+	pinned as a canary at the end of `tests/api_reject.luau`: it holds two statements that should
+	error, the header count says they do not, and if the count ever moves to 25 this caution can come
+	off. Found by M4's security report, which also found the reason nothing had caught it: no file in
+	`tests/` had ever written `Views<` at all.
 ]]
 export type Views<D> = {
 	name: string,
@@ -313,6 +394,12 @@ local function serverView(channel: any): any
 				attach(channel, handler, "handle")
 			end,
 		}
+	end
+
+	--[[ Nothing to call. See the type function above: the store is the only way into a replicated
+	     channel, so a second one would be a way to be wrong. ]]
+	if class == "replicate" then
+		return { channel = channel }
 	end
 
 	local view: any = {

@@ -23,6 +23,7 @@
 	     so the loss is measured rather than merely admitted.
 ]]
 
+local Baseline = require("../src/replication/Baseline")
 local Batch = require("../src/transport/Batch")
 local Budget = require("../src/transport/Budget")
 local Buffer = require("../src/codec/Buffer")
@@ -105,6 +106,14 @@ local declared = Namespace.declare("h", {
 	--[[ A second listener-less channel, because a queue keeps the depth it was built with and the
 	     one above has already been filled by the case that tests overflow. ]]
 	hushed = nw.signal({ data = t.struct({ n = t.u8 }), rate = 1000 }),
+	--[[ Server to client and driven by a store, so a client's packet on it is doubly illegitimate:
+	     wrong direction, and a class whose only way in is a store this peer cannot reach. ]]
+	mirrored = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ n = t.u8 }),
+		audience = nw.audience.everyone,
+		store = nw.store.of({}),
+	}),
 })
 
 local protocol = Namespace.seal()
@@ -121,6 +130,7 @@ local Asked = declared.channels.asked
 local Silent = declared.channels.silent
 local Broadcast = declared.channels.broadcast
 local Hushed = declared.channels.hushed
+local Replicated = declared.channels.mirrored :: any
 
 --[[ An id past the last one assigned. Nothing resolves it, which is the one failure the format
      cannot isolate. ]]
@@ -131,8 +141,23 @@ local UNKNOWN_ID = protocol.count + 1
 -- ---------------------------------------------------------------------------------------------
 
 local delivered = 0
-local reports: { { stage: string, reason: string, bytes: number, channel: string? } } = {}
+type Report = { stage: string, reason: string, bytes: number, channel: string? }
+
+local reports: { Report } = {}
 local replies: { { call: number, status: number } } = {}
+
+--[[
+	The first report, or a stand-in that fails every assertion about one. Indexing `reports[1]`
+	directly raised `attempt to index nil with 'reason'` the moment a stage was disabled, which
+	aborted the file and hid every section after it — a §9 "break the guard, watch the test fail"
+	run read as one failure instead of the true count (M4-1, tests). A refusal that never happened
+	has to fail the assertions written for it, not the file.
+]]
+local NO_REPORT: Report = { stage = "(no report)", reason = "(no report)", bytes = -1 }
+
+local function first(): Report
+	return reports[1] or NO_REPORT
+end
 
 local at = 0
 
@@ -266,8 +291,8 @@ do
 	local survived = feed()
 	check("a batch on the wrong version does not raise", survived)
 	equals("it is refused whole", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
-	check("naming the version", string.find(reports[1].reason, "version 0", 1, true) ~= nil)
+	equals("at parse", first().stage, "parse")
+	check("naming the version", string.find(first().reason, "version 0", 1, true) ~= nil)
 end
 
 do
@@ -278,7 +303,7 @@ do
 	local survived = feed()
 	check("a channel id that runs off the end does not raise", survived)
 	equals("it stops the batch", #reports, 1)
-	check("reported as truncated", string.find(reports[1].reason, "truncated channel id", 1, true) ~= nil)
+	check("reported as truncated", string.find(first().reason, "truncated channel id", 1, true) ~= nil)
 end
 
 do
@@ -294,7 +319,36 @@ do
 	local survived = feed()
 	check("an overlong varint does not raise", survived)
 	equals("it is refused", #reports, 1)
-	check("without looping", true)
+end
+
+do
+	reset()
+
+	--[[
+		A payload that does not end where its length says. The reader for `t.struct({ s = ... })`
+		consumes the string and stops; three bytes the sender declared and nobody read used to be
+		stepped over in silence — padding a peer can add for free, and the shape that would hide a
+		reader consuming less than it should. G5 is per packet, and "consumed exactly what it
+		claimed" is its packet-level form (PLAN-M4-BUG phase 6). Refused, and the honest packet
+		behind it still arrives.
+	]]
+	Buffer.writeU8(Batch.VERSION)
+	Buffer.writeVarint(Counted.id)
+	Buffer.writeVarint(6)
+	Buffer.writeU8(2)
+	Buffer.writeU8(0x68)
+	Buffer.writeU8(0x69)
+	Buffer.writeU8(0)
+	Buffer.writeU8(0)
+	Buffer.writeU8(0)
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+
+	local stood = feed()
+	check("a padded payload does not raise", stood)
+	equals("the padded packet is refused", #reports, 1)
+	equals("at parse", first().stage, "parse")
+	check("naming the length", string.find(first().reason, "declared length", 1, true) ~= nil)
+	equals("and the packet behind it arrives", delivered, 1)
 end
 
 do
@@ -321,7 +375,7 @@ do
 		behind it is unreachable. What must not happen is the loss going unmeasured: the report's
 		byte count is exactly the distance from the unresolvable id to the end of the batch.
 	]]
-	equals("and the report measures exactly what was discarded", reports[1].bytes, size - afterGood)
+	equals("and the report measures exactly what was discarded", first().bytes, size - afterGood)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -339,7 +393,7 @@ do
 	equals("it stops the batch", #reports, 1)
 	check(
 		"reported as a truncated length",
-		string.find(reports[1].reason, "truncated packet length", 1, true) ~= nil
+		string.find(first().reason, "truncated packet length", 1, true) ~= nil
 	)
 end
 
@@ -359,8 +413,8 @@ do
 	check("a length past the end of the batch does not raise", survived)
 	equals("the packet in front of it arrived", delivered, 1)
 	equals("and the rest is one refusal", #reports, 1)
-	check("naming the overrun", string.find(reports[1].reason, "past the batch", 1, true) ~= nil)
-	equals("measuring what was discarded", reports[1].bytes, size - afterGood)
+	check("naming the overrun", string.find(first().reason, "past the batch", 1, true) ~= nil)
+	equals("measuring what was discarded", first().bytes, size - afterGood)
 end
 
 do
@@ -387,8 +441,8 @@ do
 	check("an overstated instance count does not raise", survived)
 	equals("the packet in front of it arrived", delivered, 1)
 	equals("and the batch stops there", #reports, 1)
-	check("naming the sidecar", string.find(reports[1].reason, "sidecar", 1, true) ~= nil)
-	equals("measuring what was discarded", reports[1].bytes, size - afterGood)
+	check("naming the sidecar", string.find(first().reason, "sidecar", 1, true) ~= nil)
+	equals("measuring what was discarded", first().bytes, size - afterGood)
 end
 
 do
@@ -423,8 +477,8 @@ do
 	check("a number in the sidecar does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
-	check("naming what was there instead", string.find(reports[1].reason, "sidecar holds", 1, true) ~= nil)
+	equals("at parse", first().stage, "parse")
+	check("naming what was there instead", string.find(first().reason, "sidecar holds", 1, true) ~= nil)
 	accounts("a non-instance in the sidecar", 3)
 end
 
@@ -448,7 +502,7 @@ do
 	check("a string on a class-less instance field does not raise", survived)
 	equals("nothing was delivered", delivered, 0)
 	equals("and it was refused", #reports, 1)
-	check("naming the type", string.find(reports[1].reason, "string", 1, true) ~= nil)
+	check("naming the type", string.find(first().reason, "string", 1, true) ~= nil)
 end
 
 -- ---------------------------------------------------------------------------------------------
@@ -470,7 +524,7 @@ do
 	check("a number out of its declared range does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
+	equals("at parse", first().stage, "parse")
 	accounts("out of range", 3)
 end
 
@@ -516,7 +570,7 @@ do
 	check("an array claiming more than the bytes behind it does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	check("naming the claim", string.find(reports[1].reason, "claims", 1, true) ~= nil)
+	check("naming the claim", string.find(first().reason, "claims", 1, true) ~= nil)
 	accounts("array claim", 3)
 end
 
@@ -540,8 +594,8 @@ do
 	check("a payload over the declared ceiling does not raise", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at budget, before decode", reports[1].stage, "budget")
-	check("naming the ceiling", string.find(reports[1].reason, "over the 32", 1, true) ~= nil)
+	equals("at budget, before decode", first().stage, "budget")
+	check("naming the ceiling", string.find(first().reason, "over the 32", 1, true) ~= nil)
 	accounts("over the declared ceiling", 3)
 end
 
@@ -611,8 +665,8 @@ do
 	check("a policy that raises does not take the batch", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at authorize", reports[1].stage, "authorize")
-	check("naming the raise", string.find(reports[1].reason, "the policy raised", 1, true) ~= nil)
+	equals("at authorize", first().stage, "authorize")
+	check("naming the raise", string.find(first().reason, "the policy raised", 1, true) ~= nil)
 	accounts("a raising policy", 3)
 
 	Guarded.authorize = previous
@@ -639,7 +693,7 @@ do
 	check("a handler that raises does not take the batch", survived)
 	equals("the packets around it arrived", delivered, 2)
 	equals("and it alone was refused", #reports, 1)
-	equals("at handler", reports[1].stage, "handler")
+	equals("at handler", first().stage, "handler")
 	accounts("a raising handler", 3)
 
 	Guarded.handler = previous
@@ -707,7 +761,7 @@ do
 	check("a batch past the pending ceiling does not raise", survived)
 	equals("the ceiling is what is delivered", delivered, 3)
 	equals("and the rest are refused", #reports, 5)
-	check("naming the ceiling", string.find(reports[1].reason, "more than 3 packets", 1, true) ~= nil)
+	check("naming the ceiling", string.find(first().reason, "more than 3 packets", 1, true) ~= nil)
 	accounts("past the pending ceiling", 8)
 
 	Config.reset()
@@ -768,7 +822,7 @@ do
 	equals("the packets around them arrived", delivered, 2)
 	equals("and every one of the forty was refused", #reports, 40)
 	equals("at direction", reportedAt("direction"), 40)
-	check("naming the class", string.find(reports[1].reason, "event is sent by the server", 1, true) ~= nil)
+	check("naming the class", string.find(first().reason, "event is sent by the server", 1, true) ~= nil)
 	accounts("a client sending on an outbound class", 42)
 
 	--[[ And none of them was decoded: the refusal is before `codec.read`, at the same point and for
@@ -848,7 +902,7 @@ do
 
 	check("a truncated call id does not raise", survived)
 	equals("it stops the batch", #reports, 1)
-	check("reported as truncated", string.find(reports[1].reason, "truncated call id", 1, true) ~= nil)
+	check("reported as truncated", string.find(first().reason, "truncated call id", 1, true) ~= nil)
 end
 
 do
@@ -882,7 +936,7 @@ do
 	check("a repeated call id does not raise", survived)
 	equals("only the first was served", delivered, 1)
 	equals("and the repeat was refused", #reports, 1)
-	check("naming the repeat", string.find(reports[1].reason, "already in flight", 1, true) ~= nil)
+	check("naming the repeat", string.find(first().reason, "already in flight", 1, true) ~= nil)
 	equals("the repeat was answered rather than dropped", #replies, 1)
 	equals("with a refusal", replies[1].status, Batch.REFUSED)
 	equals("and the first still holds its slot", queries.inflight(mallory), 1)
@@ -965,8 +1019,8 @@ do
 
 	check("a raise inside the read phase does not escape the receive path", survived)
 	equals("it is reported", #reports, 1)
-	equals("at parse", reports[1].stage, "parse")
-	check("naming the raise", string.find(reports[1].reason, "read phase raised", 1, true) ~= nil)
+	equals("at parse", first().stage, "parse")
+	check("naming the raise", string.find(first().reason, "read phase raised", 1, true) ~= nil)
 end
 
 do
@@ -1010,7 +1064,7 @@ do
 
 	check("a raise inside the dispatch phase does not escape either", survived)
 	equals("it is reported", #reports, 1)
-	equals("at handler", reports[1].stage, "handler")
+	equals("at handler", first().stage, "handler")
 
 	--[[ The canary: whatever the raise left behind, an honest batch still arrives. A leaked pending
 	     list, a stranded cursor or an unrestored sender would all show up here and nowhere else. ]]
@@ -1038,7 +1092,7 @@ do
 
 	check("a control packet with no kind does not raise", survived)
 	equals("it is refused", #reports, 1)
-	check("as truncated", string.find(reports[1].reason, "truncated control", 1, true) ~= nil)
+	check("as truncated", string.find(first().reason, "truncated control", 1, true) ~= nil)
 end
 
 do
@@ -1053,7 +1107,7 @@ do
 
 	check("a control body running past the batch does not raise", survived)
 	equals("it is refused", #reports, 1)
-	check("naming the overrun", string.find(reports[1].reason, "past the batch", 1, true) ~= nil)
+	check("naming the overrun", string.find(first().reason, "past the batch", 1, true) ~= nil)
 end
 
 do
@@ -1077,7 +1131,36 @@ do
 	check("an unknown control kind does not raise", survived)
 	equals("it is stepped over", delivered, 1)
 	equals("and said out loud rather than skipped in silence", #reports, 1)
-	check("naming the kind", string.find(reports[1].reason, "control kind 200", 1, true) ~= nil)
+	check("naming the kind", string.find(first().reason, "control kind 200", 1, true) ~= nil)
+end
+
+do
+	reset()
+
+	--[[
+		A control body that fails to parse inside its own declared length. `01 00 02 01 89`: a resync
+		whose one-byte body is a varint asking for a second byte the length did not provide. The
+		read was refused inside the body's limit, and the refusal was then stepped over without a
+		word — the one silent exit on the control path, found by the fuzzer the round its corpus
+		learned to write a resync (PLAN-M4-BUG phase 6). Reported now, and the packet behind it
+		arrives.
+	]]
+	Buffer.writeU8(Batch.VERSION)
+	Buffer.writeVarint(0)
+	--[[ The kind as a literal rather than `Batch.RESYNC`, so the pre-fix tree — which does not export
+	     it — reaches the assertions instead of raising at the write. ]]
+	Buffer.writeU8(2)
+	Buffer.writeVarint(1)
+	Buffer.writeU8(0x89)
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+
+	local stood = feed()
+
+	check("a control body that ends mid-value does not raise", stood)
+	equals("it is reported rather than stepped over in silence", #reports, 1)
+	equals("at parse", first().stage, "parse")
+	check("naming the body", string.find(first().reason, "body ends before", 1, true) ~= nil)
+	equals("and the packet behind it arrives", delivered, 1)
 end
 
 do
@@ -1103,10 +1186,7 @@ do
 	     mismatched hello and nothing else used to be refused in silence. ]]
 	equals("the hello and all three behind it were refused", #reports, 4)
 	equals("at protocol", reportedAt("protocol"), 4)
-	check(
-		"with both hashes named",
-		string.find(reports[1].reason, Protocol.hex(protocol.hash), 1, true) ~= nil
-	)
+	check("with both hashes named", string.find(first().reason, Protocol.hex(protocol.hash), 1, true) ~= nil)
 
 	agreement.forget(mallory)
 end
@@ -1158,6 +1238,279 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Replication, from the side that must not be able to touch it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		A replicated channel is server-to-client, so **everything in this section is a client
+		sending something that cannot legitimately exist**. G6 refuses it before decode, at
+		`direction`, and the assertions are about what it costs rather than whether it lands.
+
+		The baseline store is the interesting part. It is memory the server holds per client, and a
+		peer that could add to it, or empty it, would have found either a leak or an amplifier.
+	]]
+	local held = Baseline.new(true)
+
+	local replicated = Inbound.new({
+		resolve = Namespace.channelById,
+
+		admit = function(): string?
+			return nil
+		end,
+
+		isServer = true,
+		baselines = held,
+	})
+
+	--[[ Seeded the way the tick would, so there is something to lose. ]]
+	held.keep(mallory, Replicated, 1, { n = 1 })
+	held.keep(mallory, Replicated, 2, { n = 2 })
+	equals("the server is holding two baselines", held.held(mallory), 2)
+
+	--[[ Forty packets on the replicated id, which is the shape a client would send if it wanted to
+	     be replicated *to* on its own terms. ]]
+	for index = 1, 40 do
+		Batch.writeChange(Replicated, index, nil, { n = index })
+	end
+
+	local changes, alsoCarried = Buffer.take()
+	local stood = pcall(replicated.receive, changes, alsoCarried, mallory)
+
+	check("a batch of well-formed changes does not raise", stood)
+	equals("every one refused at direction", reportedAt("direction"), 40)
+	equals("and none of them decoded", reportedAt("parse"), 0)
+
+	--[[ **A client cannot make the server hold a baseline it did not ask for.** The only thing that
+	     writes one is the tick, driven by the store and the audience; there is no packet that
+	     reaches `keep`. Forty tried. ]]
+	equals("the server holds exactly what it held", held.held(mallory), 2)
+	equals("the first is untouched", held.of(mallory, Replicated, 1).n, 1)
+	equals("and so is the second", held.of(mallory, Replicated, 2).n, 2)
+
+	--[[
+		**And it cannot make the server forget one either**, which is the half that was live until
+		this section was written.
+
+		Any refusal of a replicated packet clears the channel and asks for it again — right on the
+		client, where a refusal means a change was lost. On the server it meant one malformed byte
+		bought a full resend of everything that peer could see, every batch, forever. The endpoint
+		that gives up a baseline is now the one that receives changes.
+	]]
+	equals("and did not forget one because a peer sent rubbish", held.held(mallory), 2)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		The resync control packet, which is the one thing a client sends that makes the server do
+		work it did not choose.
+
+		It is bounded rather than refused: clearing a baseline already cleared costs a table lookup,
+		and however many arrive in one tick provoke one resend in the tick that follows. The most a
+		peer can extract is a whole state per tick, which is what `nw.state` sends unconditionally.
+	]]
+	local held = Baseline.new(true)
+
+	local replicated = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+	})
+
+	held.keep(mallory, Replicated, 1, { n = 1 })
+
+	for _ = 1, 300 do
+		Batch.writeResync(Replicated.id)
+	end
+
+	local packed = Buffer.take()
+	local survived = pcall(replicated.receive, packed, nil, mallory)
+
+	check("three hundred resync requests do not raise", survived)
+	equals("the baseline is cleared once and stays cleared", held.held(mallory), 0)
+
+	reset()
+
+	--[[ A resync naming something that is not a replicated channel — an ordinary id, and one that
+	     is not a channel at all. Refused rather than assumed: a peer that could ask about ids it
+	     made up could otherwise walk the server's channel table on demand. ]]
+	Batch.writeResync(Fixed.id)
+	Batch.writeResync(60000)
+
+	local madeUp = Buffer.take()
+	local stood = pcall(replicated.receive, madeUp, nil, mallory)
+
+	check("a resync for a channel that is not replicated does not raise", stood)
+	equals("both are refused", reportedAt("replicate"), 2)
+
+	--[[ And an endpoint holding no baselines at all, which returned without a word — the one silent
+	     exit on the path, found by the fuzzer the round its corpus learned to write a resync. ]]
+	reset()
+
+	local bare = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+	})
+
+	Batch.writeResync(Replicated.id)
+
+	local quiet = Buffer.take()
+	local held_ = pcall(bare.receive, quiet, nil, mallory)
+
+	check("a resync at an endpoint with no baselines does not raise", held_)
+	equals("and is reported rather than dropped", reportedAt("replicate"), 1)
+end
+
+do
+	reset()
+	at += 1000
+	budget.forget(mallory)
+
+	--[[
+		**One resync a frame is one full state a frame, and that was the largest amplifier here.**
+
+		The clear is a table drop. What it costs is the *tick after it*, which finds no baseline and
+		writes every subject that peer can see — measured with the real tick at a hundred subjects:
+		a steady state of 0 bytes a frame became **601 bytes a frame**, bought with five bytes a
+		frame, outside every budget netweave has. A replicated channel declares no `rate`, so
+		`Budget.admit` has nothing to charge, and control packets are read before `admit` anyway
+		(M4 report, first danger).
+
+		The section above asserts the clear is idempotent *within one batch*. That was never the
+		attack: the attacker sends one per frame and the tick repopulates in between, so every one of
+		them lands on a fresh set of baselines.
+
+		The bound is a coalesce rather than a refusal, and this asserts the difference. A refused
+		resync would strand an honest client — it asks once, at the moment it gave up, and nothing
+		retries — so the ask is always honoured, at most once per window, and `tick` honours what
+		arrived inside one.
+	]]
+	local held = Baseline.new(true)
+
+	local replicated = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+	})
+
+	local function ask()
+		Batch.writeResync(Replicated.id)
+		replicated.receive((Buffer.take()), nil, mallory)
+	end
+
+	local function repopulate()
+		held.keep(mallory, Replicated, 1, { n = 1 })
+		held.keep(mallory, Replicated, 2, { n = 2 })
+	end
+
+	--[[ The first ask is honoured immediately: a client that just lost a change waits for nothing. ]]
+	repopulate()
+	ask()
+	equals("the first ask clears at once", held.held(mallory), 0)
+
+	--[[ Then the window is shut. Sixty more asks, each on a freshly repopulated set, the way a tick
+	     would leave it — and none of them lands. ]]
+	local cleared = 0
+
+	for _ = 1, 60 do
+		repopulate()
+		ask()
+
+		if held.held(mallory) == 0 then
+			cleared += 1
+		end
+	end
+
+	equals("and sixty more inside the window buy nothing", cleared, 0)
+	equals("and every one of them is reported, not swallowed", reportedAt("replicate"), 60)
+
+	--[[ Nothing is dropped, though. The window passes and the ask that arrived inside it is
+	     honoured by the tick, without the peer asking again. ]]
+	repopulate()
+
+	for _ = 1, 30 do
+		replicated.tick()
+	end
+
+	equals("what was asked for inside the window is honoured after it", held.held(mallory), 0)
+
+	--[[ The window is a limit, not a constant: a game with a large replicated state shrinks what a
+	     peer can extract by widening it, and a test shortens it to see the edge. Two ticks. ]]
+	Config.configure({ limits = { resyncTicks = 2 } })
+
+	for _ = 1, 30 do
+		replicated.tick()
+	end
+
+	repopulate()
+	ask()
+	equals("an ask after a widened window is honoured", held.held(mallory), 0)
+
+	repopulate()
+	ask()
+	equals("the next one inside two ticks is not", held.held(mallory), 2)
+
+	replicated.tick()
+	replicated.tick()
+	equals("and is honoured two ticks later", held.held(mallory), 0)
+
+	Config.reset()
+
+	--[[ And a peer already refused at `protocol` gets nothing at all, which is the other half:
+	     control packets are read before `admit`, so the verdict is the only thing standing between a
+	     peer whose declarations disagree and a full state re-encode. ]]
+	reset()
+
+	local refused = Protocol.new({
+		hash = function(): number
+			return protocol.hash + 1
+		end,
+
+		announce = function() end,
+		isServer = true,
+	})
+
+	local guarded = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+		agreement = refused,
+	})
+
+	refused.greet(mallory, protocol.hash)
+	repopulate()
+
+	Batch.writeHello(protocol.hash)
+	Batch.writeResync(Replicated.id)
+
+	local ignored = pcall(guarded.receive, (Buffer.take()), nil, mallory)
+
+	check("a resync from a peer on another protocol does not raise", ignored)
+	equals("and does not clear a thing", held.held(mallory), 2)
+	check("while saying so", reportedAt("protocol") > 0)
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- One valid packet, so the rig is proved to be capable of delivering anything at all
 -- ---------------------------------------------------------------------------------------------
 
@@ -1174,6 +1527,58 @@ do
 
 	check("a well-formed packet arrives", survived and delivered == 1)
 	equals("with nothing reported", #reports, 0)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A raise between the guards loses its own packet and nothing behind it
+-- ---------------------------------------------------------------------------------------------
+
+do
+	reset()
+	suite.failing()
+
+	--[[
+		`call` runs the policy and the handler under `xpcall`, and `dispatch` runs the whole walk
+		under one `pcall`. Between those two layers sits code that is under neither — the call-id
+		record, the context, the reply — and a raise there used to reach the outer guard, which
+		protects the list and not the entries behind the one that raised: the rest of the batch was
+		dropped, with a report naming no channel and no player (M4 report, finding 32). G5 is per
+		packet in the read phase, and this section says it is per packet here too.
+
+		The fault is injected where the report injected it, into `queries.enter`, because nothing in
+		the tree raises there today: the guard is for the raise nobody has thought of yet.
+	]]
+	local sabotaged = setmetatable({
+		enter = function()
+			error("injected: a raise between the two guards")
+		end,
+	}, { __index = queries })
+
+	local endpoint = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		queries = sabotaged :: any,
+	})
+
+	Batch.writePacket(Fixed, { a = 1, b = 2 })
+	Batch.writeRequest(Asked, 7, { n = 1 })
+	Batch.writePacket(Fixed, { a = 3, b = 4 })
+
+	local packed, carried = Buffer.take()
+	local survived = pcall(endpoint.receive, packed, carried, mallory)
+
+	check("the raise does not escape the batch", survived)
+	equals("the packet behind it still arrives", delivered, 2)
+	equals("and the raise is one report", #reports, 1)
+	equals("at handler", first().stage, "handler")
+	check("naming the channel it happened on", first().channel == Asked.qualified)
+	check("and saying what raised", string.find(first().reason, "injected", 1, true) ~= nil)
+	equals("measuring the packet it cost", first().bytes > 0, true)
+
+	suite.passing()
 end
 
 -- ---------------------------------------------------------------------------------------------

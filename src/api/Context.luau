@@ -54,6 +54,10 @@ export type Ctx = {
 type Record = {
 	live: Ctx,
 	generation: number,
+	--[[ Whether this acquisition has already gone and looked the character up. A boolean rather than
+	     testing the field, because "this player has no character" is a real answer and `nil` cannot
+	     tell it apart from "nobody has asked yet". ]]
+	looked: boolean,
 }
 
 --[[
@@ -127,6 +131,23 @@ local function guard(record: Record): Ctx
 	) :: Ctx
 end
 
+--[[
+	**The character is looked up when something reads it, and not before.**
+
+	It used to be refreshed in `acquire`, which runs per packet — two property reads and a
+	`FindFirstChildOfClass` for every packet of every batch, whether or not anything on that channel
+	was ever going to ask. A `signal` or `intent` with no policy needs it from nobody, and a batch of
+	twenty packets from one player paid twenty tree searches (M4 report).
+
+	Deferring it is not a caching window: each acquisition still gets that packet's answer, computed
+	fresh the first time it is read. What goes away is the packet that never reads it at all, which
+	is most of them.
+
+	Both fields are computed together on either one's first read, because `humanoid` is found through
+	`character` and a policy that asks for one has already paid for the other. `rawset` for the
+	caching so the metatable does not re-enter, and a `nil` character simply leaves the key absent —
+	`looked` is what stops it being looked up twice.
+]]
 local function recordFor(player: any): Record
 	local existing = records[player]
 
@@ -134,20 +155,60 @@ local function recordFor(player: any): Record
 		return existing
 	end
 
-	local live: Ctx = {
+	local record: Record = {
+		live = nil :: any,
+		generation = 0,
+		looked = false,
+	}
+
+	local live: any = setmetatable({
 		player = player,
 		channel = "",
-		character = nil,
-		humanoid = nil,
 		now = 0,
-	}
+	}, {
+		__index = function(self: any, key: any): any
+			if key ~= "character" and key ~= "humanoid" then
+				return nil
+			end
 
-	local record: Record = {
-		live = live,
-		generation = 0,
-	}
+			if not record.looked then
+				record.looked = true
 
+				local character = (player :: any).Character
+
+				rawset(self, "character", character)
+				rawset(
+					self,
+					"humanoid",
+					if character then character:FindFirstChildOfClass("Humanoid") else nil
+				)
+			end
+
+			return rawget(self, key)
+		end,
+
+		--[[
+			The production record refuses a write, not only the Studio guard. Before M4 phase 8
+			every `acquire` overwrote `character` and `humanoid`, so a handler that wrote into
+			`ctx` was corrected on the next packet; the lazy lookup above fires only while the key
+			is absent, so a write sat in the shared record and was handed to every later policy
+			and handler for that player until `forget` — `ctx.character = …` believed by
+			`originNearCharacter`, with no message in production (M4-1). A key that exists is
+			still assignable, and `acquire` resets each of those every packet.
+		]]
+		__newindex = function(_, key: any)
+			error(
+				`a ctx is read-only, so ctx.{tostring(key)} = ... is not a place to keep anything: `
+					.. `the record is reused for this player's next packet and the write would leak `
+					.. `into it. Keep per-request state in your own table, keyed by ctx.player.`,
+				2
+			)
+		end,
+	})
+
+	record.live = live :: Ctx
 	records[player] = record
+
 	return record
 end
 
@@ -165,17 +226,29 @@ function Context.acquire(player: any, channel: string): Ctx
 	local record = recordFor(player)
 	local live = record.live
 
+	--[[ `player` too, though it never changes: it is the one key a handler can overwrite without
+	     `__newindex` noticing, because it exists. Three plain stores per packet. ]]
+	live.player = player
 	live.channel = channel
 	live.now = os.clock()
 
 	--[[
-		Character and humanoid are refreshed here rather than looked up by each policy, because
+		~~Character and humanoid are refreshed here rather than looked up by each policy, because
 		`policy.alive` and `policy.originNearCharacter` would otherwise each pay for the same two
-		property reads on every packet.
+		property reads on every packet.~~
+
+		**That argument is about policies and this function runs per packet.** Sharing one lookup
+		between the policies of one request is right and still happens; paying for it on a request
+		where no policy and no handler will read it is what the M4 report found, and it is most
+		requests. The lookup moved to `recordFor`'s `__index`, and what is left here is dropping the
+		previous acquisition's answer — one branch when nothing looked, which is the common case.
 	]]
-	local character = (player :: any).Character
-	live.character = character
-	live.humanoid = if character then character:FindFirstChildOfClass("Humanoid") else nil
+	if record.looked then
+		record.looked = false
+
+		rawset(live :: any, "character", nil)
+		rawset(live :: any, "humanoid", nil)
+	end
 
 	if GUARDED then
 		return guard(record)

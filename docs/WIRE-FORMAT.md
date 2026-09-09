@@ -3,9 +3,12 @@
 Frozen by PLAN-M1 phase 2. Changing anything here after M1 ships is a breaking change, so the
 reasoning is recorded alongside each decision.
 
-The query correlation in §2 is the one addition since the freeze, and it is a gap being filled
+~~The query correlation in §2 is the one addition since the freeze~~, and it was a gap being filled
 rather than a change: `nw.query` had no implementation until M3 phase 4, so no query packet had
-ever crossed the wire and there was nothing yet to break.
+ever crossed the wire and there was nothing yet to break. Since then: the `RESYNC` control kind
+(§2), the tagged-union layout (§5), and the M4 phase 8 kinds in §5 — quantised numbers, 53-bit
+integers, componented vectors, string constraints. Each is an addition a v1 reader that predates it
+refuses or steps over rather than misreads.
 
 Everything is little-endian, matching Roblox's `buffer` accessors. There are no alignment
 requirements.
@@ -137,6 +140,91 @@ field and sometimes the player; it is written for the game that owns the server.
 would publish the authorization model to the machine that model exists to distrust, one denied
 request at a time. The reason goes to the observer on the server; the client gets the code.
 
+### A replicated change
+
+A `replicate` channel is `S→C`, and its packet says *which* subject it is about — the only class
+that has to, because the client keeps one value per subject and has to know which one arrived.
+Everywhere else the audience decides who gets a value and nothing has to say what the value is.
+
+```
+change := id:varint  length:varint  [ instances:varint ]  subject  flags  [ fields that moved ]
+```
+
+**There is one packet shape, not three.** A client with no baseline is sent a change against
+*nothing*, which writes every field and costs what a whole value would have — the change's flag bits
+fit in the byte the schema's own flags were already using. And the patch's root carries **one bit**
+saying whether the subject is still there: set, and the bits below say what moved; clear, and there
+is no body at all, because the subject has left that client's audience or stopped existing.
+
+So a join, a resync, an audience entry, a change and a removal are five things a game can do and one
+thing on the wire. There is no discriminator byte, because there is nothing to discriminate.
+
+**The subject is inside the frame.** A length that did not cover it could be stepped over into the
+middle of one, and stepping over a refused packet is the guarantee the length prefix is paid for.
+
+**A change is always `counted`**, even where the patch layout is statically sized. The same channel
+emits a removal — flags and nothing behind them — and a change carrying values, so where a refused
+one ends cannot be known from the schema alone.
+
+### Asking for it all again
+
+A change is only meaningful against the value it was computed from, so a change that did not arrive
+makes every change after it unreadable. Nothing recovers from that by itself and nothing notices
+later: the values would simply be wrong.
+
+**So a patch with no baseline under it is refused rather than merged.** A change's flag bits say
+which fields it carries; every other field is "unchanged", which is only readable against a value
+that has it. Merged into nothing, a patch produces a value with fields missing — one the channel's
+own schema refuses, reaching a handler that was promised it could not. A receiver that has no
+baseline for a subject therefore accepts only a change that carries every field the schema requires,
+which is exactly the change written against nothing above. Anything else is a refusal, at `parse`,
+and the recovery is the packet below. Found by fuzzing the client side in M4 phase 6.
+
+The peer that *refused* the packet is the one that knows, so it says so, on the reserved control id:
+
+```
+resync := 0  kind:u8 = 2  length:varint  channel:varint
+```
+
+The server's answer is to forget what it believed that peer had. The next tick then finds no
+baseline and writes a change against nothing, which is everything — there is no separate snapshot
+path to invoke, because there is no separate snapshot.
+
+**There is no sequence number**, which is what a break detector usually needs. Roblox delivers a
+reliable `RemoteEvent` reliably and in order, so a change netweave hands to the engine arrives; ~~the
+only thing that drops one is netweave's own `pendingPerBatch`, and that reports it at the moment it
+happens~~ and since M4 phase 8 nothing netweave-side drops a delivered change either — the client
+applies no `pendingPerBatch` (`src/transport/Inbound.luau`, `refreshCeiling`). The gap a receiver can
+have is its own refusal, which it already knows about the moment it happens. A number on the wire
+would pay every change to rediscover something the receiver was already told — on a three-byte
+change, a varint would have been a third of it.
+
+It is the only packet a client sends that makes the server do work it did not choose.
+
+~~What bounds it is that clearing a baseline already cleared costs a table lookup, and however many
+arrive in a tick provoke one resend in the tick that follows — so the most a peer can extract is a
+whole state per tick, which is what `nw.state` sends unconditionally.~~
+
+**That was the wrong bound, and it was measured in M4 phase 8.** Repeats *within a tick* were never
+the attack: one resync per frame is one per tick by definition, and the tick in between repopulates
+the baselines, so every one lands on a fresh set. A hundred subjects went from a steady state of
+zero bytes a frame to **601 bytes a frame**, bought with five bytes a frame, outside every budget —
+a replicated channel declares no `rate`, so there is nothing for the token bucket to charge, and a
+control packet is read before the budget is consulted at all.
+
+The bound is now a **coalesce over frames**: an ask is honoured at once if the peer has not had one
+in the last `resyncTicks` ticks (thirty by default; a `Config` limit since PLAN-M4-BUG phase 5, when it
+was a constant a game could not tune), and remembered and honoured by the tick if it has — and the
+deferred ask is reported at stage `replicate`, so a peer asking every frame is visible. Nothing is ever
+dropped, which matters more than it sounds — a client asks once, at the moment it gave up on the
+channel, and nothing retries, so a refusal would leave it holding nothing while the server believed
+it held everything. An attacker gets one full resend per window however fast they ask; a client that
+lost a change gets its resend on the next frame.
+
+A peer whose hello disagreed is refused here too. Control packets are read before the budget, so the
+protocol verdict is the only thing between a peer on another build and a full state re-encode; only
+`hello` is exempt, because it is how a disagreement is discovered and cleared.
+
 ## 3. Channel ids
 
 Ids are assigned from the declared string keys, never from table iteration order. ByteNet derives
@@ -151,7 +239,9 @@ qualified := namespace .. "." .. key          -- "combat.fireWeapon"
 All qualified names in the program are sorted with `table.sort`'s default string ordering and
 assigned `1..n`. Both peers compute the same list from the same declarations, in any order.
 
-**Id 0 is reserved** for control traffic — the handshake in §4, and anything v2 needs.
+**Id 0 is reserved** for control traffic — the handshake in §4, the resync above, and anything v2
+needs. `RESYNC` is what that reservation was for: a kind was added in M4 without touching the batch
+version, because the length in front of a control body is what makes an unknown kind steppable.
 
 ### Encoding
 
@@ -195,8 +285,20 @@ including a field widened from `t.u8` to `t.u16`, a channel's class changed, and
 changed with its `args` untouched (`tests/protocol_runtime.luau`).
 
 What goes into the hash is everything both peers need in order to read each other's bytes: the
-qualified name, the class, and the lowered node tree of every schema the channel carries, plus the
-derived framing and size numbers as a cross-check on the lowering itself.
+qualified name, the class, and the lowered node tree of every schema the channel carries — for a
+`replicate` channel that is the **subject as well as the data**, because the subject's bytes come
+first in a change and a peer that reads them narrower is one byte short for every packet on that
+channel — plus the derived framing and size numbers as a cross-check on the lowering itself.
+
+Of a node, exactly these attributes reach the hash (`Protocol.ATTRIBUTES`, and
+`tests/protocol_runtime.luau` changes each one alone and asserts the hash moves): `bits`,
+`fixedSize`, `instances`, `storage`, `min`, `max`, `utf8`, `pattern`, `step`, `whole`, `unit`, `class`,
+`lengthStorage`, `count`, and the names of a struct's fields, an enum's variants and a union's
+branches through the tree walk. `utf8`, `pattern`, `step`, `whole` and `unit` are hash-visible without
+being wire-visible: two peers reading the same bytes and refusing different values are two protocols.
+`descendantOf` is deliberately **not** hashed — it is enforcement one endpoint does over its own tree,
+like a rate limit, and two peers naming their own `workspace` mean the same thing while holding
+different objects.
 
 What stays out is everything only one side enforces — `rate`, `burst`, `maxBytes`, `authorize`,
 `audience`, `unreliable`. A hash that moved when a server tuned a rate limit would force a client
@@ -253,14 +355,65 @@ about `set` pays 19 bytes where netweave pays 6.
 ### Enum tags
 
 A unit enum of `n` variants costs `ceil(log2(n))` bits in the enclosing bitfield: one variant is
-free, two cost one bit, three or four cost two. Tagged enums fork the bit budget per branch and
-take the maximum, rather than summing across branches — Zap sums, so its variants consume
-separate bits even though only one can be present (`RESEARCH §3.9-Y`).
+free, two cost one bit, three or four cost two.
+
+### Tagged unions
+
+~~Tagged enums fork the bit budget per branch and take the maximum, rather than summing across
+branches.~~ **They do, and as of M4 phase 8 there is something that does it.** That sentence
+specified `t.union` two milestones before it existed — the M4 report found it under "documented and
+not implemented" — and what follows is the layout as built rather than as planned.
+
+```
+union := tag(ceil(log2 n) bits) [chosen branch's flags] [chosen branch's bytes]
+```
+
+The tag is `ceil(log2(n))` bits in the **enclosing** bitfield, numbered before any branch, and the
+branches' own flags follow it **from the same slot**: branch A's first flag and branch B's first flag
+are the same bit, because only one branch is ever present. The node reserves the widest branch, so a
+union of two structs carrying five flags each is `1 + 5` bits and not `1 + 10` — one byte instead of
+two. Zap sums, so its variants consume separate bits even though only one can be there
+(`RESEARCH §3.9-Y`).
+
+Bytes do not fork, and cannot: a byte offset is a position in a run rather than a slot in a
+bitfield. So only the chosen branch's bytes are written, and the payload keeps a **static** framing
+only where every branch is the same fixed size — `t.union({ a = t.u16, b = t.i16 })` is two bytes
+whichever arrives; `t.union({ a = t.u8, b = t.u16 })` is counted, with a ceiling of the widest.
+
+Branch names are sorted, so the tag is a **position** — the same rule as struct fields, enum variants
+and channel ids. Adding, removing or renaming a branch renumbers the ones after it and moves the
+protocol hash, which both branch names and each branch's schema reach.
+
+A tag has room the schema does not use whenever `n` is not a power of two: three branches are two
+bits, and a peer can put 3 in them. That is refused on the receive path like any other value a peer
+chose, and it never reaches a branch reader.
 
 ### Numbers
 
 Written at their declared width. A range constraint narrows the width and subtracts the lower
 bound: `u16(1000..1255)` is stored as `u8` holding `value - 1000`.
+
+**Signed integers are offset-binary, not two's complement**, whether or not a range was declared: the
+lower bound of the encoding is subtracted first and the result goes into unsigned storage of the same
+width. `i8` −1 is `7f` and −128 is `00`; `i16` −1 is `ff 7f`; `i32` −1 is `ff ff ff 7f`. Floats are IEEE
+and are not offset (`f32` −1 is `00 00 80 bf`). A second implementation written from an earlier
+version of this section would have emitted two's complement and mis-decoded every negative integer
+(M4-1).
+
+The kinds added in M4 phase 8, each measured in `tests/serdes_runtime.luau`:
+
+  * **`quantized(min, max, step)`** — a count of steps from `min`, in the narrowest unsigned storage
+    that holds the level count: `u8` up to 256 levels, `u16` up to 65,536, `u32` beyond. The value
+    on the wire is `round((v − min) / step)`, so `t.quantized(-1, 1, 2 / 254)` is one byte per axis
+    and the reader hands back `min + count × step`.
+  * **`u53` / `i53`** — narrowed like `u32` when the declared range fits four bytes; otherwise an
+    `f64` whose wholeness is checked on both sides, which is why `whole` is in the hash.
+  * **componented vectors** — `t.vector3(component)` is three component nodes in x, y, z order,
+    each a number node laid out by the rules above, so a `t.vector3(t.i16(-2048, 2048))` is six
+    bytes and a quantised direction is three. `unit` is checked on read with a tolerance derived
+    from the step.
+  * **string constraints** — `utf8` and `pattern` write nothing; they refuse on both sides and
+    reach the hash.
 
 ### Instances
 

@@ -106,10 +106,15 @@ export type Field = {
 	.instances number? -- instances always consumed, or nil when it depends on the data
 	.storage Encoding? -- the narrowed encoding a number is actually written at
 	.offset number? -- subtracted before writing, added back on read
+	.step number? -- the size of one wire level, when the number is quantised
+	.whole boolean? -- whether a number must be an integer, asked on both sides
+	.utf8 boolean? -- `string`: the bytes must decode as UTF-8
+	.pattern string? -- `string`: a Lua pattern the whole value must match
 	.min number? -- a value bound for numbers, a length bound for strings, arrays and maps
 	.max number? -- the same, and what the decoder rejects against
 	.unit boolean?
 	.class string?
+	.descendantOf Instance? -- `instance`: the container an arrival must be inside, checked on receive
 	.lengthStorage Encoding? -- how a variable length is written; nil when the length is fixed
 	.lengthOffset number?
 	.count number? -- exact length, when the schema fixed one
@@ -121,6 +126,7 @@ export type Field = {
 	.key Node?
 	.value Node?
 	.fields { Field }?
+	.branches { Field }? -- `union`: one per branch, in wire order
 	.template { [string]: boolean }? -- cloned on decode so the result table never rehashes
 	.chunkIndex number? -- which bitfield chunk this node's flag lives in
 	.mask number? -- its bit within that chunk
@@ -135,10 +141,15 @@ export type Node = {
 	instances: number?,
 	storage: Encoding?,
 	offset: number?,
+	step: number?,
+	whole: boolean?,
+	utf8: boolean?,
+	pattern: string?,
 	min: number?,
 	max: number?,
 	unit: boolean?,
 	class: string?,
+	descendantOf: Instance?,
 	lengthStorage: Encoding?,
 	lengthOffset: number?,
 	count: number?,
@@ -150,6 +161,7 @@ export type Node = {
 	key: Node?,
 	value: Node?,
 	fields: { Field }?,
+	branches: { Field }?,
 	template: { [string]: boolean }?,
 	chunkIndex: number?,
 	mask: number?,
@@ -295,9 +307,42 @@ end
 local lower: (descriptor: Descriptor) -> Node
 
 local function lowerNumber(descriptor: Descriptor): Node
-	local encoding = descriptor.encoding :: Encoding
 	local min = descriptor.min :: number
 	local max = descriptor.max :: number
+	local step = (descriptor :: any).step
+
+	--[[
+		A quantised number is an integer count of steps, so it lowers to whichever unsigned encoding
+		holds the count — which is the whole point: it is the only range on a fractional value that
+		narrows the storage, because it says how much precision the author actually needs rather than
+		how large the number gets.
+
+		`max` is the reconstructed top rather than the declared one. `t.quantized` already refuses a
+		range that is not a whole number of steps, so the two agree to within a rounding of the
+		division — and `levels * step + min` is what the *reader* will produce at the top level, so
+		comparing it against anything smaller would refuse the schema's own maximum. That is the f32
+		bound incident (`Serdes.numberReader`) in a second encoding, avoided by deriving the bound
+		from the arithmetic that produces the value rather than from the declaration.
+	]]
+	if step then
+		local levels = math.floor((max - min) / step + 0.5)
+		local storage = storageFor(levels)
+
+		return {
+			kind = "number",
+			bits = 0,
+			fixedSize = ENCODING_SIZE[storage],
+			instances = 0,
+			storage = storage,
+			offset = min,
+			step = step,
+			min = min,
+			max = math.max(max, min + levels * step),
+			whole = false,
+		}
+	end
+
+	local encoding = descriptor.encoding :: Encoding
 
 	--[[
 		Floats are validated against the range but never re-encoded. Subtracting a lower bound from
@@ -314,10 +359,43 @@ local function lowerNumber(descriptor: Descriptor): Node
 			offset = 0,
 			min = min,
 			max = max,
+			whole = false,
 		}
 	end
 
-	local storage = storageFor(max - min)
+	--[[
+		**A whole number wider than four bytes.**
+
+		`u53` and `i53` are the only declared encodings with no storage of their own: a range that
+		fits an unsigned 32-bit span narrows exactly like `u32` does, and one that does not is
+		carried in an `f64`, where every integer up to 2^53 is exact. That is what makes a `UserId`
+		or a millisecond timestamp declarable — until M4 phase 8 the widest integer was `u32` and the
+		only thing that reached further was `t.f64`, which is a float and was checked for wholeness
+		by the *writer* alone (M4 report).
+
+		`offset` is zero on the wide path and it has to be. `value - min` for `t.i53` spans 2^54, and
+		an odd integer above 2^53 is not representable as a double — so subtracting the bound would
+		round the very values this exists to carry. It is subtracted only when the span is small
+		enough for a narrower storage, where it is exact by construction.
+	]]
+	local wide = encoding == "u53" or encoding == "i53"
+	local span = max - min
+
+	if wide and span > 4294967295 then
+		return {
+			kind = "number",
+			bits = 0,
+			fixedSize = ENCODING_SIZE.f64,
+			instances = 0,
+			storage = "f64",
+			offset = 0,
+			min = min,
+			max = max,
+			whole = true,
+		}
+	end
+
+	local storage = storageFor(span)
 
 	return {
 		kind = "number",
@@ -328,6 +406,7 @@ local function lowerNumber(descriptor: Descriptor): Node
 		offset = min,
 		min = min,
 		max = max,
+		whole = true,
 	}
 end
 
@@ -390,9 +469,54 @@ local function lowerStruct(descriptor: Descriptor): Node
 	}
 end
 
+--[[
+	**A repeated thing that costs nothing is a count, and it has to be refused where it is written.**
+
+	`PLAN-M3` D-4 bounded a claimed length against the bytes remaining, and the comment under that
+	bound says "an element cannot be conjured from no bytes". That is the assumption this check
+	exists for, because there are elements that can:
+
+	  * `t.enum({ only = true })` — one variant, `bitsToIndex(1)` is zero bits
+	  * `t.string(0, 0)` and `t.buffer(0, 0)` — a length of exactly zero, so no prefix and no bytes
+	  * a `t.struct` whose every field is one of those
+
+	Measured before this check existed, with two bytes on the wire and no bound in sight:
+
+	  | schema | claimed | result |
+	  |---|---|---|
+	  | `t.array(t.u8)` | 65,535 | refused, 0.00 ms — the D-4 bound holds |
+	  | `t.array(t.enum({ x = true }))` | 65,535 | **accepted**, 65,535 entries, 1.7 ms, +1,024 KB |
+	  | `t.array(t.buffer(0, 0))` | 65,535 | **accepted**, 7.3 ms, +2,048 KB |
+	  | `t.array(t.struct({ e = t.enum({ x = true }) }))` | 65,535 | **accepted**, 6.8 ms, +6,144 KB |
+
+	**No receive-side rule can fix it**, and that is the whole argument for refusing the declaration.
+	For an element that costs nothing the honest packet and the flood are the *same bytes*: a length
+	and nothing else. Capping the count by the bytes remaining would cap an honest decode to zero,
+	because an honest one has no payload either. The only thing that separates them is a schema
+	author saying how many there can be, and a schema that repeats a value carrying no information
+	is not saying anything a number would not say better.
+
+	Exact-length arrays are left alone: `t.array(E, 4, 4)` writes no length at all, so there is
+	nothing for a peer to claim.
+]]
+local function carriesNothing(node: Node): boolean
+	return node.bits == 0 and node.fixedSize == 0 and (node.instances or 0) == 0
+end
+
 local function lowerArray(descriptor: Descriptor): Node
 	local elementDescriptor = descriptor.element :: Descriptor
 	local element = lower(elementDescriptor)
+
+	if descriptor.min ~= descriptor.max and carriesNothing(element) then
+		error(
+			`t.array was given an element that costs no bytes, no flags and no instances, so the `
+				.. `array carries only its own length — and a peer claiming 65535 of them builds `
+				.. `65535 entries out of two bytes, which an honest packet cannot be told apart `
+				.. `from. Send the count itself (t.u16), or give the element something to carry: a `
+				.. `single-variant t.enum, t.string(0, 0) and t.buffer(0, 0) are all zero bytes on `
+				.. `the wire.`
+		)
+	end
 
 	local node: Node = {
 		kind = "array",
@@ -443,7 +567,7 @@ local function lowerArray(descriptor: Descriptor): Node
 				A dynamic array cannot fold its elements' flags into the enclosing scope, because the
 				count is not known until runtime. Each element opens a scope of its own, so `boolean[]`
 				costs a byte per element. Zap has the same limitation; carrying flags across elements
-				is possible and deferred (`RESEARCH §3.9-P`).
+				is possible and deferred (`RESEARCH §3.8-P`).
 			]]
 			element.scope = makeScope(element.bits)
 		end
@@ -455,6 +579,17 @@ end
 local function lowerMap(descriptor: Descriptor): Node
 	local key = lower(descriptor.key :: Descriptor)
 	local value = lower(descriptor.value :: Descriptor)
+
+	--[[ The same hazard as a dynamic array, over key and value together. A map is always dynamic, so
+	     there is no exact-length case to exempt. ]]
+	if carriesNothing(key) and carriesNothing(value) then
+		error(
+			`t.map was given a key and a value that together cost no bytes, no flags and no `
+				.. `instances, so the map carries only its own length — and a peer claiming 65535 `
+				.. `entries builds them out of two bytes. A key that costs nothing can only ever `
+				.. `name one entry anyway; give the key something to distinguish entries by.`
+		)
+	end
 
 	if key.bits > 0 then
 		key.scope = makeScope(key.bits)
@@ -490,11 +625,42 @@ function lower(descriptor: Descriptor): Node
 		local node: Node = { kind = kind, bits = 0, instances = 0 }
 		lowerLength(node, descriptor.min :: number, descriptor.max :: number)
 		node.fixedSize = node.count
+
+		--[[ Carried through rather than derived: what a string is *allowed to say* is not a property
+		     of its length, and the codec is where it has to be asked. `buffer` never has them —
+		     `t.buffer` is opaque bytes by definition — but the two share this branch and copying nil
+		     costs nothing. ]]
+		node.utf8 = (descriptor :: any).utf8
+		node.pattern = (descriptor :: any).pattern
+
 		return node
-	elseif kind == "vector2" then
-		return { kind = kind, bits = 0, fixedSize = 8, instances = 0 }
-	elseif kind == "vector3" then
-		return { kind = kind, bits = 0, fixedSize = 12, instances = 0, unit = descriptor.unit }
+	elseif kind == "vector2" or kind == "vector3" then
+		--[[
+			A vector is its component schema, `axes` times over. Bare that is `f32` and the old fixed
+			widths; named, everything a number node knows applies per component — a narrowed range
+			takes a smaller storage, a declared minimum is subtracted, a quantisation step divides.
+
+			The component is lowered as a node and carried on `element`, which is what `cloneNode`
+			copies, `Protocol.describe` walks and `Serdes` builds a writer from. Nothing about a
+			vector needs its own machinery once the component is a node.
+		]]
+		local axes = if kind == "vector2" then 2 else 3
+		local component = descriptor.element
+
+		if component then
+			local element = lower(component)
+
+			return {
+				kind = kind,
+				bits = 0,
+				fixedSize = (element.fixedSize :: number) * axes,
+				instances = 0,
+				unit = descriptor.unit,
+				element = element,
+			}
+		end
+
+		return { kind = kind, bits = 0, fixedSize = 4 * axes, instances = 0, unit = descriptor.unit }
 	elseif kind == "color3" then
 		return { kind = kind, bits = 0, fixedSize = 3, instances = 0 }
 	elseif kind == "cframe" then
@@ -505,7 +671,14 @@ function lower(descriptor: Descriptor): Node
 		]]
 		return { kind = kind, bits = 0, fixedSize = 24, instances = 0 }
 	elseif kind == "instance" then
-		return { kind = kind, bits = 0, fixedSize = 0, instances = 1, class = descriptor.class }
+		return {
+			kind = kind,
+			bits = 0,
+			fixedSize = 0,
+			instances = 1,
+			class = descriptor.class,
+			descendantOf = descriptor.descendantOf,
+		}
 	elseif kind == "enum" then
 		local variants = descriptor.variants :: { string }
 		local lookup: { [string]: number } = {}
@@ -521,6 +694,67 @@ function lower(descriptor: Descriptor): Node
 			instances = 0,
 			variants = variants,
 			lookup = lookup,
+		}
+	elseif kind == "union" then
+		--[[
+			A tag, and then whichever branch it names.
+
+			**The branches fork the bit budget rather than summing it.** Only one branch is ever
+			present, so its flags may occupy the same bits another branch's would — `assignBits`
+			numbers every branch from the same base and the node reserves the widest. A union of two
+			structs each carrying three flags is `1 + 3` bits, not `1 + 6`. Zap sums, so its variants
+			consume separate bits even though only one can be there (`RESEARCH §3.9-Y`,
+			`WIRE-FORMAT.md` §5).
+
+			Bytes cannot fork the same way, because a byte offset is a position in a run rather than
+			a slot in a bitfield. So `fixedSize` survives only when every branch agrees on it — which
+			is a real case (`t.union({ a = t.u16, b = t.i16 })` is two bytes whichever arrives) and
+			not the common one.
+		]]
+		local variants = descriptor.variants :: { string }
+		local source = descriptor.branches :: { [string]: Descriptor }
+
+		local lookup: { [string]: number } = {}
+		local branches: { Field } = sized(#variants)
+
+		local widest = 0
+		local fixedSize: number? = nil
+		local instances: number? = nil
+		local sameSize = true
+		local sameInstances = true
+
+		for index, name in variants do
+			local branch = lower(source[name])
+
+			lookup[name] = index
+			branches[index] = { name = name, node = branch }
+
+			if branch.bits > widest then
+				widest = branch.bits
+			end
+
+			if index == 1 then
+				fixedSize = branch.fixedSize
+				instances = branch.instances
+			else
+				if fixedSize ~= branch.fixedSize then
+					sameSize = false
+				end
+
+				if instances ~= branch.instances then
+					sameInstances = false
+				end
+			end
+		end
+
+		return {
+			kind = kind,
+			bits = bitsToIndex(#variants) + widest,
+			fixedSize = if sameSize then fixedSize else nil,
+			instances = if sameInstances then instances else nil,
+			variants = variants,
+			lookup = lookup,
+			branches = branches,
 		}
 	elseif kind == "optional" then
 		local inner = lower(descriptor.inner :: Descriptor)
@@ -586,6 +820,44 @@ local function assignBits(node: Node, scope: Scope, next: number): number
 		node.tagChunks = chunks
 		node.tagMasks = masks
 		return next
+	elseif kind == "union" then
+		local variants = node.variants :: { string }
+		local tagBits = bitsToIndex(#variants)
+
+		local chunks: { number } = sized(tagBits)
+		local masks: { number } = sized(tagBits)
+
+		for index = 1, tagBits do
+			chunks[index], masks[index] = locate(scope, next)
+			next += 1
+		end
+
+		node.tagChunks = chunks
+		node.tagMasks = masks
+
+		--[[
+			**Every branch numbered from the same slot**, which is the fork `lowerNumber`'s sibling
+			above reserved room for. Only one branch is ever present, so branch A's first flag and
+			branch B's first flag are the same bit — and the node returns the widest of them so the
+			enclosing scope carries on after the longest branch rather than after the last one.
+
+			A branch with no flags is skipped for the same reason a field with none is: `assignBits`
+			has nothing to number and would return `base` anyway.
+		]]
+		local base = next
+		local widest = base
+
+		for _, branch in node.branches :: { Field } do
+			if branch.node.bits > 0 then
+				local after = assignBits(branch.node, scope, base)
+
+				if after > widest then
+					widest = after
+				end
+			end
+		end
+
+		return widest
 	elseif kind == "optional" then
 		node.chunkIndex, node.mask = locate(scope, next)
 		next += 1
@@ -657,6 +929,12 @@ local function assignNestedScopes(node: Node)
 	elseif kind == "struct" then
 		for _, field in node.fields :: { Field } do
 			assignNestedScopes(field.node)
+		end
+	elseif kind == "union" then
+		--[[ A branch does not open a scope of its own — its flags fork into the enclosing one — but
+		     a branch may *contain* a dynamic array or a map, and those do. ]]
+		for _, branch in node.branches :: { Field } do
+			assignNestedScopes(branch.node)
 		end
 	elseif kind == "optional" then
 		assignNestedScopes(node.inner :: Node)
@@ -738,6 +1016,20 @@ local function ceiling(node: Node): number
 		end
 
 		body = total
+	elseif kind == "union" then
+		--[[ The widest branch, not their sum. One arrives; the ceiling is the largest one that can.
+		     The tag itself is bits in the enclosing scope and is counted there. ]]
+		local widest = 0
+
+		for _, branch in node.branches :: { Field } do
+			local size = ceiling(branch.node)
+
+			if size > widest then
+				widest = size
+			end
+		end
+
+		body = widest
 	elseif kind == "optional" then
 		--[[ Presence is a bit in the enclosing scope; the inner value costs its own ceiling only
 		     when it is there, and the ceiling is the worst case. ]]
@@ -807,6 +1099,205 @@ function Ir.lower(descriptor: Descriptor): Layout
 			A statically sized packet carries no length prefix: the reader already knows where it
 			ends, so the framing guarantee is free for it (`docs/WIRE-FORMAT.md` §2).
 		]]
+		framing = if fixedSize then "static" else "counted",
+	}
+end
+
+--[[
+	A node tree is assigned into a scope by `assignBits`, which writes `chunkIndex` and `mask` onto
+	the nodes themselves. A derived layout therefore cannot share nodes with the one it derives
+	from — assigning the patch would renumber the state's flags underneath it. Everything below the
+	kind is copied; the assignment fields are deliberately not, because `Ir.patch` reassigns them.
+]]
+local function cloneNode(node: Node): Node
+	--[[
+		Everything the node **is**, and nothing the layout **assigned** to it.
+
+		This was a field-by-field copy, which is `CLAUDE.md` §9's hand-kept list in the one place
+		nothing tests it: a property missing here does not fail to compile and does not fail a round
+		trip — it produces a *patch* layout that reads a different value than the state layout wrote.
+		M4 phase 8 added four properties to `Node` and this copied none of them, so a `t.quantized`
+		field inside `nw.replicate` lost its step on the patch side and came back as a raw count.
+
+		`table.clone` inverts the list to the short one that does not grow: the four bit *positions*,
+		which are assignments `assignBits` makes over each tree separately and which would be stale
+		here. `template` and `scope` come across shared on purpose — both are read-only structure, and
+		dropping the scope left an array element with flags and nowhere to put them.
+	]]
+	local copy: Node = table.clone(node)
+
+	copy.chunkIndex = nil
+	copy.mask = nil
+	copy.tagChunks = nil
+	copy.tagMasks = nil
+
+	if node.inner then
+		copy.inner = cloneNode(node.inner :: Node)
+	end
+
+	if node.element then
+		copy.element = cloneNode(node.element :: Node)
+	end
+
+	if node.elements then
+		local elements: { Node } = {}
+
+		for index, one in node.elements :: { Node } do
+			elements[index] = cloneNode(one)
+		end
+
+		copy.elements = elements
+	end
+
+	if node.key then
+		copy.key = cloneNode(node.key :: Node)
+	end
+
+	if node.value then
+		copy.value = cloneNode(node.value :: Node)
+	end
+
+	if node.fields then
+		local fields: { Field } = {}
+
+		for index, field in node.fields :: { Field } do
+			fields[index] = { name = field.name, node = cloneNode(field.node) }
+		end
+
+		copy.fields = fields
+	end
+
+	if node.branches then
+		local branches: { Field } = {}
+
+		for index, branch in node.branches :: { Field } do
+			branches[index] = { name = branch.name, node = cloneNode(branch.node) }
+		end
+
+		copy.branches = branches
+	end
+
+	return copy
+end
+
+--[[ One presence bit in front of a node, which is exactly what `lower` produces for `t.optional`.
+     Built here rather than through the type layer because `t.optional` refuses to wrap an optional
+     — correctly, since `T??` is `T?` to a reader — and a patch needs both bits to mean different
+     things. See `Ir.patch`. ]]
+local function optionalOf(inner: Node): Node
+	return {
+		kind = "optional" :: Types.Kind,
+		bits = 1 + inner.bits,
+		fixedSize = if inner.fixedSize == 0 then 0 else nil,
+		instances = if inner.instances == 0 then 0 else nil,
+		inner = inner,
+	}
+end
+
+local function patchNode(node: Node, root: boolean): Node
+	if node.kind ~= "struct" then
+		return optionalOf(cloneNode(node))
+	end
+
+	local source = node.fields :: { Field }
+	local fields: { Field } = sized(#source)
+
+	local bits = 0
+	local fixedSize: number? = 0
+	local instances: number? = 0
+
+	for index, field in source do
+		local child = patchNode(field.node, false)
+
+		fields[index] = { name = field.name, node = child }
+		bits += child.bits
+		fixedSize = addSize(fixedSize, child.fixedSize)
+		instances = addSize(instances, child.instances)
+	end
+
+	local patched: Node = {
+		kind = "struct" :: Types.Kind,
+		bits = bits,
+		fixedSize = fixedSize,
+		instances = instances,
+		fields = fields,
+		template = node.template,
+	}
+
+	--[[ A nested struct gets a bit, so "this sub-struct is untouched" costs a bit rather than a
+	     walk — and when it is touched, the bits inside say which of its fields moved. The root's
+	     own bit is added by `Ir.patch`, because it means something different from all of these. ]]
+	return if root then patched else optionalOf(patched)
+end
+
+--[=[
+	@within Ir
+	@function patch
+	@param layout Layout -- a state layout, from [Ir.lower]
+	@return Layout -- the layout of a *change* to a payload on it
+
+	The layout of a patch: which fields moved, and their new values.
+
+	**Every field gains one bit and nothing else.** A twelve-field struct where one field changed is
+	twelve bits and that field's value — field identity is a *position* in the bitfield rather than
+	a serialised key, which is the whole reason delta compression belongs inside a schema-driven
+	codec rather than beside one. `delta-compress` writes a type tag per value because it has no
+	schema and cannot do otherwise (`RESEARCH §1`, M4 phase 1).
+
+	The derivation is one rule applied recursively: **wrap it in an optional**. That is not a trick,
+	it is what the two states of a patched field already are —
+
+	  * a non-optional field becomes `optional(T)`: absent is *unchanged*, present is the new value;
+	  * a field that was already `optional(T)` becomes `optional(optional(T))`, and the two bits are
+	    different questions — the outer is *did it change*, the inner is *is it there now*. Removal
+	    needs no sentinel value, which is what Charm Sync spends a `__none` table on because it
+	    rides Roblox's default serialisation where `nil` and absent are the same thing.
+
+	Structs recurse; everything else is replaced whole. An array or map patch is the new array or
+	map, because a per-element diff needs its own operation vocabulary — `delta-compress` has five
+	such tags — and that is a schema the state schema does not describe. Recorded as a limit rather
+	than hidden: a state whose changes are mostly inside a large array gets no win from this, and
+	`PLAN-M4` acceptance 8 measures the crossover instead of assuming one.
+
+	:::caution
+	The result shares no node with `layout`. `assignBits` writes onto nodes, so a shared tree would
+	renumber the state's own flags when the patch was assigned.
+	:::
+]=]
+function Ir.patch(layout: Layout): Layout
+	--[[
+		The root's bit is **is this subject still there**, and it is the reason a patch needs no
+		second packet shape beside it.
+
+		A replicated subject has three states for a given client: unchanged, changed, and gone.
+		Unchanged is no packet at all. The other two are one packet whose root bit separates them —
+		set, and the bits below say what moved; clear, and there is nothing below because the
+		subject has left that client's audience or stopped existing (`PLAN-M4` D-4, "one leaving
+		needs to be told to forget").
+
+		It is usually free. A patch's flags are a bitfield rounded up to whole bytes, so a
+		twelve-field struct goes from twelve bits to thirteen and stays at two; it costs a byte only
+		on a schema whose bit count was already an exact multiple of eight.
+	]]
+	local root = optionalOf(patchNode(layout.root, true))
+
+	local scope: Scope? = nil
+	if root.bits > 0 then
+		scope = makeScope(root.bits)
+		assignBits(root, scope :: Scope, 0)
+	end
+
+	assignNestedScopes(root)
+
+	local flagBytes = if scope then scope.bytes else 0
+	local fixedSize = addSize(flagBytes, root.fixedSize)
+
+	return {
+		root = root,
+		scope = scope,
+		fixedSize = fixedSize,
+		maxSize = flagBytes + ceiling(root),
+		instances = root.instances,
 		framing = if fixedSize then "static" else "counted",
 	}
 end

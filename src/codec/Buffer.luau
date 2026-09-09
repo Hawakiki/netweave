@@ -96,7 +96,8 @@ export type Save = {
 	buffer — silently, until a growth happens to land mid-packet.
 	:::
 
-	Growth doubles. Blink grows by 1.5x and Zap by 2x; doubling costs at most one wasted copy per
+	Growth doubles. Blink grows by 1.5x (`_refsrc/blink/src/Templates/Base.luau:81`) and Zap by 2x
+	(`_refsrc/zap/zap/src/output/luau/base.luau:45`); doubling costs at most one wasted copy per
 	frame and keeps the amortised cost flat under the saturation loads the benchmark applies.
 ]=]
 local function allocate(length: number): number
@@ -140,8 +141,10 @@ Codec.allocate = allocate
 	This is `PLAN-M1` D-2's first layout pass, and it was missing until M2. `Ir.lower` has always
 	computed `fixedSize`; nothing read it, so a 100-entity `ArrayHeavy` packet made **600 separate
 	allocations** — six hundred bounds checks, growth checks and cursor stores for six hundred
-	bytes, and 120,000 of them a frame at the benchmark's load. Blink and Zap emit one allocation
-	for a block and then write at `offset + k` (`RESEARCH §3.7-D`, §3.8-T).
+	bytes, and 120,000 of them a frame at the benchmark's load. Blink emits one allocation for a
+	block and then writes at `offset + k` (`RESEARCH §3.7-D`); Zap does not — its `push_writeu8`
+	calls `alloc(1)` per primitive (`§3.8-O`, `§3.9-V1`), which an earlier version of this comment
+	had the wrong way round and cited a section about named-type inlining for.
 
 	Inside a block the buffer cannot grow, because the space is already claimed. That is what makes
 	the `put*` writers below safe without a bounds check.
@@ -486,6 +489,48 @@ function Codec.putBuffer(value: buffer, length: number)
 	local offset = blockCursor
 	blockCursor = offset + length
 	buffer.copy(outgoing, offset, value, 0, length)
+end
+
+--[=[
+	@within CodecBuffer
+	@function claim
+	@param length number
+	@return buffer -- where to write
+	@return number -- the offset to write the first byte at
+
+	Takes `length` bytes and hands back the buffer and where they start, so a caller that knows its
+	own layout can write all of them itself.
+
+	```lua
+	local out, at = Buffer.claim(6)
+	buffer.writeu8(out, at, entity.id)
+	buffer.writeu8(out, at + 1, entity.x)
+	```
+
+	:::caution
+	The buffer is only valid until the next call that can grow it, which is any `write*` or another
+	`claim` outside a block. Write the bytes and drop the reference; never keep it across a field.
+	:::
+
+	:::note
+	This is the one primitive that pays a call **per struct** rather than per value, and that is the
+	whole of its reason to exist: `PLAN-M4` phase 7 measured a 100-entity payload spending half its
+	encode time in closure calls, and a struct of six numbers costs seven of them before a byte is
+	written. `Serdes` uses it for a struct whose fields are all fixed-size numbers.
+	:::
+]=]
+function Codec.claim(length: number): (buffer, number)
+	if blockDepth > 0 then
+		local offset = blockCursor
+		blockCursor = offset + length
+		return outgoing, offset
+	end
+
+	--[[ `allocate` first and *then* read `outgoing`: growth replaces the buffer, so a reference
+	     taken before the call would be the old one and the bytes would be written into a buffer
+	     nothing is going to send. ]]
+	local offset = allocate(length)
+	return outgoing, offset
 end
 
 --[=[
@@ -857,22 +902,48 @@ end
 
 --[=[
 	@within CodecBuffer
-	@function ensure
+	@function span
 	@param length number
-	@return boolean
+	@return buffer? -- the incoming buffer, or nil when the run does not fit
+	@return number -- where the run starts
 
-	True if `length` more bytes are readable. Records a rejection and returns false otherwise.
+	[CodecBuffer.claim]'s mirror on the read side: the bytes and where they begin, one call for a run
+	whose size the layout already knows, in place of a bounds check per value.
 
-	Call this once for a statically sized run rather than once per field — knowing a subtree's
-	exact size up front is the whole point of the layout pass.
-]=]
-function Codec.ensure(length: number): boolean
-	if incomingCursor + length > incomingLimit then
-		Codec.reject("truncated")
-		return false
+	```lua
+	local src, at = Buffer.span(size)
+
+	if src == nil then
+		return fallback
 	end
 
-	return true
+	value.hp = buffer.readu8(src, at)
+	```
+
+	:::caution
+	Every read after this must stay inside `length`. The bound was checked once, here, which is the
+	whole point — so an offset computed from anything but the layout is a read this function has
+	already promised was safe.
+	:::
+
+	:::note
+	~~`ensure(length)` answered the same question as a boolean.~~ It did, and **nothing ever called
+	it**: it was written in M2 for exactly this optimisation, the optimisation landed on the encode
+	side only, and it sat unused until M4 phase 8 (`docs/SECURITY-REPORT-M4.md`). Returning the
+	buffer and the offset is what a caller actually needs, because reading with a named
+	`buffer.readu8` is the whole point and that needs both.
+	:::
+]=]
+function Codec.span(length: number): (buffer?, number)
+	local offset = incomingCursor
+
+	if offset + length > incomingLimit then
+		Codec.reject("truncated")
+		return nil, 0
+	end
+
+	incomingCursor = offset + length
+	return incoming, offset
 end
 
 --[=[
@@ -1043,14 +1114,18 @@ end
 	@function readVarint
 	@return number
 
-	Rejects rather than looping forever on a run of continuation bytes: five is all a 32-bit value
-	can need, and a sixth means the stream is not what it claims to be.
+	Five bytes is all a 32-bit value can need, and the fifth carries four bits. A fifth byte with
+	anything else set — the high bits, or the continuation bit that would ask for a sixth — is
+	rejected rather than wrapped: `bit32.lshift` by 28 drops the high bits silently, so
+	`ff ff ff ff 1f` used to read as 2^32 − 1 and a length or an id past the format's range came
+	out as one inside it (M4 report, finding 8). A run of continuation bytes is the same case and
+	does not loop.
 ]=]
 function Codec.readVarint(): number
 	local result = 0
 	local shift = 0
 
-	for _ = 1, VARINT_MAX_BYTES do
+	for _ = 1, VARINT_MAX_BYTES - 1 do
 		local byte = Codec.readU8()
 		result = bit32.bor(result, bit32.lshift(bit32.band(byte, 0x7F), shift))
 
@@ -1061,8 +1136,14 @@ function Codec.readVarint(): number
 		shift += 7
 	end
 
-	Codec.reject("varint too long")
-	return 0
+	local last = Codec.readU8()
+
+	if last > 0x0F then
+		Codec.reject("varint past 32 bits")
+		return 0
+	end
+
+	return bit32.bor(result, bit32.lshift(last, shift))
 end
 
 --[=[

@@ -310,6 +310,37 @@ end
 	numbering cannot be fixed until the last declaration has run. The first packet in either
 	direction is the latest that can be.
 ]=]
+--[=[
+	@within Namespace
+	@function replicated
+	@return { Channel }
+	@private
+
+	Every declared `replicate` channel, in id order, sealing the protocol if that has not happened
+	yet.
+
+	The replication tick needs the list once a frame and nothing else needs it at all, so it is
+	built on demand rather than kept — and it is short, because a game declares a handful of
+	replicated channels and thousands of subjects on them.
+]=]
+function Namespace.replicated(): { any }
+	if not protocol then
+		Namespace.seal()
+	end
+
+	local out = {}
+
+	for id = 1, #byId do
+		local channel = byId[id]
+
+		if channel and channel.class == "replicate" then
+			table.insert(out, channel)
+		end
+	end
+
+	return out
+end
+
 function Namespace.channelById(id: number): any?
 	if not protocol then
 		Namespace.seal()
@@ -354,6 +385,20 @@ end
 ]=]
 function Namespace.get(name: string): Namespace?
 	return namespaces[name]
+end
+
+--[=[
+	@within Namespace
+	@function sealed
+	@return boolean
+	@private
+
+	Whether the numbering is fixed. The transport asks this rather than keeping its own flag,
+	because [Namespace.reset] would otherwise leave the driver believing a protocol that no longer
+	exists is still agreed.
+]=]
+function Namespace.sealed(): boolean
+	return sealed
 end
 
 --[=[

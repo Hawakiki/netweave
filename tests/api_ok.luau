@@ -245,4 +245,120 @@ end
 local configured: { screen: number } = { screen = 3 }
 
 authoritative((configured :: any) :: nw.Trusted<{ screen: number }>)
+
+--[[
+	A replicated channel, declared and listened to.
+
+	`tests/api_reject.luau` cases 20-23 are the four ways to get this wrong, and `CLAUDE.md` §9 says
+	a feature whose only test is a rejection file has no test — `nw.configure` shipped typed so that
+	Luau refused every call and the rejection count counted the bug. So this is the half that has to
+	work: the declaration analyses, the client's handler receives the payload with its fields
+	readable, and the store is an ordinary table.
+]]
+local held: { [number]: { hp: number, gold: number } } = { [1] = { hp = 10, gold = 5 } }
+
+local vault = nw.namespace("vault", {
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ hp = t.u8, gold = t.u16 }),
+		audience = nw.audience.owner,
+		store = nw.store.of(held),
+	}),
+})
+
+vault.client.inventory:listen(function(subject, value)
+	--[[ The subject, then the whole value — not a patch. A client that had to know which of the two
+	     it was sent is a client the library has failed (`DESIGN-API.md` §3), and one that could not
+	     tell its subjects apart could not keep a mirror at all.
+
+	     Both are typed from the declaration: `subject` is `t.u16`'s payload and `value` is `data`'s.
+	     Before `ReplicateSubject` existed this signature took one argument at analysis and was
+	     handed two at runtime, so `value` here was the id. ]]
+	local _total: number = subject + value.hp + value.gold
+end)
+
+--[[
+	The exported types a game writes down, written down.
+
+	`tools/exports.luau` requires every `export type` on the public surface to appear in a file that
+	must compile, and these three had no such file — not because they are broken but because nothing
+	had ever annotated them. That is the same gap `nw.configure` shipped through in M3 phase 0, and
+	the reason the rule is "write the `_ok` half" rather than "write a test".
+
+	The ones still missing are listed in `tools/exports.luau` with the reason, and three of them are
+	findings rather than gaps: `nw.Views`, `nw.Settings` and `t.PayloadOf` cannot be annotated
+	correctly today.
+]]
+--[[
+	**How a namespace is written down, and the one spelling that must not be used.**
+
+	`nw.Views<D>` names what `nw.namespace` returns. Three of the four ways to write it keep every
+	guarantee; the fourth — an annotated local with a value assigned into it — makes the file stop
+	reporting anything about that namespace, retroactively. It is pinned as a canary at the end of
+	`tests/api_reject.luau`, and the caution is on `View.Views` where a game reads it.
+
+	What this section is for is the other three: they are what the documentation tells a game to
+	write, so they are what has to keep compiling.
+]]
+local shots = nw.namespace("shots", {
+	fired = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow }),
+})
+
+--[[ A parameter, which is the shape a game reaches for first: a module that takes the namespace
+     rather than requiring it. ]]
+local function attach(namespace: nw.Views<typeof(shots.channels)>)
+	namespace.server.fired:listen(function(_ctx, payload)
+		local _read: number = payload.x
+	end)
+end
+
+attach(shots)
+
+--[[ A cast, and `typeof` — the two spellings for a local. Both keep the views typed; the cast is
+     the one to reach for when the type has to be named. ]]
+local byCast = shots :: nw.Views<typeof(shots.channels)>
+local byTypeof: typeof(shots) = shots
+
+byCast.client.fired:send({ x = 1 })
+byTypeof.client.fired:send({ x = 2 })
+
+--[[
+	**An optional payload keeps its brand**, which is the pair of type functions that lost it.
+
+	`T?` is a union, and both `Trust.branded` and `View.brandedAs` tested `value:is("table")` alone —
+	false for a union — so a `signal` whose data is `t.optional(struct)` handed its handler a plain
+	table and `nw.Trusted<Req?>` reduced to `Req?`. The two coincided: untrusted client data reached
+	a parameter annotated for trusted data with no cast anywhere to grep for (M4 report).
+
+	The two branding sites are copies — a type function's body cannot reach another module's value —
+	so this is what holds them together. If either drifts, this assignment stops compiling.
+]]
+local optionals = nw.namespace("optionals", {
+	menu = nw.signal({ data = t.optional(t.struct({ screen = t.u8 })), rate = 10 }),
+})
+
+optionals.server.menu:listen(function(_ctx, payload)
+	local _asDeclared: nw.Untrusted<{ screen: number }?> = payload
+
+	--[[ And the brand survives the narrowing an optional forces a game to write. ]]
+	if payload then
+		local _narrowed: nw.Untrusted<{ screen: number }> = payload
+		local _screen: number = payload.screen
+	end
+end)
+
+local _verdict: nw.Verdict = nw.allow()
+local _denied: nw.Verdict = nw.deny("out of range")
+
+local diagnostics: nw.Diagnostics = nw.diagnostics()
+local _refusals: number = diagnostics.total
+
+--[[ A tally is reached through the diagnostics rather than built, so this is the annotation a game
+     writes when it walks them — one channel, one stage, one count. ]]
+for _, byStage in diagnostics.channels do
+	for _, tally: nw.Tally in byStage do
+		local _count: number = tally.count
+	end
+end
+
 return nil

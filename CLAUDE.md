@@ -18,7 +18,8 @@ library can be published and read by the Roblox community without translation.
 
 | Artifact | Language |
 |---|---|
-| `CLAUDE.md`, `README.md` | **English** |
+| `CLAUDE.md`, `README.md`, `docs/tutorial/` | **English** |
+| `README.ko.md` | **Korean** — the one translation, kept in step with `README.md` by hand; its two code blocks are checked like the English ones |
 | `docs/milestone/PLAN-M*.md` | **English** |
 | All Luau source, comments, identifiers, error messages | **English** |
 | All TypeScript definitions and JSDoc | **English** |
@@ -34,6 +35,9 @@ Do not mix languages inside one file. A Korean comment in a `.luau` file is a de
 
 ```
 CLAUDE.md                     this file
+README.md                     the front page: what it guarantees, the worked example, what it costs;
+                              its two code blocks are checked against tests/example_runtime.luau
+README.ko.md                  the same page in Korean, checked the same way
 default.project.json          the library as a package: rojo build -o netweave.rbxm
 test.project.json             a Studio place for tests that need Roblox datatypes
 analyze.luau                  type checking, which is part of the test suite
@@ -41,6 +45,8 @@ src/                          netweave itself
   netweave.luau               the public surface: `nw`
   types/                      the type vocabulary
   codec/                      Buffer (bytes), Ir (lowering + layout), Serdes (closures)
+  replication/                Delta (what changed), Baseline (what each client has), Store (the
+                              seam), Tick (the loop that uses all three)
   api/                        channel classes, policies, trust, context, views, namespaces
   transport/                  the wire: batching, budgets, audience evaluation, dispatch
 tests/                        *_ok / *_reject / *_runtime, plus run.server.luau
@@ -51,15 +57,21 @@ docs/
   RESEARCH-AND-PLAN.md        research log + roadmap (Korean, append-only in spirit)
   DESIGN-API.md               the agreed API shape and the guarantees behind it
   WIRE-FORMAT.md              frozen wire format, v1
+  tutorial/                   step1-….md to step7-….md, from an empty place to a replicated store;
+                              every snippet's declarations and calls are in tests/tutorial_ok.luau,
+                              which analyze has to accept — the prose is hand-kept against DESIGN-API
   milestone/
     PLAN-M0.md                one file per milestone, English
-    PLAN-M1.md
-    PLAN-M2.md
+    PLAN-M1.md … PLAN-M4.md
+    PLAN-M4-BUG.md            a sub-milestone that gates M4's close
+    PLAN-M5.md
+  SECURITY-REPORT*.md         external audits, one per milestone; the tracker for each is PLAN-M4 §9
 bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
   report.luau                 a run document to the tables in RESULTS.md
-tools/                        globalTypes.d.luau for the analyzer
+tools/                        globalTypes.d.luau for the analyzer, and the checkers that read source off disk
+scripts/                      check.ps1 — every lune-side check in one command; hooks/ — the pre-commit that runs it
 _refsrc/                      READ-ONLY vendored competitor sources — never edit
   _generated/                 codegen output used as evidence in the research log
 ```
@@ -87,8 +99,13 @@ Two consequences:
 
 ### `_refsrc/` is read-only
 Cloned competitor repositories, kept until the user says to delete them. Never edit,
-never `git add`, never import from `src/`. Read them, cite them, leave them alone.
-`_refsrc/README.md` records the exact commit each was cloned at.
+never import from `src/`. Read them, cite them, leave them alone.
+
+~~Never `git add`.~~ **`_refsrc/README.md` is tracked, and only that file.** It records the exact
+commit each repository was cloned at, which is what every claim in the research log is a claim
+*about* — the clones are disposable and it is not. Ignored along with them, it lived on one machine.
+The `.gitignore` entry is `_refsrc/*` with a negation, because git does not descend into an excluded
+directory and a negation inside one never matches. Everything else under `_refsrc/` stays out.
 
 ---
 
@@ -115,6 +132,10 @@ Rules:
   or the shipped API — never delete the original plan to make it look right in hindsight.
 - If reality contradicts the plan, **write the correction into the plan** with a strikethrough
   on the old claim. Same discipline as `docs/RESEARCH-AND-PLAN.md`.
+- A plan may be written before its milestone opens, to hold what the current one defers. It says
+  `**Status: not opened.**` under its title, and `tools/messages` does not count it as the newest plan
+  until that line is removed — which is the act of opening the milestone, and moves `nw.milestone`
+  with it.
 
 ---
 
@@ -193,18 +214,39 @@ Run benchmarks through the **Roblox Studio MCP** (`start_stop_play`, `run_as_job
 
 ## 6. Tooling
 
-Managed by `rokit` (`rokit.toml`). Rokit shims resolve only inside a directory with a manifest —
-if a tool "is not found", check the manifest before assuming it is not installed.
+Managed by `rokit` (`rokit.toml`). ~~Rokit shims resolve only inside a directory with a manifest.~~ A
+shim searches the working directory, every ancestor, then the home manifests, then `PATH` — measured:
+`luau-lsp --version` answers from a directory with no manifest (M4-1). If a tool "is not found",
+check the manifest before assuming it is not installed.
 
 - `rojo` — build/serve places
 - `lune` — scripts, codegen, report generation, test runners
 - `stylua` — formatting; `stylua.toml` sets `syntax = "Luau"`, without which nested generics fail
   to parse. `.styluaignore` excludes vendored sources.
 - `selene` — linting; `netweave.toml` declares the `types` global that exists only inside a
-  `type function` body, because selene has no scoped lint filters
+  `type function` body. ~~because selene has no scoped lint filters~~ Selene does have
+  `-- selene: allow(undefined_variable)` for the block it precedes (M4-1, measured); moving the
+  hand-kept global list to block allows is `PLAN-M5`. `roblox.yml` beside it is selene's generated
+  Roblox standard library and is load-bearing: renaming it takes `selene src tests` from 0 to 212
+  errors.
 - `luau-lsp` — **type checking, which is part of the test suite**, not a convenience
 
 ### Checks
+
+`pwsh scripts/check.ps1` runs everything below and exits with the number of failed steps; `-Only fuzz`
+filters by name, `-Show` prints every step's output. The runtime list is read from `tests/`, not kept
+in the script. Written for PowerShell because `bash` from pwsh on this machine is WSL's and cannot see
+the rokit shims. The one thing it cannot run is the Studio half, and it says so on its last line.
+
+The same script is the pre-commit hook. Hooks are not tracked, so enable it once per clone:
+
+```sh
+git config core.hooksPath scripts/hooks
+```
+
+A commit with a red step is refused with the step's output; `--no-verify` is for a commit that is
+meant to record a red tree, and the message should say so. Not husky: that needs Node and a
+`package.json`, and this repository's toolchain is rokit.
 
 ```sh
 lune run analyze              # type checking, both halves (see below)
@@ -222,7 +264,12 @@ lune run tests/protocol_runtime
 lune run tests/hostile_runtime
 lune run tests/fuzz_runtime
 lune run tests/example_runtime
+lune run tests/delta_runtime
+lune run tests/baseline_runtime
+lune run tests/store_runtime
+lune run tests/replication_runtime
 lune run tools/messages       # every error( in src/api names the fix, not the rule
+lune run tools/exports        # every public type is written in an _ok file, or listed as a gap
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 stylua --check src tests analyze.luau bench spike
@@ -269,18 +316,36 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
   has no test.** `nw.configure` shipped in M3 phase 0 typed so that Luau rejected every call, and
   `tests/config_reject.luau` counted nine of those rejections as its own cases passing. Write the
   `_ok` half.
-- `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header
+- `tests/*_reject.luau` — must produce exactly the count in its `-- netweave:expect N` header, one
+  per line marked `-- netweave:reject <text>`, each saying what its diagnostic has to contain. The count
+  alone let a case be swapped for junk; the line alone let junk be swapped onto the marked line. Both
+  were measured before the text was added.
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
+- `tests/puppet.client.luau` — not a test: the client the Studio suite does not otherwise have. Emitted as
+  a client `Script` under `ReplicatedStorage`, it waits for `roblox_runtime` to create `NETWEAVE_PUPPET`,
+  then echoes what arrives on the netweave remotes and on a probe remote, so the server-side suite can
+  assert the other end of a real `RemoteEvent`. It arms itself only while asked, because the benchmark
+  place carries it too.
 
 **A security-relevant suite counts its own shape** through `tests/harness.luau`, and refuses to pass
-under the floor it declares. Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
-92%, `transport_runtime` 59%, and the rule behind the number is §9.
+under the floor it declares. ~~Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
+90%, `transport_runtime` 66%.~~ The floors live in the files, and since PLAN-M4-BUG phase 6 each one is
+the share the file honestly measures — `fuzz_runtime` 0.25, `replication_runtime` 0.16, `baseline_runtime`
+0.3, `delta_runtime` 0.03, `store_runtime` none — after M4-1 found four of them met by tagging lifecycle
+and no-op sections as failure-path. The rule behind the number is §9, and D-5 of that plan says a floor
+met by relabelling is lowered, not defended.
 
-Two checks read source off disk rather than running it, which is why they live outside `src/` and
+Three checks read source off disk rather than running it, which is why they live outside `src/` and
 `tests/` — the analyzer walks those two roots and cannot resolve `@lune/fs`:
 
 - `tools/messages.luau` — every `error(` in `src/api/` names the fix, and the worked example in
   `docs/DESIGN-API.md` is the same text as the one `tests/example_runtime.luau` runs
+- `tools/exports.luau` — every `export type` on the public surface is written down in a
+  `tests/*_ok.luau`, or named in that file's `UNCOVERED` list with the reason it cannot be. The list
+  fails in both directions, so it shrinks as gaps close and cannot quietly grow. M4's security
+  report found three exported types that no `_ok` file had ever annotated — `nw.Views<D>`,
+  `nw.Settings` and `t.PayloadOf` — and all three were broken in a way a `_reject` file cannot see,
+  because each *removes* diagnostics rather than adding one.
 - `bench/check.luau` — everything under `bench/` parses
 
 A rejection file that stops erroring means a guarantee has silently stopped being enforced. That
@@ -357,7 +422,8 @@ directly.
 
 `.gitignore` already covers it: build outputs (`netweave.rbxm`, `netweave-test.rbxl`,
 `bench/Benchmark.rbxl`), `sourcemap.json`, and **`_refsrc/`** — 45 MB of vendored competitor
-sources that are read-only research material, not this project's code (§2).
+sources that are read-only research material, not this project's code (§2). Its `README.md` is the
+one exception and is tracked; §2 says why.
 
 ---
 

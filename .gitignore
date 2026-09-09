@@ -9,8 +9,21 @@ bench/Recheck.rbxl
 *.rbxl.lock
 *.rbxlx.lock
 
-# Vendored competitor sources, kept locally for research (see _refsrc/README.md)
-_refsrc/
+# Vendored competitor sources, kept locally for research.
+#
+# The clones are disposable — `_refsrc/README.md` says so, and the analysis in
+# `docs/RESEARCH-AND-PLAN.md` cites files and line numbers rather than depending on the tree.
+# But that README is the one part that is not reproducible: it records the exact commit each
+# repository was cloned at, which is what every claim in the research log is a claim *about*.
+# Ignored along with everything else, it lived only on one machine.
+#
+# `_refsrc/*` rather than `_refsrc/`, because git does not descend into an excluded directory
+# and a negation inside one never matches.
+_refsrc/*
+!_refsrc/README.md
 
 # Rojo/luau-lsp scratch
 sourcemap.json
+
+# Written by bench/build.luau: which tree the benchmark place was built from
+bench/src/shared/Tree.luau

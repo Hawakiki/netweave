@@ -97,6 +97,16 @@ local sink: Batch.Sink = {
 	     direction has its own file: `tests/query_runtime.luau`. ]]
 	answers = true,
 
+	--[[ Never reached: the envelope cases here declare no replicated channel, which has its own
+	     file in `tests/replication_runtime.luau`. A stub that raises says so. ]]
+	change = function()
+		error("this sink handles no replicated channel")
+	end,
+
+	resync = function()
+		error("this sink handles no replicated channel")
+	end,
+
 	admit = function(channel: any, _bytes: number): (string?, string?)
 		return denyOn[channel.qualified], "budget"
 	end,
@@ -633,6 +643,14 @@ local roster: Recipients.Roster = {
 		end
 
 		return #nearbyOf
+	end,
+
+	--[[ The rig says which of its stand-ins are real, which is what `has` is for and what production
+	     always supplies — `Recipients.roblox` answers it with `Parent == Players`. Without it every
+	     roster here would exercise the *degraded* path, and the one section that means to is the
+	     `lenient` case below, which builds a roster without this on purpose. ]]
+	has = function(who: any): boolean
+		return who == alice or who == bob or who == carol
 	end,
 }
 
@@ -1975,6 +1993,47 @@ do
 	byId[81] = nil
 end
 
+do
+	reset()
+
+	--[[
+		The ceiling the M4 fix corrected: an array of structs carrying a flag opens a bitfield
+		scope per element, and the ceiling used to count none of them. `ir_runtime` pins the
+		arithmetic, but it has no failure-path floor; this is the same pin in the file that does,
+		and the packet that only the corrected ceiling admits — M4-1 measured this section green
+		with the scope bytes deleted from the sum.
+	]]
+	local channel =
+		outboundChannel(82, t.array(t.struct({ f = t.boolean, x = t.u8 }), 0, 10), { class = "signal" })
+	byId[82] = channel
+
+	equals("a scope per element is in the ceiling", channel.codec.maxSize, 21)
+
+	local got = 0
+	channel.handler = function()
+		got += 1
+	end
+
+	local inbound, reported = inboundOf(true, {})
+	local full = {}
+
+	for index = 1, 10 do
+		full[index] = { f = index % 2 == 0, x = index }
+	end
+
+	Batch.writePacket(channel, full)
+
+	local packed, instances = Buffer.take()
+	inbound.receive(packed, instances, alice)
+
+	equals("a full array, which only the corrected ceiling admits, arrives", got, 1)
+	equals("with nothing reported", #reported, 0)
+
+	channel.handler = nil
+	byId[82] = nil
+	Observer.reset()
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- A batch cannot hold more than it is allowed to (PLAN-M3 D-6)
 -- ---------------------------------------------------------------------------------------------
@@ -2135,6 +2194,181 @@ do
 	Observer.reset()
 end
 reset()
+
+-- ---------------------------------------------------------------------------------------------
+-- What a select audience hands back, which is a table a game built (M4 report)
+-- ---------------------------------------------------------------------------------------------
+
+suite.failing()
+
+do
+	reset()
+
+	--[[
+		`select` is the escape hatch: the other three rules build their answer out of the roster, so
+		what they return is a recipient by construction. This one gets a table from game code, and
+		before M4 phase 8 every part of it was trusted.
+
+		Measured against the real `Outbound` before the fix:
+
+		  | returned | what happened |
+		  |---|---|
+		  | `{ alice, nil, bob }` | **raised** `Outbound:173: table index is nil` — `#` over a hole is unspecified in Luau, and `switchTo` wrote `parked[nil]` |
+		  | `{ alice, alice }` | the packet twice in one batch, three bytes became five |
+		  | `{ 5, "text", {} }` | three parked send buffers, one per value, none ever forgotten |
+		  | 5,000 fresh values | **3.8 MB retained** |
+
+		The walk is `pairs` now, which a hole cannot fool, and a value has to look like a recipient
+		*and* be one the roster still has.
+	]]
+	local chosen: { any } = {}
+
+	local audience = {
+		scope = "select",
+		kind = "select",
+		select = function(): { any }
+			return chosen
+		end,
+	}
+
+	--[[ The roster this file already declares, plus the question only `select` asks. `carol` is
+	     deliberately not in it: she is a player who has left, still named by a stale list. ]]
+	local present: Recipients.Roster = {
+		all = roster.all,
+		owner = roster.owner,
+		within = roster.within,
+
+		has = function(who: any): boolean
+			return who == alice or who == bob
+		end,
+	}
+
+	local out: { any } = {}
+
+	local function resolve(list: { any }): { any }
+		chosen = list
+		table.clear(out)
+
+		local count = Recipients.of(audience, 1, present, out)
+		local named: { any } = {}
+
+		for index = 1, count do
+			table.insert(named, out[index])
+		end
+
+		return named
+	end
+
+	local hole = resolve({ alice, nil :: any, bob })
+	equals("a hole does not decide how many there are", #hole, 2)
+	check("and neither side of it is lost", hole[1] == alice and hole[2] == bob)
+
+	--[[
+		The hole a constructor cannot make. `{ alice, nil, bob }` gives `#` = 3 under lune, so a `#`
+		walk and the `pairs` walk see the same two players and the two assertions above cannot tell
+		them apart — M4-1 measured the walk reverted to `#` passing them, with the `has` filter doing
+		the whole job. Built by assignment, `#` is 1 (measured): the border stops at the first nil,
+		and a `#` walk never reaches bob. This is the case that pins the walk rather than the filter.
+	]]
+	local holed: { any } = {}
+	holed[1] = alice
+	holed[3] = bob
+
+	local past = resolve(holed)
+	equals("a hole `#` stops at does not hide who is past it", #past, 2)
+	check("and the one past it is reached", past[1] == alice and past[2] == bob)
+
+	equals("a value that is not a recipient is not one", #resolve({ 5, "text", {} }), 0)
+	equals("nor is nothing at all", #resolve({}), 0)
+
+	local twice = resolve({ alice, alice, bob, alice })
+	equals("the same player named four times is one recipient", #twice, 2)
+	check("in the order they were first named", twice[1] == alice and twice[2] == bob)
+
+	--[[ The half a shape test cannot answer: carol is the same kind of value alice is. What
+	     separates them is that she is not here any more, which is the roster's question — and a
+	     stale list naming her rebuilt the send buffer `forget` had just removed. ]]
+	local left = resolve({ alice, carol })
+	equals("a player who has left is not sent to", #left, 1)
+	check("while the one who stayed is", left[1] == alice)
+
+	--[[ The other two kinds ask the roster the same question. `owner` and `nearby` returned the
+	     roster's answer unchecked, so a departed owner and a departed neighbour were sent to and
+	     given baselines after `forget` (M4-1). ]]
+	local departed: Recipients.Roster = {
+		all = roster.all,
+		owner = function(): any
+			return carol
+		end,
+		within = function(_subject: any, _studs: number, into: { any }): number
+			into[1] = carol
+			into[2] = alice
+			into[3] = carol
+			into[4] = bob
+			return 4
+		end,
+		has = present.has,
+	}
+
+	table.clear(out)
+	equals(
+		"an owner who has left is nobody",
+		Recipients.of({ scope = "owner", kind = "owner" }, 1, departed, out),
+		0
+	)
+
+	table.clear(out)
+	local near = Recipients.of({ scope = "nearby", kind = "nearby", radius = 50 }, 1, departed, out)
+	equals("neighbours who have left are dropped", near, 2)
+	check("and the list is compacted, not holed", out[1] == alice and out[2] == bob and out[3] == nil)
+
+	--[[
+		And a roster that does not answer it still refuses what could never have been a recipient at
+		all — a number, a string, a boolean. That floor is a **kind** test and asks nothing about the
+		runtime, which is the correction M4 phase 8's Studio pass forced: it used to be exact inside
+		Roblox and a table test under lune, so this file passed on every lune run and went red the
+		moment the place was opened. A `Player` cannot be constructed, so no rig can hand the real
+		thing here the way the Instance suites do.
+	]]
+	local lenient: Recipients.Roster = { all = roster.all, owner = roster.owner, within = roster.within }
+
+	chosen = { alice, 7, "text" }
+	table.clear(out)
+	equals("without `has`, the kind test still holds", Recipients.of(audience, 1, lenient, out), 1)
+	check("and what it admitted is the stand-in", out[1] == alice)
+
+	suite.passing()
+
+	--[[ Said once per audience, not once per publish: a selector that returns rubbish returns it on
+	     every tick, and a `state` channel publishes per subject per tick. Same lesson as
+	     `baselinesPerClient`, one file over. ]]
+	Observer.reset()
+	Observer.setSink(function() end)
+
+	local said = 0
+	Observer.observe(function()
+		said += 1
+	end)
+
+	--[[ Its own audience, because the latch is per audience and the calls above have already
+	     tripped this one's — which is the behaviour, not an accident of the test. ]]
+	local noisy = {
+		scope = "select",
+		kind = "select",
+		select = function(): { any }
+			return { alice, 5, alice }
+		end,
+	}
+
+	for _ = 1, 50 do
+		table.clear(out)
+		Recipients.of(noisy, 1, present, out)
+	end
+
+	equals("fifty bad selections say it twice — once each for the two mistakes", said, 2)
+
+	Observer.reset()
+end
 
 suite.finish()
 

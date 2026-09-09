@@ -370,6 +370,11 @@ do
 		class = "BasePart",
 		lengthStorage = "u16",
 		count = 42,
+		step = 0.25,
+		utf8 = true,
+		pattern = "%d+",
+		--[[ `t.u53` against `t.f64(0, 2^53)`: same storage, one refuses a fraction (M4-1). ]]
+		whole = true,
 	}
 
 	local function channelWith(mutate: ((Ir.Node) -> ())?): any
@@ -471,6 +476,16 @@ local function sinkOf(record: { Record }): Batch.Sink
 		end,
 
 		answers = true,
+
+		--[[ Never reached: this file declares no replicated channel. Present because `Sink` is a
+		     closed type, and a stub that raises says so louder than one that quietly does nothing. ]]
+		change = function()
+			error("protocol_runtime declares no replicated channel")
+		end,
+
+		resync = function()
+			error("protocol_runtime declares no replicated channel")
+		end,
 
 		admit = function(): (string?, string?)
 			return nil, "budget"
@@ -770,6 +785,225 @@ do
 
 	Ping.handler = nil
 	Observer.reset()
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Every layout a channel carries, not every attribute of one of them
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[
+		The attribute walk above changes each field of a lowered *node* and asserts the signature
+		notices. It cannot notice a **second layout**, because a second layout is not an attribute of
+		the first one's nodes — and that is how `nw.replicate`'s `subject` schema stayed out of the
+		hash for the whole of M4.
+
+		A change packet is `id length [instances] subject flags [fields]`. A peer reading `t.u8`
+		where the sender wrote `t.u16` is one byte short for every change on that channel, and for a
+		subject id below 256 the byte it takes for the flags is `0x00` — a **removal**, well formed,
+		delivered to the handler. The one failure the handshake exists to catch, arriving through the
+		one schema it was not reading.
+
+		So this walks the channel rather than the node: every codec a class can carry, changed alone,
+		with the hash asserted to move. A seventh class that adds an eighth codec fails here until it
+		is described.
+	]]
+	--[[ Each declaration is written out rather than built from parameters: `nw.replicate`'s
+	     `subject` and `data` are read by type functions at analysis, and a schema arriving through an
+	     `any` parameter is not a schema they can read. The four cases differ by one field each. ]]
+	local function shapeOf(channels: { [string]: any }): (number, string)
+		Namespace.reset()
+
+		local declared = Namespace.declare("shape", channels)
+		local protocol = Namespace.seal()
+
+		return protocol.hash, Protocol.signatureOf(declared.channels.mirrored)
+	end
+
+	local base, baseText = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local narrowed, narrowedText = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u8,
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("narrowing the subject moves the hash", narrowed, base)
+	differs("and the signature says so", narrowedText, baseText)
+
+	local restructured = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.struct({ a = t.u8, b = t.u8 }),
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("so does changing its shape entirely", restructured, base)
+
+	--[[ The control: the schema that was always covered still moves it, so a hash that moves for
+	     everything would not pass this section either. ]]
+	local moved = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.u16 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("the data schema still moves it too", moved, base)
+
+	local again = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.u8 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	equals("and the same declarations still hash the same", again, base)
+
+	--[[
+		**Two quantised fields that lower identically and mean different things.**
+
+		`t.quantized(-1, 1, 2 / 254)` and `t.quantized(-1, 1, 2 / 200)` both take one byte, both
+		declare `-1..1`, and both lower to `storage = u8`. Every attribute the signature described
+		before phase 8 was the same for the two, and every byte on the wire meant something different
+		— a peer decoding with the wrong step gets a plausible number, silently, for ever.
+
+		That is the `subject` failure in a third place, and it is why the walk above gained `step`.
+		This is the end-to-end half: through `t.quantized` rather than by poking a node, so a `step`
+		that stopped reaching the lowered node would fail here too.
+	]]
+	local coarse = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.quantized(-1, 1, 2 / 200) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local fine = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ n = t.quantized(-1, 1, 2 / 254) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("two steps in the same byte and the same bounds hash differently", fine, coarse)
+
+	--[[
+		**A union's branches, which the walk over `variants` alone cannot see.**
+
+		The branch *names* reach the signature through `variants`, because that is the tag order. What
+		each name carries is a second layer, and two builds agreeing on the names while disagreeing on
+		one branch's schema is the same failure as two builds disagreeing on a struct field — with the
+		tag reading correctly and the bytes under it read as something else.
+	]]
+	--[[
+		The pair is `u8` against `i8` rather than `u8` against `u16`, and the difference is the point.
+
+		A widened branch changes the union's own `fixedSize` and `maxSize`, which are on the layout
+		header the signature prints before it walks a single node — so that pair moves the hash
+		whether or not anything reads `branches`, and asserting it would have been asserting nothing.
+		Measured: with the branch walk deleted, the widened pair still passed.
+
+		`t.i8` and `t.u8` both narrow to one unsigned byte. Same bits, same fixed size, same ceiling;
+		what differs is the branch's declared range, which is reachable only through the branch.
+	]]
+	local narrow = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ act = t.union({ move = t.u8, wait = t.u8 }) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local signed = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ act = t.union({ move = t.i8, wait = t.u8 }) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("one branch's range moves the hash, at the same size", signed, narrow)
+
+	--[[ And a branch renamed, which moves the tag order under every other branch. ]]
+	local renamed = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ act = t.union({ move = t.u8, zzz = t.u8 }) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	differs("and a branch renamed moves it too", renamed, narrow)
+
+	--[[ A vector's component schema is a node under `element`, so the walk that already reaches an
+	     array's element reaches this one — and two vectors of the same kind carrying different
+	     components read different bytes for the same three axes. ]]
+	local loose = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ at = t.vector3 }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local bounded = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ at = t.vector3(t.i16(-2048, 2048)) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	local tighter = shapeOf({
+		mirrored = nw.replicate({
+			subject = t.u16,
+			data = t.struct({ at = t.vector3(t.i16(-1024, 1024)) }),
+			audience = nw.audience.everyone,
+			store = nw.store.of({}),
+		}),
+	})
+
+	--[[ The second pair is the one that is load-bearing, and the first would have passed without the
+	     walk: naming a component takes a `vector3` from twelve bytes to six, which is on the layout
+	     header the signature prints before it reaches a node. Two six-byte vectors differing only in
+	     their components' range is what isolates it — measured, by deleting the walk. ]]
+	differs("naming a vector's components moves the hash", bounded, loose)
+	differs("and so does narrowing them further, at the same size", tighter, bounded)
+
+	--[[ The patch layout is derived from `data`, so it cannot move on its own — what it earns is a
+	     cross-check: two peers whose data schemas somehow agreed while their derivations did not
+	     would differ here. Asserted as *presence* in the text rather than as a difference, because
+	     an assertion that it moves alone would be asserting the derivation is not a derivation. ]]
+	check("the change layout is described", string.find(baseText, "change", 1, true) ~= nil)
+	check("and so is the subject", string.find(baseText, "subject", 1, true) ~= nil)
+
+	Namespace.reset()
 end
 
 -- ---------------------------------------------------------------------------------------------

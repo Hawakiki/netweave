@@ -21,6 +21,7 @@
 	prevent (`DESIGN-API.md` §1).
 ]]
 
+local Baseline = require("../replication/Baseline")
 local Budget = require("./Budget")
 local Inbound = require("./Inbound")
 local Link = require("./Link")
@@ -29,6 +30,7 @@ local Outbound = require("./Outbound")
 local Protocol = require("../api/Protocol")
 local Query = require("./Query")
 local Recipients = require("./Recipients")
+local Tick = require("../replication/Tick")
 local Transport = require("../api/Transport")
 
 local Driver = {}
@@ -84,13 +86,45 @@ function Driver.install()
 		isServer = isServer,
 	})
 
+	--[[
+		What the other end has, per replicated subject.
+
+		**Bounded on the server and not on the client**, and the asymmetry is the point. On the
+		server this is memory sized by how many people join, which is `PLAN-M3` D-6 territory and
+		what `baselinesPerClient` exists for. On the client it is what the server chose to send —
+		already bounded, by that limit, at the other end — and refusing to remember one here would
+		make the next change unreadable rather than saving anything.
+	]]
+	local baselines = Baseline.new(isServer)
+
 	local inbound = Inbound.new({
 		resolve = Namespace.channelById,
 		admit = budget.admit,
 		isServer = isServer,
 		queries = query,
 		agreement = agreement,
+		baselines = baselines,
+
+		--[[ A change this endpoint could not read means every change after it is unreadable, so it
+		     asks for the channel again. Only a client can: the server is the sender, and a server
+		     that lost track of what a client has simply sends everything next tick. ]]
+		desynced = if isServer
+			then nil
+			else function(channel: any)
+				outbound.resync(channel)
+			end,
 	})
+
+	--[[ Server-side only. A replicated channel is driven from the store, and the store is the
+	     server's. ]]
+	local replicate = if isServer
+		then Tick.new({
+			outbound = outbound,
+			baselines = baselines,
+			roster = roster,
+			channels = Namespace.replicated,
+		})
+		else nil
 
 	--[[
 		Ids cannot be assigned until every namespace has been declared, because an id depends on
@@ -99,15 +133,19 @@ function Driver.install()
 
 		The receive path seals through `Namespace.channelById` for the same reason.
 	]]
-	local ready = false
-
+	--[[
+		Asked of `Namespace` rather than remembered here. A flag of this driver's own stayed true
+		across `Namespace.reset()`, so a suite that had sent one packet through the real transport
+		left every namespace declared after it unsealed and unnumbered — found writing the Studio
+		half of the suite, where the benchmark declares its channels after the tests have run
+		(`PLAN-M4-BUG` phase 6).
+	]]
 	local function ensure()
-		if ready then
+		if Namespace.sealed() then
 			return
 		end
 
 		Namespace.seal()
-		ready = true
 
 		--[[
 			The client's hello goes out here, the moment the protocol is real and before anything
@@ -148,14 +186,23 @@ function Driver.install()
 		     rather than waiting a frame to be sent. A caller resumed with a failure is game code
 		     like any other and often does exactly that. ]]
 		query.tick()
+
+		--[[ After the handlers have run, so a change provoked by this frame's traffic goes out in
+		     this frame's batch rather than the next one — and before the flush, for the same
+		     reason. ]]
+		if replicate then
+			replicate()
+		end
+
 		outbound.flush()
 	end)
 
 	if isServer then
 		Players.PlayerRemoving:Connect(function(player)
-			--[[ Four places hold something per player: an unsent batch, a pending intent and a
-			     context record, a rate window, and the call slots of any query still running for
-			     them. None of them mean anything once the player is gone, and all four would
+			--[[ Six places hold something per player: an unsent batch, a pending intent, a context
+			     record, a rate window, the call slots of any query still running for them, and
+			     the replication baselines. None of them mean anything once the player is gone, and
+			     every one would
 			     otherwise grow with every join.
 
 			     `query.forget` releases the accounting and nothing else — a handler already parked
@@ -163,6 +210,7 @@ function Driver.install()
 			     returns when it returns, finds its slot gone, and writes no reply. ]]
 			outbound.forget(player)
 			inbound.forget(player)
+			baselines.forget(player)
 			budget.forget(player)
 			query.forget(player)
 			agreement.forget(player)

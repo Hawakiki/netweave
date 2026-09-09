@@ -89,3 +89,10 @@ args = [{ type = "any" }, { type = "any" }]
 
 ["channelView"]
 args = [{ type = "any" }, { type = "any" }]
+
+# `branded` joined them in M4 phase 6 (`src/api/Trust.luau`) and was not declared here, so
+# `selene src tests` had three errors from the commit that added it until phase 8 noticed. It is the
+# shared half of `Trusted`, `Untrusted` and `TrustedPayload`, written once because a union has to be
+# branded component by component and three copies of that is three chances to get it wrong.
+["branded"]
+args = [{ type = "any" }, { type = "any" }]

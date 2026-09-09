@@ -59,6 +59,9 @@ Batch.VERSION = 1
 local ONE_BYTE_MAX = 127
 local TWO_BYTE_MAX = 16383
 
+--[[ Constant, because a peer chooses how often it is said. ]]
+local UNCONSUMED = "the payload does not end where its declared length says it does"
+
 --[=[
 	@interface Sink
 	@within Batch
@@ -88,11 +91,19 @@ export type Sink = {
 	     `budget`, and a peer on a protocol this one does not share is `protocol`. ]]
 	admit: (channel: any, bytes: number) -> (string?, string?),
 	deliver: (channel: any, value: any, bytes: number, call: number?) -> (),
+	--[[ A replicated subject's change. The subject has been read; the change itself has not,
+	     because folding it into a baseline needs one this module does not hold. The sink reads it
+	     from the buffer, which is positioned at it and limited to the packet's end. ]]
+	change: (channel: any, subject: any, bytes: number) -> (),
 	reply: (channel: any, call: number, status: number, value: any?, bytes: number) -> (),
 	--[[ A peer's protocol hash, off a control packet. Once per session per peer, in the first batch
 	     it sends — and `bytes` is what the whole control packet cost, so a mismatch is reported with
 	     the same accounting as any other refusal. ]]
 	hello: (hash: number, bytes: number) -> (),
+	--[[ A peer asking for a replicated channel in full, because it can no longer read the changes.
+	     The id is unresolved: this module reads control packets before it resolves anything, and
+	     the sink is where a channel that does not exist is refused rather than assumed. ]]
+	resync: (id: number, bytes: number) -> (),
 	refuse: (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> (),
 }
 
@@ -114,11 +125,34 @@ export type Sink = {
 ]]
 local HELLO = 1
 
+--[[
+	`RESYNC` is a peer saying it has lost track of a replicated channel and needs all of it again.
+
+	It is a control kind rather than a channel because it is *about* a channel and cannot be sent on
+	one — the channel it names is server-to-client, so there is no direction for a client's packet
+	on it, and G6 refuses exactly that before decode. Reserved id 0 with a length in front of the
+	body is the extension point the format set aside for this (`WIRE-FORMAT.md` §3), so a v1 reader
+	that has never heard of it steps over it and says so rather than dying.
+
+	It is also the only packet in netweave a client sends that makes the server do work it did not
+	choose. ~~The bound is that the resend it provokes happens once in the tick that follows however
+	many arrive — so the worst a peer can extract is a whole state per tick.~~ That was the wrong bound,
+	measured in M4 phase 8: one per tick is one full state per frame. The bound that holds is in
+	`Inbound`, not here — one resend per `resyncTicks` window per (peer, channel), the asks inside a
+	window remembered and honoured when it closes (`WIRE-FORMAT.md` §2).
+]]
+local RESYNC = 2
+
 --[[ The repeat of the reason above it, without the kind. Constant, so a batch packed with control
      kinds this build does not read allocates one string rather than one per packet. ]]
 local ANOTHER_CONTROL_KIND = "another control kind this build does not read, in the same batch"
 
+--[[ A control body that fails to parse inside the length it declared. Constant, because a peer
+     chooses how often it is said. ]]
+local TRUNCATED_CONTROL_BODY = "a control packet's body ends before the value it carries does"
+
 Batch.HELLO = HELLO
+Batch.RESYNC = RESYNC
 
 --[=[
 	@prop OK number
@@ -239,6 +273,73 @@ local function writeFramed(codec: any, value: any)
 	end
 end
 
+--[=[
+	@within Batch
+	@function writeChange
+	@param channel Channel -- a `replicate` channel
+	@param subject any -- which value this is
+	@param old any -- what the recipient already has, or nil
+	@param new any -- what it should have, or nil to say the subject is gone
+	@return boolean -- false when there was nothing to say, and nothing was written
+
+	One replicated subject's change, for one recipient.
+
+	The packet is `id`, a length, an instance count if the schema can carry Instances, the
+	**subject**, and the change. The subject is inside the frame rather than beside it, because a
+	packet whose length does not cover the subject could be stepped over into the middle of one —
+	and stepping over a refused packet is guarantee G5.
+
+	:::note
+	A change is always `counted`, even where the patch layout is statically sized. The same channel
+	emits a removal — flags and nothing else — and a change carrying values, so the reader cannot
+	know where a refused one ends from the schema alone. That is the length prefix earning its byte
+	rather than spending one.
+	:::
+
+	:::caution
+	Returns **false and writes nothing** when the recipient is already up to date, and the caller
+	must not have written anything else in between: everything from the channel id onward is rolled
+	back. `Delta.write` is what decides, and it can only decide by trying.
+	:::
+]=]
+function Batch.writeChange(channel: any, subject: any, old: any, new: any): boolean
+	--[[ The whole packet, not just the payload. A change that turns out to be empty has to take its
+	     own id and length prefix with it, because a bare id would decode as the next packet. ]]
+	local used, instances = Buffer.mark()
+
+	--[[ Before the mark is used for anything: `begin` writes the version byte only into an empty
+	     batch, so a rollback that takes it with it leaves the batch empty and the next packet
+	     writes it again. Leaving it out entirely is what the first end-to-end run did, and the
+	     reader then took the length prefix for a channel id — the batch decoded as garbage without
+	     ever failing a check, because a version byte of 1 is also a channel id of 1. ]]
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(channel.id)
+
+	local variable = channel.changeInstances
+	local lengthAt = Buffer.reserve(1)
+	local instancesAt = if variable then Buffer.reserve(1) else -1
+
+	local payloadStart = Buffer.used()
+	local instancesStart = Buffer.instancesWritten()
+
+	channel.subjectCodec.write(subject)
+
+	if not channel.delta.write(old, new) then
+		Buffer.rollback(used, instances)
+		return false
+	end
+
+	local length = Buffer.used() - payloadStart
+
+	if variable then
+		patchVarint(instancesAt, Buffer.instancesWritten() - instancesStart)
+	end
+
+	patchVarint(lengthAt, length)
+	return true
+end
+
 function Batch.writeBody(channel: any, value: any)
 	--[[
 		A packet boundary is where a block left open by a raising encode gets cleaned up. Without
@@ -337,6 +438,36 @@ function Batch.writeHello(hash: number)
 	Buffer.writeU32(hash)
 end
 
+--[=[
+	@within Batch
+	@function writeResync
+	@param id number -- the replicated channel this peer has lost track of
+
+	"I cannot read your changes any more; send me everything."
+
+	A change is only meaningful against the value it was computed from, so a change that did not
+	arrive makes every change after it unreadable — and the peer that refused the packet is the one
+	that knows. This is that peer saying so, on the reserved control id.
+
+	`PLAN-M4` D-2 expected a sequence number on the wire to find the gap. There is none, because the
+	gap does not have to be found: the endpoint that dropped the packet reported it at the time.
+]=]
+function Batch.writeResync(id: number)
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(0)
+	Buffer.writeU8(RESYNC)
+
+	--[[ The body is one varint, and its length is written anyway. A control packet's length is what
+	     makes an unknown kind steppable, so leaving it off a known one would make the format's
+	     extension point depend on which kinds a reader happens to know. ]]
+	local at = Buffer.reserve(1)
+	local start = Buffer.used()
+
+	Buffer.writeVarint(id)
+	patchVarint(at, Buffer.used() - start)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Reading
 -- ---------------------------------------------------------------------------------------------
@@ -428,6 +559,22 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 
 				if not Buffer.rejected() then
 					sink.hello(hash, size - packetStart)
+				else
+					sink.refuse(nil, "parse", TRUNCATED_CONTROL_BODY, length)
+				end
+			elseif kind == RESYNC and length >= 1 then
+				Buffer.setLimit(bodyEnd)
+
+				local wanted = Buffer.readVarint()
+
+				--[[ A body that fails to parse inside its own declared length — a resync id whose
+				     varint asks for a byte the length did not provide — was stepped over without a
+				     word. Found by the fuzzer the round its corpus learned to write a resync
+				     (PLAN-M4-BUG phase 6): `01 00 02 01 89`, one flipped bit. ]]
+				if not Buffer.rejected() then
+					sink.resync(wanted, size - packetStart)
+				else
+					sink.refuse(nil, "parse", TRUNCATED_CONTROL_BODY, length)
 				end
 			else
 				--[[ Named once per batch, counted every time. Every unknown kind is still reported —
@@ -470,7 +617,13 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 			else.
 		]]
 		local query = channel.class == "query"
-		local codec = channel.codec
+		local change = channel.class == "replicate"
+
+		--[[ A change is framed by neither the state codec nor the patch's — it is the subject and
+		     the change together, and `changeFraming` is the pair's shape. Always `counted`: the same
+		     channel emits a removal, which is flags and nothing else, and a change carrying values,
+		     so where a refused one ends cannot be known from the schema (`Batch.writeChange`). ]]
+		local codec = if change then channel.changeFraming else channel.codec
 		local ceiling = channel.maxBytes
 		local call: number? = nil
 		local status = OK
@@ -603,14 +756,45 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 			else
 				Buffer.setLimit(payloadEnd)
 
-				local value, failure = codec.read()
+				if change then
+					--[[
+						The subject is read here and the change is not: folding a change into a
+						baseline needs one, and this module holds none. The sink is positioned at
+						the change with the limit still on the packet's end, so a body that lies
+						about its own length runs out of bytes rather than into the next packet.
 
-				if failure then
-					sink.refuse(channel, "parse", failure, bytes, call)
-				elseif query and not answers then
-					sink.reply(channel, call :: number, OK, value, bytes)
+						Falls through to the same tail as everything else. An earlier draft of this
+						branch stepped the cursor itself and used `continue`, which is the shortcut
+						the comment below that tail was written about — it once skipped the sidecar
+						cursor and reattributed another packet's instances.
+					]]
+					local subject, refused = channel.subjectCodec.read()
+
+					if refused then
+						sink.refuse(channel, "parse", refused, bytes, call)
+					else
+						sink.change(channel, subject, bytes)
+					end
 				else
-					sink.deliver(channel, value, bytes, call)
+					local value, failure = codec.read()
+
+					--[[ The payload has to end where its length said it would. A reader that stopped
+					     short leaves bytes the sender declared and nobody read — padding a peer can
+					     add for free, and a shape that hides a reader consuming less than it should.
+					     G5 is per packet, and "consumed exactly what it claimed" is the packet-level
+					     form of it (PLAN-M4-BUG phase 6). A constant reason: it is a per-packet path
+					     a peer chooses the rate of. ]]
+					if not failure and Buffer.cursor() ~= payloadEnd then
+						failure = UNCONSUMED
+					end
+
+					if failure then
+						sink.refuse(channel, "parse", failure, bytes, call)
+					elseif query and not answers then
+						sink.reply(channel, call :: number, OK, value, bytes)
+					else
+						sink.deliver(channel, value, bytes, call)
+					end
 				end
 			end
 		end

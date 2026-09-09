@@ -298,6 +298,51 @@ local quoted = region(
 	"docs/DESIGN-API.md"
 )
 
+--[[ The second worked example, added in M4 phase 5b. Two regions rather than one longer one: the
+     sixty-line cap is a statement about how much a reader has to hold in their head to understand
+     the declaration surface, and replication is a separate thing to understand. ]]
+local replication = region(
+	fs.readFile("tests/example_runtime.luau"),
+	"--#region replication\n",
+	"--#endregion",
+	"tests/example_runtime.luau"
+)
+
+local quotedReplication = region(
+	fs.readFile("docs/DESIGN-API.md"),
+	"<!-- example: tests/example_runtime.luau replication -->\n```lua\n",
+	"```",
+	"docs/DESIGN-API.md"
+)
+
+if replication == "" then
+	fail("tests/example_runtime.luau has no replication example between its markers")
+elseif quotedReplication == "" then
+	fail("docs/DESIGN-API.md quotes nothing between its replication markers")
+elseif replication ~= quotedReplication then
+	fail("the replication example in DESIGN-API.md is not the one tests/example_runtime.luau runs")
+	print(`  document: {#quotedReplication} characters`)
+	print(`  test:     {#replication} characters`)
+end
+
+--[[ Both READMEs quote both examples too, and rot the same way. Same fence markers, same rule. ]]
+for _, path in { "README.md", "README.ko.md" } do
+	local readme = fs.readFile(path)
+
+	local quotedInReadme =
+		region(readme, "<!-- example: tests/example_runtime.luau -->\n```lua\n", "```", path)
+	local quotedReplicationInReadme =
+		region(readme, "<!-- example: tests/example_runtime.luau replication -->\n```lua\n", "```", path)
+
+	if quotedInReadme ~= example then
+		fail(`the example in {path} is not the one tests/example_runtime.luau runs`)
+	end
+
+	if quotedReplicationInReadme ~= replication then
+		fail(`the replication example in {path} is not the one tests/example_runtime.luau runs`)
+	end
+end
+
 local lines = #string.split(example, "\n") - 1
 
 if example == "" then
@@ -334,8 +379,15 @@ else
 	for _, entry in fs.readDir("docs/milestone") do
 		local named = string.match(entry, "^PLAN%-M(%d+)%.md$")
 
+		--[[ A plan may be written before its milestone opens — PLAN-M5 was, to hold what
+		     PLAN-M4-BUG deferred — and says so under its title. It is not the newest until the
+		     marker comes off, which is the same act as opening the milestone (CLAUDE.md §3). ]]
 		if named then
-			table.insert(plans, tonumber(named))
+			local head = string.sub(fs.readFile(`docs/milestone/{entry}`), 1, 600)
+
+			if not string.find(head, "Status: not opened", 1, true) then
+				table.insert(plans, tonumber(named))
+			end
 		end
 	end
 
@@ -356,8 +408,8 @@ if failures > 0 then
 end
 
 print(
-	`OK      messages — {checked} error calls in src/api, worked example {lines} lines, `
-		.. `milestone {milestone}`
+	`OK      messages — {checked} error calls in src/api, worked examples {lines} and `
+		.. `{#string.split(replication, "\n") - 1} lines, milestone {milestone}`
 )
 
 return true

@@ -59,6 +59,7 @@ local Namespace = require("./api/Namespace")
 local Protocol = require("./api/Protocol")
 local Observer = require("./api/Observer")
 local Policy = require("./api/Policy")
+local Store = require("./replication/Store")
 local Transport = require("./api/Transport")
 local Trust = require("./api/Trust")
 local Types = require("./types")
@@ -83,7 +84,11 @@ local nw = {}
 	@prop milestone string
 	@within netweave
 
-	Which milestone this build is. `"M3"`.
+	Which milestone this build is. `"M4"`.
+
+	It moves when the **plan** for the next milestone appears, not when that milestone's code lands,
+	because the question this answers is "what was the tree doing when it produced that number" and
+	a tree with `PLAN-M4.md` in it is doing M4. `master` still says M3, because that is where M3 is.
 
 	netweave has no release versions yet, so this is the coarsest true thing it can say about
 	itself, and it exists because something else needed it to be true: the benchmark writes the
@@ -97,7 +102,7 @@ local nw = {}
 	`docs/WIRE-FORMAT.md` and `nw.protocol()`.
 	:::
 ]=]
-nw.milestone = "M3"
+nw.milestone = "M4"
 
 --[=[
 	@prop types Types
@@ -124,6 +129,34 @@ nw.signal = Channel.signal
 nw.query = Channel.query
 nw.state = Channel.state
 nw.event = Channel.event
+
+--[=[
+	@prop replicate (spec) -> Channel
+	@within netweave
+
+	Server-to-client state, sent as **changes** against what each client already has. The seventh
+	class, and the one the server never calls: its `store` is the only way in.
+
+	:::caution
+	The value a handler receives is **frozen**: it is this client's baseline, and the next change is
+	applied to it. `table.clone` it if you need one to write to.
+	:::
+
+	See `docs/DESIGN-API.md` §3, "Replication is a seventh class, not `state` growing up".
+]=]
+nw.replicate = Channel.replicate
+
+--[=[
+	@prop store Store
+	@within netweave
+
+	Where the game keeps what `nw.replicate` replicates. `nw.store.of` for a plain table,
+	`nw.store.charm` for a Charm atom, `nw.store.replica` for ReplicaService.
+
+	netweave never requires either library, and asks nothing of them either: a store is a shape
+	rather than a dependency, and anything with `subjects()` and `read(subject)` is one.
+]=]
+nw.store = Store
 
 -- Policies --------------------------------------------------------------------------------------
 

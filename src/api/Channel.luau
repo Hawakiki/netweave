@@ -4,7 +4,7 @@
 --[=[
 	@class Channel
 
-	The six channel classes. A class is a **security obligation**, not a transport mode: a reader
+	The seven channel classes. A class is a **security obligation**, not a transport mode: a reader
 	who sees `nw.intent` knows the server does not approve each packet, and a reader who sees
 	`nw.command` knows it does.
 
@@ -36,6 +36,8 @@
 
 local Audience = require("./Audience")
 local Config = require("./Config")
+local Delta = require("../replication/Delta")
+local Ir = require("../codec/Ir")
 local Policy = require("./Policy")
 local Serdes = require("../codec/Serdes")
 local Types = require("../types")
@@ -43,10 +45,10 @@ local Types = require("../types")
 local Channel = {}
 
 --[=[
-	@type Class "command" | "intent" | "signal" | "query" | "state" | "event"
+	@type Class "command" | "intent" | "signal" | "query" | "state" | "event" | "replicate"
 	@within Channel
 ]=]
-export type Class = "command" | "intent" | "signal" | "query" | "state" | "event"
+export type Class = "command" | "intent" | "signal" | "query" | "state" | "event" | "replicate"
 
 --[=[
 	@type Primitive "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
@@ -85,11 +87,14 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	last three are filled in by the namespace and the registry, because an id depends on every
 	other channel in the program (`WIRE-FORMAT.md` §3).
 ]=]
-export type Channel<C, A, T, R> = {
+export type Channel<C, A, T, R, U> = {
 	__class: C,
 	__audience: A,
 	__payload: T,
 	__response: R,
+	--[[ What a `replicate` channel names its subjects with, and `nil` for every other class — the
+	     only one that puts a subject on the wire is the only one whose listener is handed one. ]]
+	__subject: U,
 
 	class: Class,
 	primitive: Primitive,
@@ -221,7 +226,13 @@ type function forbid(spec, class, field)
 		data = "A query carries `args` and `returns`, not `data`.",
 		unreliable = "This class must arrive. A command changes authoritative state and a query is "
 			.. "waiting for an answer; delivering either at best effort would make the class name a "
-			.. "promise it does not keep.",
+			.. "promise it does not keep. A replicated channel sends *changes*, and a change that "
+			.. "does not arrive leaves that client permanently and silently wrong — which is why "
+			.. "nw.state exists beside it for the cases where losing one is fine.",
+		store = "Only a replicated channel reads from a store; every other class is handed its "
+			.. "payload at the call site.",
+		subject = "Only a replicated channel names its subjects on the wire. Everywhere else the "
+			.. "audience decides who gets a value and nothing has to say which value it is.",
 	}
 
 	error(`nw.{class:value()} forbids \`{name}\`. {reason[name]}`)
@@ -355,6 +366,76 @@ export type function OutboundPayload(spec, class)
 	forbid(spec, class, types.singleton("timeout"))
 
 	return requireData(spec, class, types.singleton("data"), types.singleton("what the server sends"))
+end
+
+--[=[
+	@type ReplicatePayload<S> S
+	@within Channel
+
+	Checks a `replicate` declaration and projects the payload out of its `data`.
+
+	Everything [OutboundPayload] forbids, plus `unreliable` — which is the difference between this
+	class and `state` made mechanical rather than documented. A delta is only meaningful against the
+	baseline the receiver has, so one that does not arrive leaves that client wrong for the rest of
+	the session (`PLAN-M4` D-2). And two things it requires that no other class has: a `store` to
+	read from, and a `subject` type, because replication is the only class where the wire has to say
+	*which* value this is.
+]=]
+export type function ReplicatePayload(spec)
+	local class = types.singleton("replicate")
+
+	forbid(spec, class, types.singleton("rate"))
+	forbid(spec, class, types.singleton("burst"))
+	forbid(spec, class, types.singleton("maxBytes"))
+	forbid(spec, class, types.singleton("authorize"))
+	forbid(spec, class, types.singleton("args"))
+	forbid(spec, class, types.singleton("returns"))
+	forbid(spec, class, types.singleton("timeout"))
+	forbid(spec, class, types.singleton("unreliable"))
+
+	if not propertyOf(spec, types.singleton("subject")) then
+		error(
+			"nw.replicate needs `subject`, a netweave type naming what each value belongs to — "
+				.. "t.u16 for entity ids, t.string(0, 32) for names. It is the one class that puts "
+				.. "the subject on the wire, because the client keeps a value per subject and has to "
+				.. "know which one arrived."
+		)
+	end
+
+	if not propertyOf(spec, types.singleton("store")) then
+		error(
+			"nw.replicate needs `store`, from nw.store: nw.store.of(table), "
+				.. "nw.store.charm(atom) or nw.store.replica(replicas). netweave does "
+				.. "not own the state it replicates — the game already has somewhere to keep it, and a "
+				.. "library that demands that be torn out to get delta compression will not be used."
+		)
+	end
+
+	return requireData(spec, class, types.singleton("data"), types.singleton("what is replicated"))
+end
+
+--[=[
+	@type ReplicateSubject<S> S
+	@within Channel
+
+	Projects the payload out of a `replicate` declaration's `subject`.
+
+	It reaches the client's listener as the first argument, so a handler that keeps a value per
+	subject is typed on both — `function(id: number, value)` rather than `function(id, value)` with
+	the id an `any` nobody can check. That is the only reason the type exists: without it the
+	listener would take one argument at analysis and two at runtime, which is worse than either.
+]=]
+export type function ReplicateSubject(spec)
+	local declared = propertyOf(spec, types.singleton("subject"))
+
+	--[[ Silent when it is missing, because [ReplicatePayload] refuses that with the message worth
+	     reading and both type functions run on the same declaration. Two diagnostics for one
+	     mistake is one diagnostic too many, and `tests/api_reject.luau` counts them. ]]
+	if not declared then
+		return types.unknown
+	end
+
+	return payloadOf(declared, types.singleton("subject"))
 end
 
 --[=[
@@ -549,6 +630,11 @@ local FORBIDDEN_REASON: { [string]: string } = {
 	returns = "Only a query replies.",
 	args = "This class carries `data`, not `args`.",
 	data = "A query carries `args` and `returns`, not `data`.",
+	unreliable = "A replicated channel sends *changes*, and every change is relative to what that "
+		.. "client already has — so one delivered at best effort leaves them permanently and "
+		.. "silently wrong rather than one tick stale. If losing a packet is acceptable for this "
+		.. "data, declare it with nw.state instead, which sends the whole value and can be "
+		.. "unreliable for exactly that reason.",
 }
 
 --[[
@@ -608,7 +694,7 @@ end
 ]=]
 function Channel.directionOf(class: string): (boolean, boolean)
 	local inbound = class == "command" or class == "intent" or class == "signal" or class == "query"
-	local outbound = class == "state" or class == "event" or class == "query"
+	local outbound = class == "state" or class == "event" or class == "query" or class == "replicate"
 
 	return inbound, outbound
 end
@@ -700,7 +786,7 @@ end
 	@within Channel
 	@function command
 	@param spec S -- the declaration: `data`, `rate`, `authorize`
-	@return Channel<"command", "none", T, nil>
+	@return Channel<"command", "none", T, nil, nil>
 
 	A client-to-server channel that **changes authoritative state**. `authorize` is required.
 
@@ -714,7 +800,7 @@ end
 
 	The handler receives `Trusted<T>` — the payload decoded, in budget, and approved.
 ]=]
-function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<S>, nil>
+function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<S>, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "command", { "audience", "args", "returns", "timeout", "unreliable" })
 
@@ -734,7 +820,7 @@ end
 	@within Channel
 	@function intent
 	@param spec S -- data, rate
-	@return Channel<"intent", "none", T, nil>
+	@return Channel<"intent", "none", T, nil, nil>
 
 	A continuous observed input: movement, aim, a held button.
 
@@ -753,7 +839,7 @@ end
 	exception that proves it. Coalescing itself lands with the transport in M2.
 	:::
 ]=]
-function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>, nil>
+function Channel.intent<S>(spec: S): Channel<"intent", "none", IntentPayload<S>, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "intent", { "authorize", "audience", "args", "returns", "timeout" })
 
@@ -773,7 +859,7 @@ end
 	@within Channel
 	@function signal
 	@param spec S -- data, rate
-	@return Channel<"signal", "none", T, nil>
+	@return Channel<"signal", "none", T, nil, nil>
 
 	A client-to-server channel that carries **no authority**: a menu opened, an emote played, a
 	tutorial step acknowledged.
@@ -793,7 +879,7 @@ end
 	for that code — the limit is stated in `DESIGN-API.md` §0 and §10.5 rather than papered over.
 	:::
 ]=]
-function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>, nil>
+function Channel.signal<S>(spec: S): Channel<"signal", "none", SignalPayload<S>, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "signal", { "authorize", "audience", "args", "returns", "timeout" })
 
@@ -813,7 +899,7 @@ end
 	@within Channel
 	@function query
 	@param spec S -- args, returns, rate, timeout, authorize
-	@return Channel<"query", "none", T, R>
+	@return Channel<"query", "none", T, R, nil>
 
 	A request that expects an answer. Authorized like a command, because it reads authoritative
 	state and a read is how an exploit finds what to write.
@@ -828,7 +914,7 @@ end
 	}),
 	```
 ]=]
-function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, QueryReturns<S>>
+function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, QueryReturns<S>, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "query", { "data", "audience", "unreliable" })
 
@@ -896,7 +982,7 @@ end
 	@within Channel
 	@function state
 	@param spec S -- data, audience
-	@return Channel<"state", Scope, T, nil>
+	@return Channel<"state", Scope, T, nil, nil>
 
 	Server-to-client replicated state.
 
@@ -911,7 +997,7 @@ end
 	guarantee G3, and it is a type error rather than a runtime check — broadcasting positional
 	data to everyone is how wallhacks are fed, and a call site that does it is invisible in review.
 ]=]
-function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil>
+function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundPayload<S, "state">, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "state", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 
@@ -921,11 +1007,143 @@ function Channel.state<S>(spec: S): Channel<"state", OutboundScope<S>, OutboundP
 	})
 end
 
+--[[ A store is a shape rather than a class, so this checks the shape. netweave never requires Charm
+     or Replica — there is no package path for either (`CLAUDE.md` §8) — so anything answering
+     `subjects` and `read` is one, which is also what makes a test's own table a legitimate store
+     rather than a mock. ]]
+local function requireStore(spec: any): any
+	local store = spec.store
+
+	if type(store) ~= "table" or type(store.subjects) ~= "function" or type(store.read) ~= "function" then
+		error(
+			`nw.replicate needs \`store\`, and got {typeof(store)}. Build one with nw.store.of(table), `
+				.. `nw.store.charm(atom) or nw.store.replica(replicas) — or pass anything `
+				.. `with \`subjects()\` and \`read(subject)\`, because a store is a shape and not a `
+				.. `dependency.`,
+			3
+		)
+	end
+
+	--[[ ~~And a `changed` that is present has to be callable.~~ **Removed with the field it
+	     checked** (M4 phase 8). It was the whole of what netweave ever did with a change signal —
+	     validate it at declaration and never call it — and its own message said a broken one "would
+	     be silently never called", which was true of a working one too. `src/replication/Store.luau`
+	     has the measurement that settled it. ]]
+	return store
+end
+
+--[=[
+	@within Channel
+	@function replicate
+	@param spec S -- data, subject, audience, store
+	@return Channel<"replicate", Scope, T, nil, Subject>
+
+	Server-to-client replicated state, sent as **changes** against what each client already has.
+
+	```lua
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ slot = t.u8, count = t.u16, item = t.string(0, 24) }),
+		audience = nw.audience.owner,
+		store = nw.store.of(byPlayer),
+	}),
+	```
+
+	The server never calls this channel. `store` is the only way in — netweave reads it once a tick,
+	works out what each client is missing, and sends that. A twelve-field subject where one field
+	moved is three bytes.
+
+	:::caution
+	`unreliable` is **forbidden**, and that is the whole difference between this and [Channel.state].
+	A dropped `state` packet costs one tick of staleness and the next corrects it. A dropped *change*
+	leaves that client permanently and silently wrong, because every later change is relative to a
+	baseline it does not have. If losing one is acceptable, the class you want is `state`.
+	:::
+
+	:::caution
+	**The value a handler receives is frozen, and it is this client's baseline.** A change is folded
+	into what the client already had, and every subtree the patch did not touch is shared with it —
+	that sharing is why one field of twelve costs three bytes. Writing into the value would therefore
+	rewrite the base the *next* patch is applied to, so `value.hp -= 1` for a prediction would leave
+	that field wrong for ever with nothing to say so. Keep your own copy instead:
+	`local mine = table.clone(value)`.
+	:::
+
+	:::note
+	There is only one packet shape. A client with no baseline is sent a change against **nothing**,
+	which writes every field — the same bytes a snapshot would have cost, because the flags fit in
+	the byte the schema's own flags were already using. So there is no snapshot/patch bit on the
+	wire, and a join, a resync and an audience entry are the same code.
+	:::
+]=]
+function Channel.replicate<S>(spec: S): Channel<
+	"replicate",
+	OutboundScope<S>,
+	ReplicatePayload<S>,
+	nil,
+	ReplicateSubject<S>
+>
+	local raw: any = spec
+	rejectForbidden(
+		raw,
+		"replicate",
+		{ "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout", "unreliable" }
+	)
+
+	local data = requireType(raw, "data", "replicate")
+	local channel = make("replicate", "Outbound", data, {
+		audience = requireAudience(raw, "replicate"),
+		subject = requireType(raw, "subject", "replicate"),
+		store = requireStore(raw),
+
+		--[[ Not `checkedUnreliable`, because the field is forbidden above and this is the answer
+		     rather than a default that could be overridden. ]]
+		unreliable = false,
+	})
+
+	--[[ Two derived codecs beside the state one `make` built. `subjectCodec` names which value this
+	     is — the only class that needs to, because the client keeps one per subject — and `delta`
+	     is the change itself. ]]
+	channel.subjectCodec = Serdes.fromSchema(channel.subject)
+	channel.delta = Delta.build(Ir.lower(data))
+
+	--[[
+		The wire ceiling is the *patch's*, not the state's, and it is larger: a change carries one
+		bit per field on top of the values. A client refuses against this before decoding, so
+		leaving it at the state's ceiling would have a replicated channel refuse its own honest
+		traffic — which is precisely the defect an external review found in `Ir.ceiling` and
+		`PLAN-M3` phase 9 fixed. The subject's own bytes are on top of both.
+	]]
+	channel.maxBytes = channel.subjectCodec.maxSize + channel.delta.layout.maxSize
+
+	--[[
+		How a change is framed, which is neither codec's answer alone.
+
+		**Always `counted`.** The same channel emits a removal — the flag bytes and nothing behind
+		them — and a change carrying values, so a reader cannot know from the schema where a refused
+		one ends, and stepping over a refused packet is guarantee G5. That is the length prefix
+		earning its byte rather than spending one.
+
+		The instance count is written only when something on this channel can carry an Instance,
+		which for most replicated state is nothing at all.
+	]]
+	local carriesInstances = not (channel.subjectCodec.instances == 0 and channel.delta.layout.instances == 0)
+
+	channel.changeInstances = carriesInstances
+	channel.changeFraming = table.freeze({
+		framing = "counted",
+		instances = if carriesInstances then nil else 0,
+		fixedSize = nil,
+	})
+
+	return channel
+end
+
 --[=[
 	@within Channel
 	@function event
 	@param spec S -- data, audience
-	@return Channel<"event", Scope, T, nil>
+	@return Channel<"event", Scope, T, nil, nil>
 
 	A server-to-client occurrence — something happened, once.
 
@@ -939,7 +1157,7 @@ end
 	The difference from [Channel.state] is what M4 does with it: state is a value that can be
 	delta-replicated and re-sent to a late joiner, an event is a moment that cannot.
 ]=]
-function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil>
+function Channel.event<S>(spec: S): Channel<"event", OutboundScope<S>, OutboundPayload<S, "event">, nil, nil>
 	local raw: any = spec
 	rejectForbidden(raw, "event", { "rate", "burst", "maxBytes", "authorize", "args", "returns", "timeout" })
 

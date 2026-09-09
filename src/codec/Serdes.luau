@@ -59,6 +59,16 @@ local function sized(count: number): any
 	return table.create(count)
 end
 
+--[[ A double put through the rounding `buffer.writef32` will do to it. Four bytes of scratch rather
+     than the outgoing buffer, because this runs while closures are being built and the outgoing
+     buffer may be holding a batch. ]]
+local rounding = buffer.create(4)
+
+local function asF32(value: number): number
+	buffer.writef32(rounding, 0, value)
+	return buffer.readf32(rounding, 0)
+end
+
 local function isFinite(value: number): boolean
 	--[[ `value == value` is the NaN test; a rejected NaN would otherwise pass a range check by
 	     failing every comparison in the wrong direction. ]]
@@ -116,6 +126,8 @@ local READ_CHUNK: { [number]: () -> number } = {
 	[4] = Buffer.readU32,
 }
 
+local claim = Buffer.claim
+local span = Buffer.span
 local reserve = Buffer.reserve
 local reject = Buffer.reject
 local remaining = Buffer.remaining
@@ -344,7 +356,32 @@ local function numberWriter(node: Node): Writer
 	local offset = node.offset :: number
 	local min = node.min :: number
 	local max = node.max :: number
-	local integral = not FRACTIONAL[storage]
+	--[[ Asked of the node rather than derived from the storage a second time. A `u53` lands on `f64`
+	     storage and is still a whole number; a `t.f64` lands on the same storage and is not, and the
+	     difference is a property of the declaration that only `Ir.lowerNumber` can see. ]]
+	local integral = node.whole == true
+	local step = node.step
+
+	--[[
+		Quantised: the wire carries the number of steps from the declared minimum, so the value is
+		divided rather than only shifted, and no whole-number check applies — carrying a fraction is
+		what it is for.
+
+		The rounding is `+ 0.5` and the primitive's own truncation rather than `math.round`, which is
+		a call this would pay per value. `value >= min` is checked one line above, so the quotient is
+		never negative and round-half-up is round-to-nearest here.
+	]]
+	if step then
+		local inverse = 1 / step
+
+		return function(value: any, _flags: Flags)
+			if not (value >= min and value <= max) then
+				error(`[netweave] {value} is outside the declared range {min}..{max}`)
+			end
+
+			write((value - offset) * inverse + 0.5)
+		end
+	end
 
 	if offset == 0 then
 		return function(value: any, _flags: Flags)
@@ -408,9 +445,559 @@ local function enumWriter(node: Node): Writer
 	end
 end
 
+-- -------------------------------------------------------------------------------------------------
+-- A struct of numbers, written in one claim
+-- -------------------------------------------------------------------------------------------------
+
+--[[
+	`PLAN-M4` phase 7, and the only optimisation in this file that came from a measurement rather
+	than from reading the generated output of a competitor.
+
+	`bench/profile.luau` takes one `ArrayHeavy` packet — 100 entities of six `u8` — apart rung by
+	rung. The ceiling, what Blink and Zap emit, is 2.1 us. netweave was 24.0 us, and the attribution
+	is not subtle: 10% is the range and whole-number checks the schema promises, 30% is one call per
+	value, and **52% is the closure per value and the struct walk that finds the field to hand it**.
+	A field of a six-field struct costs seven calls before a byte is written: the struct's, the
+	writer's, and the primitive's under that.
+
+	netweave cannot answer this the way they do. `loadstring` is off in Roblox and a build step is
+	the thing this library exists not to need, so there is no generated source to fall back on. What
+	is left is to **make the primitive wider rather than the loop shorter**: claim the struct's bytes
+	once and write them all, with the offsets computed at declaration time.
+
+	One other shape was priced first and lost outright, and it is written down so it is not tried
+	again: claim once but **keep the loop**, reading each field's offset and bounds out of parallel
+	arrays. 25.5 us — slower than doing nothing, because the array reads cost more than the calls
+	they save. That is what makes the unroll below non-negotiable rather than a matter of taste.
+
+	This lands at 12.7 us against 24.0 under lune, and 29.3 against 38.4 in Studio — **1.9x and
+	1.31x**, both measured on the VM they are quoted for.
+
+	~~It predicts the `ArrayHeavy` framerate gap closing from 1.55x to 1.28x.~~ **It did not.** The
+	Studio matrix that followed measured 85 FPS against Blink's 133, exactly where it was before.
+
+	The frame probe added afterwards says the frame *is* dominated by this path — 6.27 ms of an
+	11.58 ms frame is the send loop, and the whole gap against Blink lives there — and that the
+	saving here is 1.96 ms of it. Those two do not add up to 0.3 ms of frame, and the probe that
+	settles it has not been run on the pre-phase-7 tree yet (`bench/RESULTS.md`, M4 phase 7).
+
+	So: this comment is a claim about **this function**, measured twice, on two VMs. It is not a
+	framerate claim, and the file that is allowed to make one is `bench/RESULTS.md`.
+
+	The unroll is eight blocks in one closure with an early return at each boundary, rather than
+	eight builders selected by arity. It is the same code either way; this way it is one thing to
+	read and one thing to get right.
+]]
+--[[
+	**A storage as a number, so the write below can be a literal.**
+
+	This is the whole reason the unrolled body reads the way it does, and it took the probe three
+	tries to find it. `buffer.writeu8(out, offset, value)` written out is compiled to a *fastcall*:
+	the VM performs it inline, without building a call frame. The same function reached through a
+	table — held in an upvalue, which is what a schema-driven builder reaches for first — is an
+	ordinary call. `bench/profile.luau` keeps that version as its `dispatched` rung, identical in
+	every other respect, and prices the difference at **1.6x on the whole packet**: more than every
+	other layer of the encode put together, and the reason the first implementation of this returned
+	10% against a probe promising 170%.
+
+	So the call site has to name the function, and the schema has to be a branch. Five branches, in
+	the order the encodings actually occur, and each of them a fastcall.
+
+	That is also the honest answer to why a code generator wins here at all, and it is checkable
+	rather than folklore: Blink's output writes `buffer.writeu8(...)` in as many words
+	(`bench/vendor/blink/Client.luau:187`) and so does Zap's (`bench/vendor/zap/Client.luau:1140`).
+	It is not that they avoid closures — netweave can too, and `fusedStructWriter` does. It is that a
+	generator emits the *name* of the primitive, and until this file did the same, netweave could
+	not (`RESEARCH §3.11-GG`).
+]]
+local STORAGE_CODE: { [string]: number } = {
+	u8 = 1,
+	u16 = 2,
+	u32 = 3,
+	f32 = 4,
+	f64 = 5,
+}
+
+--[[ Beyond this the unroll below stops and the general loop takes over. Eight covers an entity, a
+     transform, a stat block and an inventory row; a forty-field struct is a different shape of
+     problem and pays one call per field as it always did. ]]
+local FUSED_MAX = 8
+
+type Row = {
+	name: string,
+	at: number,
+	min: number,
+	max: number,
+	--[[ The same two bounds as the reader compares against, which for `f32` are not the same
+	     numbers. The writer validates what the game passed, exactly as declared; the reader has to
+	     accept what `buffer.writef32` rounded that to, or a schema refuses its own sender. See
+	     `numberReader`, which carries the measurement. ]]
+	lo: number,
+	hi: number,
+	offset: number,
+	--[[ Quantisation. `scale` is `1/step` on the way out and `unit` is `step` on the way back; both
+	     are 1 for an ordinary number, where neither is read. They are not folded into the arithmetic
+	     above the branch chain — `bench/profile.luau` priced that at **6.7%** on every struct in the
+	     library, control group flat — so the chain carries three more arms instead and a plain field
+	     pays nothing for a feature it does not use. ]]
+	scale: number,
+	unit: number,
+	integral: boolean,
+	storage: string,
+	code: number,
+}
+
+local BLANK: Row = {
+	name = "",
+	at = 0,
+	min = 0,
+	max = 0,
+	lo = 0,
+	hi = 0,
+	offset = 0,
+	scale = 1,
+	unit = 1,
+	integral = false,
+	storage = "u8",
+	code = 1,
+}
+
+--[[ Every field, or nothing. A struct with one string in it is not half fusable — the offsets after
+     that field are not known until it is written — so the test is over the whole struct. ]]
+local function rowsOf(fields: { Field }): ({ Row }?, number)
+	local count = #fields
+
+	if count == 0 or count > FUSED_MAX then
+		return nil, 0
+	end
+
+	local rows: { Row } = sized(count)
+	local at = 0
+
+	for index, field in fields do
+		local node = field.node
+		local size = node.fixedSize
+		local storage = node.storage
+		local code = if storage then STORAGE_CODE[storage] else nil
+
+		--[[ `bits ~= 0` is the flag-carrying case — a boolean, an enum, an optional's presence bit —
+		     and those are written into a scope rather than into bytes, so their position here is not
+		     a byte offset at all.
+
+		     A storage with no code is one the branch chain below cannot name, and the fallback is
+		     the general writer rather than a guess: `Ir.lowerNumber` produces five of the eight, and
+		     a sixth arriving later must be added there deliberately or it keeps today's speed. ]]
+		if node.kind ~= "number" or size == nil or size == 0 or node.bits ~= 0 or code == nil then
+			return nil, 0
+		end
+
+		--[[ A `u53` or `i53` whose range did not narrow is carried in an `f64` and still has to be a
+		     whole number, which is a check the unroll below does not make. Folding it in would be a
+		     test per field on every struct in the library for a shape few have — the same trade the
+		     quantised arms are the answer to, and here the honest answer is the loop writer, which
+		     asks it already. ]]
+		if node.whole and FRACTIONAL[storage :: string] then
+			return nil, 0
+		end
+
+		local min = node.min :: number
+		local max = node.max :: number
+		local step = node.step
+
+		rows[index] = {
+			name = field.name,
+			at = at,
+			min = min,
+			max = max,
+			lo = if storage == "f32" then asF32(min) else min,
+			hi = if storage == "f32" then asF32(max) else max,
+			offset = node.offset :: number,
+			scale = if step then 1 / step else 1,
+			unit = step or 1,
+			integral = node.whole == true,
+			storage = storage :: string,
+			--[[ Quantised codes are the plain ones plus five, so the chain keeps `u8` first and a field
+			     that is not quantised never reaches the three arms that are. ]]
+			code = if step then code + 5 else code,
+		}
+
+		at += size
+	end
+
+	return rows, at
+end
+
+--[[
+	The cold half of every check below, so the hot half is one branch that is almost always false.
+
+	It re-asks the question rather than being told which test failed, because getting here at all
+	means an `error` is about to be raised and the answer is a string built from an interpolation.
+	The messages are `numberWriter`'s, word for word: a schema that refuses a value has to say the
+	same thing whichever writer refused it.
+]]
+local function refuseField(row: Row, value: any): ()
+	if value == nil then
+		error(`[netweave] field "{row.name}" is missing`)
+	end
+
+	if not (value >= row.min and value <= row.max) then
+		error(`[netweave] {value} is outside the declared range {row.min}..{row.max}`)
+	end
+
+	error(`[netweave] {value} is not a whole number, and this field is stored as {row.storage}`)
+end
+
+local function fusedStructWriter(fields: { Field }): Writer?
+	local rows, size = rowsOf(fields)
+
+	if rows == nil then
+		return nil
+	end
+
+	local count = #rows
+
+	local r1, r2 = rows[1], rows[2] or BLANK
+	local r3, r4 = rows[3] or BLANK, rows[4] or BLANK
+	local r5, r6 = rows[5] or BLANK, rows[6] or BLANK
+	local r7, r8 = rows[7] or BLANK, rows[8] or BLANK
+
+	local n1, a1, i1, o1, s1, lo1, hi1 = r1.name, r1.at, r1.integral, r1.offset, r1.code, r1.min, r1.max
+	local k1 = r1.scale
+	local n2, a2, i2, o2, s2, lo2, hi2 = r2.name, r2.at, r2.integral, r2.offset, r2.code, r2.min, r2.max
+	local k2 = r2.scale
+	local n3, a3, i3, o3, s3, lo3, hi3 = r3.name, r3.at, r3.integral, r3.offset, r3.code, r3.min, r3.max
+	local k3 = r3.scale
+	local n4, a4, i4, o4, s4, lo4, hi4 = r4.name, r4.at, r4.integral, r4.offset, r4.code, r4.min, r4.max
+	local k4 = r4.scale
+	local n5, a5, i5, o5, s5, lo5, hi5 = r5.name, r5.at, r5.integral, r5.offset, r5.code, r5.min, r5.max
+	local k5 = r5.scale
+	local n6, a6, i6, o6, s6, lo6, hi6 = r6.name, r6.at, r6.integral, r6.offset, r6.code, r6.min, r6.max
+	local k6 = r6.scale
+	local n7, a7, i7, o7, s7, lo7, hi7 = r7.name, r7.at, r7.integral, r7.offset, r7.code, r7.min, r7.max
+	local k7 = r7.scale
+	local n8, a8, i8, o8, s8, lo8, hi8 = r8.name, r8.at, r8.integral, r8.offset, r8.code, r8.min, r8.max
+	local k8 = r8.scale
+
+	--[[
+		The claim happens before the first check, so a struct that raises half way through has moved
+		the cursor past bytes it never wrote. That is the same contract `Serdes.build` already
+		documents — a write that raises leaves the buffer where it left it and the caller rewinds —
+		and every caller on the send path does exactly that (`Batch.writeBody`, `Serdes.check`).
+	]]
+	return function(value: any, _flags: Flags)
+		local out, at = claim(size)
+
+		local v1 = value[n1]
+
+		if v1 == nil or not (v1 >= lo1 and v1 <= hi1) or (i1 and v1 % 1 ~= 0) then
+			refuseField(r1, v1)
+		end
+
+		local to1 = at + a1
+		local raw1 = v1 - o1
+
+		if s1 == 1 then
+			buffer.writeu8(out, to1, raw1)
+		elseif s1 == 2 then
+			buffer.writeu16(out, to1, raw1)
+		elseif s1 == 3 then
+			buffer.writeu32(out, to1, raw1)
+		elseif s1 == 4 then
+			buffer.writef32(out, to1, raw1)
+		elseif s1 == 5 then
+			buffer.writef64(out, to1, raw1)
+		elseif s1 == 6 then
+			buffer.writeu8(out, to1, raw1 * k1 + 0.5)
+		elseif s1 == 7 then
+			buffer.writeu16(out, to1, raw1 * k1 + 0.5)
+		else
+			buffer.writeu32(out, to1, raw1 * k1 + 0.5)
+		end
+
+		if count < 2 then
+			return
+		end
+
+		local v2 = value[n2]
+
+		if v2 == nil or not (v2 >= lo2 and v2 <= hi2) or (i2 and v2 % 1 ~= 0) then
+			refuseField(r2, v2)
+		end
+
+		local to2 = at + a2
+		local raw2 = v2 - o2
+
+		if s2 == 1 then
+			buffer.writeu8(out, to2, raw2)
+		elseif s2 == 2 then
+			buffer.writeu16(out, to2, raw2)
+		elseif s2 == 3 then
+			buffer.writeu32(out, to2, raw2)
+		elseif s2 == 4 then
+			buffer.writef32(out, to2, raw2)
+		elseif s2 == 5 then
+			buffer.writef64(out, to2, raw2)
+		elseif s2 == 6 then
+			buffer.writeu8(out, to2, raw2 * k2 + 0.5)
+		elseif s2 == 7 then
+			buffer.writeu16(out, to2, raw2 * k2 + 0.5)
+		else
+			buffer.writeu32(out, to2, raw2 * k2 + 0.5)
+		end
+
+		if count < 3 then
+			return
+		end
+
+		local v3 = value[n3]
+
+		if v3 == nil or not (v3 >= lo3 and v3 <= hi3) or (i3 and v3 % 1 ~= 0) then
+			refuseField(r3, v3)
+		end
+
+		local to3 = at + a3
+		local raw3 = v3 - o3
+
+		if s3 == 1 then
+			buffer.writeu8(out, to3, raw3)
+		elseif s3 == 2 then
+			buffer.writeu16(out, to3, raw3)
+		elseif s3 == 3 then
+			buffer.writeu32(out, to3, raw3)
+		elseif s3 == 4 then
+			buffer.writef32(out, to3, raw3)
+		elseif s3 == 5 then
+			buffer.writef64(out, to3, raw3)
+		elseif s3 == 6 then
+			buffer.writeu8(out, to3, raw3 * k3 + 0.5)
+		elseif s3 == 7 then
+			buffer.writeu16(out, to3, raw3 * k3 + 0.5)
+		else
+			buffer.writeu32(out, to3, raw3 * k3 + 0.5)
+		end
+
+		if count < 4 then
+			return
+		end
+
+		local v4 = value[n4]
+
+		if v4 == nil or not (v4 >= lo4 and v4 <= hi4) or (i4 and v4 % 1 ~= 0) then
+			refuseField(r4, v4)
+		end
+
+		local to4 = at + a4
+		local raw4 = v4 - o4
+
+		if s4 == 1 then
+			buffer.writeu8(out, to4, raw4)
+		elseif s4 == 2 then
+			buffer.writeu16(out, to4, raw4)
+		elseif s4 == 3 then
+			buffer.writeu32(out, to4, raw4)
+		elseif s4 == 4 then
+			buffer.writef32(out, to4, raw4)
+		elseif s4 == 5 then
+			buffer.writef64(out, to4, raw4)
+		elseif s4 == 6 then
+			buffer.writeu8(out, to4, raw4 * k4 + 0.5)
+		elseif s4 == 7 then
+			buffer.writeu16(out, to4, raw4 * k4 + 0.5)
+		else
+			buffer.writeu32(out, to4, raw4 * k4 + 0.5)
+		end
+
+		if count < 5 then
+			return
+		end
+
+		local v5 = value[n5]
+
+		if v5 == nil or not (v5 >= lo5 and v5 <= hi5) or (i5 and v5 % 1 ~= 0) then
+			refuseField(r5, v5)
+		end
+
+		local to5 = at + a5
+		local raw5 = v5 - o5
+
+		if s5 == 1 then
+			buffer.writeu8(out, to5, raw5)
+		elseif s5 == 2 then
+			buffer.writeu16(out, to5, raw5)
+		elseif s5 == 3 then
+			buffer.writeu32(out, to5, raw5)
+		elseif s5 == 4 then
+			buffer.writef32(out, to5, raw5)
+		elseif s5 == 5 then
+			buffer.writef64(out, to5, raw5)
+		elseif s5 == 6 then
+			buffer.writeu8(out, to5, raw5 * k5 + 0.5)
+		elseif s5 == 7 then
+			buffer.writeu16(out, to5, raw5 * k5 + 0.5)
+		else
+			buffer.writeu32(out, to5, raw5 * k5 + 0.5)
+		end
+
+		if count < 6 then
+			return
+		end
+
+		local v6 = value[n6]
+
+		if v6 == nil or not (v6 >= lo6 and v6 <= hi6) or (i6 and v6 % 1 ~= 0) then
+			refuseField(r6, v6)
+		end
+
+		local to6 = at + a6
+		local raw6 = v6 - o6
+
+		if s6 == 1 then
+			buffer.writeu8(out, to6, raw6)
+		elseif s6 == 2 then
+			buffer.writeu16(out, to6, raw6)
+		elseif s6 == 3 then
+			buffer.writeu32(out, to6, raw6)
+		elseif s6 == 4 then
+			buffer.writef32(out, to6, raw6)
+		elseif s6 == 5 then
+			buffer.writef64(out, to6, raw6)
+		elseif s6 == 6 then
+			buffer.writeu8(out, to6, raw6 * k6 + 0.5)
+		elseif s6 == 7 then
+			buffer.writeu16(out, to6, raw6 * k6 + 0.5)
+		else
+			buffer.writeu32(out, to6, raw6 * k6 + 0.5)
+		end
+
+		if count < 7 then
+			return
+		end
+
+		local v7 = value[n7]
+
+		if v7 == nil or not (v7 >= lo7 and v7 <= hi7) or (i7 and v7 % 1 ~= 0) then
+			refuseField(r7, v7)
+		end
+
+		local to7 = at + a7
+		local raw7 = v7 - o7
+
+		if s7 == 1 then
+			buffer.writeu8(out, to7, raw7)
+		elseif s7 == 2 then
+			buffer.writeu16(out, to7, raw7)
+		elseif s7 == 3 then
+			buffer.writeu32(out, to7, raw7)
+		elseif s7 == 4 then
+			buffer.writef32(out, to7, raw7)
+		elseif s7 == 5 then
+			buffer.writef64(out, to7, raw7)
+		elseif s7 == 6 then
+			buffer.writeu8(out, to7, raw7 * k7 + 0.5)
+		elseif s7 == 7 then
+			buffer.writeu16(out, to7, raw7 * k7 + 0.5)
+		else
+			buffer.writeu32(out, to7, raw7 * k7 + 0.5)
+		end
+
+		if count < 8 then
+			return
+		end
+
+		local v8 = value[n8]
+
+		if v8 == nil or not (v8 >= lo8 and v8 <= hi8) or (i8 and v8 % 1 ~= 0) then
+			refuseField(r8, v8)
+		end
+
+		local to8 = at + a8
+		local raw8 = v8 - o8
+
+		if s8 == 1 then
+			buffer.writeu8(out, to8, raw8)
+		elseif s8 == 2 then
+			buffer.writeu16(out, to8, raw8)
+		elseif s8 == 3 then
+			buffer.writeu32(out, to8, raw8)
+		elseif s8 == 4 then
+			buffer.writef32(out, to8, raw8)
+		elseif s8 == 5 then
+			buffer.writef64(out, to8, raw8)
+		elseif s8 == 6 then
+			buffer.writeu8(out, to8, raw8 * k8 + 0.5)
+		elseif s8 == 7 then
+			buffer.writeu16(out, to8, raw8 * k8 + 0.5)
+		else
+			buffer.writeu32(out, to8, raw8 * k8 + 0.5)
+		end
+	end
+end
+
+--[[
+	A tag, then whichever branch it names.
+
+	The tag half is `enumWriter`'s, bit for bit, because that is what it is — the difference is only
+	that a union's index also selects a writer. The bits go into the *enclosing* scope, and so do the
+	chosen branch's, forked so that branch A's first flag and branch B's first flag are the same bit
+	(`Ir.assignBits`). Nothing here has to know that: `flags` is the same accumulator either way.
+
+	A single-branch union carries no tag at all — the index is known — which is why `tagChunks` may
+	be absent rather than empty.
+]]
+local function unionWriter(node: Node): Writer
+	local lookup = node.lookup :: { [string]: number }
+	local branches = node.branches :: { Field }
+
+	local writers: { Writer } = sized(#branches)
+
+	for index, branch in branches do
+		writers[index] = buildWriter(branch.node)
+	end
+
+	local chunks = node.tagChunks
+	local masks = node.tagMasks
+	local bits = if chunks then #chunks else 0
+
+	return function(value: any, flags: Flags)
+		if type(value) ~= "table" then
+			error(
+				`[netweave] a union field was given {typeof(value)}, and it takes a tag and a value: `
+					.. `\{ tag = "move", value = ... \}`
+			)
+		end
+
+		local index = lookup[value.tag]
+
+		if index == nil then
+			error(`[netweave] "{tostring(value.tag)}" is not a branch of this union`)
+		end
+
+		if bits > 0 then
+			local tag = index - 1
+			local positions = chunks :: { number }
+			local bitmasks = masks :: { number }
+
+			for bit = 1, bits do
+				if band(rshift(tag, bit - 1), 1) == 1 then
+					local chunk = positions[bit]
+					flags[chunk] = bor(flags[chunk], bitmasks[bit])
+				end
+			end
+		end
+
+		writers[index](value.value, flags)
+	end
+end
+
 local function structWriter(node: Node): Writer
 	local fields = node.fields :: { Field }
 	local count = #fields
+
+	local fused = fusedStructWriter(fields)
+
+	if fused then
+		return fused
+	end
 
 	local names: { string } = sized(count)
 	local writers: { Writer } = sized(count)
@@ -442,6 +1029,16 @@ local function arrayWriter(node: Node): Writer
 	local exact = node.count
 	local elements = node.elements
 
+	--[[
+		An exact array of optionals is never measured. `#` on a table with nils is a border the VM
+		chooses, so `{1, 2, 3, nil}` on a length of four was refused as "got 3" while
+		`{1, nil, nil, 4}` was accepted — the same shape, decided by how the table was built (M4-1).
+		Every position is written, and a missing one is what the element's flag is for. A
+		non-optional element keeps the count check, because there `#` is exact and the message
+		names the length rather than a nil three fields in.
+	]]
+	local sparse = (node.element :: Node).kind == "optional"
+
 	if elements then
 		--[[ An exact length whose element carries flags was unrolled: one node per position, each
 		     owning its own bit slots, so the writers are not interchangeable. ]]
@@ -453,7 +1050,9 @@ local function arrayWriter(node: Node): Writer
 		end
 
 		return function(value: any, flags: Flags)
-			writeLength(#value, "array")
+			if not sparse then
+				writeLength(#value, "array")
+			end
 
 			for index = 1, count do
 				writers[index](value[index], flags)
@@ -465,7 +1064,9 @@ local function arrayWriter(node: Node): Writer
 
 	if exact then
 		return function(value: any, flags: Flags)
-			writeLength(#value, "array")
+			if not sparse then
+				writeLength(#value, "array")
+			end
 
 			for index = 1, exact do
 				writeElement(value[index], flags)
@@ -537,6 +1138,36 @@ function buildWriter(node: Node): Writer
 		local writeLength = lengthWriter(node)
 		local bytes: (value: string, length: number) -> () = if blocked then putString else writeString
 
+		--[[
+			A string that says what it may contain gets a second closure. Built at declaration and
+			only when something was declared, so a plain `t.string` is exactly what it was — the same
+			trade `numberWriter` makes for an offset of zero.
+
+			The pattern is anchored here rather than stored anchored, so the descriptor and the
+			protocol signature carry what the author wrote.
+		]]
+		local anchored = if node.pattern then `^{node.pattern}$` else nil
+		local unicode = node.utf8
+
+		if anchored or unicode then
+			return function(value: any, _flags: Flags)
+				local length = #value
+
+				if unicode and utf8.len(value) == nil then
+					error(`[netweave] this string is not valid UTF-8, and the schema says it must be`)
+				end
+
+				if anchored and not string.find(value, anchored :: string) then
+					error(
+						`[netweave] "{value}" does not match the pattern {node.pattern} the schema declares`
+					)
+				end
+
+				writeLength(length, "string")
+				bytes(value, length)
+			end
+		end
+
 		return function(value: any, _flags: Flags)
 			local length = #value
 			writeLength(length, "string")
@@ -552,6 +1183,20 @@ function buildWriter(node: Node): Writer
 			bytes(value, length)
 		end
 	elseif kind == "vector2" then
+		--[[ A named component is a number node like any other, so its writer already carries the
+		     range check, the offset and the quantisation. Bare stays the two named `f32` calls it
+		     was, because that is the common case and a component writer is a call per axis. ]]
+		local component = node.element
+
+		if component then
+			local axis = buildWriter(component)
+
+			return function(value: any, flags: Flags)
+				axis(value.X, flags)
+				axis(value.Y, flags)
+			end
+		end
+
 		local f32: (value: number) -> () = if blocked then putF32 else writeF32
 
 		return function(value: any, _flags: Flags)
@@ -559,6 +1204,18 @@ function buildWriter(node: Node): Writer
 			f32(value.Y)
 		end
 	elseif kind == "vector3" then
+		local component = node.element
+
+		if component then
+			local axis = buildWriter(component)
+
+			return function(value: any, flags: Flags)
+				axis(value.X, flags)
+				axis(value.Y, flags)
+				axis(value.Z, flags)
+			end
+		end
+
 		local f32: (value: number) -> () = if blocked then putF32 else writeF32
 
 		return function(value: any, _flags: Flags)
@@ -591,6 +1248,9 @@ function buildWriter(node: Node): Writer
 			f32(axis.Z * angle)
 		end
 	elseif kind == "instance" then
+		local class = node.class
+		local root = node.descendantOf
+
 		return function(value: any, _flags: Flags)
 			if value == nil then
 				error("[netweave] a non-optional instance field is nil")
@@ -601,6 +1261,18 @@ function buildWriter(node: Node): Writer
 			     shape on the way in; this is the send side of that check. ]]
 			if not isInstance(value) then
 				error(`[netweave] an instance field was given {typeof(value)}`)
+			end
+
+			--[[ The class and the container, on the way out as well as in. The reader has always
+			     asked both; the writer asked only "is it an Instance", so `nw.validate` branded a
+			     `BasePart` as conforming to `t.instance("Sound")` and DESIGN-API's "exactly as strict
+			     as the encoder" was true and useless (M4 report, finding 23; M4-1). ]]
+			if class and not value:IsA(class) then
+				error(`[netweave] an instance field declared {class} was given a {value.ClassName}`)
+			end
+
+			if root and not value:IsDescendantOf(root) then
+				error(`[netweave] an instance field declared inside {root.Name} was given one outside it`)
 			end
 
 			writeInstance(value)
@@ -626,6 +1298,8 @@ function buildWriter(node: Node): Writer
 		return mapWriter(node)
 	elseif kind == "struct" then
 		return structWriter(node)
+	elseif kind == "union" then
+		return unionWriter(node)
 	end
 
 	error(`[netweave] no writer for a "{kind}"`)
@@ -641,8 +1315,71 @@ local function numberReader(node: Node): Reader
 	local min = node.min :: number
 	local max = node.max :: number
 	local storage = node.storage
+	local step = node.step
+
+	--[[ Quantised, so the count of steps comes back multiplied. `max` is the reconstructed top
+	     (`Ir.lowerNumber`), which is exactly what the top level produces — so this refuses a count
+	     past the last level the schema declared and nothing that is inside it. ]]
+	if step then
+		return function(_flags: Flags): any
+			local value = read() * step + offset
+
+			if value > max then
+				reject("number out of range")
+				return min
+			end
+
+			return value
+		end
+	end
 
 	if storage == "f32" or storage == "f64" then
+		--[[
+			**The bound the reader compares against is the one the encoding can hold.**
+
+			The writer validates the value the game passed, as a double, against the bounds the game
+			declared — that is the author's contract and it stays exact. Then `buffer.writef32`
+			rounds, and if the bound itself is not an f32 value the rounding can land *outside* it:
+			f32(pi) is 3.14159274 against pi's 3.14159265, so `t.f32(-pi, pi)` refused pi at
+			`parse`, against its own sender, on a value the writer had just accepted.
+
+			It is not an edge: 2,054 of 4,000 random f32 ranges refused their own bounds when sent
+			back, and the clamped value a game sends — `math.clamp(yaw, -math.pi, math.pi)` — is
+			exactly the one that lands there. The worked example's `t.f32(-90, 90)` survived only
+			because 90 happens to be dyadic.
+
+			Rounding to nearest is monotone, so comparing against `f32(min)` and `f32(max)` accepts
+			everything the writer accepted and nothing wider than one ulp beyond the declaration.
+			`f64` is exact for a double and is left alone.
+		]]
+		if storage == "f32" then
+			min = asF32(min)
+			max = asF32(max)
+		end
+
+		--[[
+			**A `u53` is checked for wholeness on the way in as well as on the way out**, which is the
+			gap it was added to close: the widest integer was `u32`, so a `UserId` had to be declared
+			`t.f64` — a float, whose fractional-ness only the *writer* refused. A peer sending 1.5 on
+			a field a game reads as an id got 1.5 delivered, and `Instance` lookups, table keys and
+			datastore writes all behave differently for it.
+
+			Only on this branch, because a narrowed `u53` lands on an unsigned storage where the value
+			is an integer by construction.
+		]]
+		if node.whole then
+			return function(_flags: Flags): any
+				local value = read()
+
+				if not (value >= min and value <= max) or value % 1 ~= 0 then
+					reject("number out of range")
+					return min
+				end
+
+				return value
+			end
+		end
+
 		return function(_flags: Flags): any
 			local value = read()
 
@@ -708,10 +1445,405 @@ local function enumReader(node: Node): Reader
 	end
 end
 
+--[[
+	`fusedStructWriter`'s mirror, and the half of M2's block optimisation that never happened.
+
+	`Buffer.span` bounds the whole struct once, against a size the layout pass already knew, and the
+	fields are then read with `buffer.readu8` **named** — so the general reader's three costs per
+	value all go at once: the closure call, the `READ_NUMBER` lookup behind it, and the per-primitive
+	bounds check that asked the same question the span already answered.
+
+	Measured by `bench/decode.luau` on the tree before this existed, 100 entities of six `u8` fields:
+	the real reader 32,731 ns a packet against 8,100 for the same read written out with the range
+	guard kept — **4.0x** — where the encode of the same payload was already fused. Decode is what a
+	server pays per client per packet for a whole session, and it had never been taken apart.
+
+	The branch chain is not a matter of taste here either. `dispatched` in that file is this shape
+	with the primitive fetched from a table instead of named, and it costs **2.6x** — worse than the
+	1.6x the same substitution costs on the write side (`RESEARCH §3.11-GG`).
+
+	Two things differ from the writer, and both come from G4 — wire data never reaches `error()`:
+
+	  * a run that does not fit returns a struct of declared minimums rather than nil, and the packet
+	    is refused. **Not nil**, because a fused struct nested in a larger payload handing one up
+	    would drop its key, and the next field access on it raises — which is precisely what G4
+	    forbids. The contents are never seen either way: `Serdes.build`'s reader drops the value the
+	    moment a rejection exists, and `Buffer.reject` keeps the first reason, so what a peer is told
+	    is unchanged.
+	  * the range check compares against `lo`/`hi` rather than `min`/`max`, which for `f32` are the
+	    bounds the *encoding* can hold. `numberReader` carries the measurement that forced that.
+]]
+local function fusedStructReader(node: Node): Reader?
+	local rows, size = rowsOf(node.fields :: { Field })
+
+	if rows == nil then
+		return nil
+	end
+
+	local template = node.template :: { [string]: boolean }
+	local count = #rows
+
+	--[[ What a truncated run comes back as, built once at declaration rather than per packet. Every
+	     field at the minimum its schema declared, which is what the per-value reader returned for a
+	     value it had to refuse. ]]
+	local blank: { [string]: any } = table.clone(template) :: any
+
+	for _, row in rows do
+		blank[row.name] = row.lo
+	end
+
+	local r1, r2 = rows[1], rows[2] or BLANK
+	local r3, r4 = rows[3] or BLANK, rows[4] or BLANK
+	local r5, r6 = rows[5] or BLANK, rows[6] or BLANK
+	local r7, r8 = rows[7] or BLANK, rows[8] or BLANK
+
+	local n1, a1, o1, s1, lo1, hi1, u1 = r1.name, r1.at, r1.offset, r1.code, r1.lo, r1.hi, r1.unit
+	local n2, a2, o2, s2, lo2, hi2, u2 = r2.name, r2.at, r2.offset, r2.code, r2.lo, r2.hi, r2.unit
+	local n3, a3, o3, s3, lo3, hi3, u3 = r3.name, r3.at, r3.offset, r3.code, r3.lo, r3.hi, r3.unit
+	local n4, a4, o4, s4, lo4, hi4, u4 = r4.name, r4.at, r4.offset, r4.code, r4.lo, r4.hi, r4.unit
+	local n5, a5, o5, s5, lo5, hi5, u5 = r5.name, r5.at, r5.offset, r5.code, r5.lo, r5.hi, r5.unit
+	local n6, a6, o6, s6, lo6, hi6, u6 = r6.name, r6.at, r6.offset, r6.code, r6.lo, r6.hi, r6.unit
+	local n7, a7, o7, s7, lo7, hi7, u7 = r7.name, r7.at, r7.offset, r7.code, r7.lo, r7.hi, r7.unit
+	local n8, a8, o8, s8, lo8, hi8, u8 = r8.name, r8.at, r8.offset, r8.code, r8.lo, r8.hi, r8.unit
+
+	return function(_flags: Flags): any
+		local src, at = span(size)
+
+		if src == nil then
+			return table.clone(blank)
+		end
+
+		local result: any = table.clone(template)
+
+		local at1 = at + a1
+		local v1: number
+
+		if s1 == 1 then
+			v1 = buffer.readu8(src, at1) + o1
+		elseif s1 == 2 then
+			v1 = buffer.readu16(src, at1) + o1
+		elseif s1 == 3 then
+			v1 = buffer.readu32(src, at1) + o1
+		elseif s1 == 4 then
+			v1 = buffer.readf32(src, at1) + o1
+		elseif s1 == 5 then
+			v1 = buffer.readf64(src, at1) + o1
+		elseif s1 == 6 then
+			v1 = buffer.readu8(src, at1) * u1 + o1
+		elseif s1 == 7 then
+			v1 = buffer.readu16(src, at1) * u1 + o1
+		else
+			v1 = buffer.readu32(src, at1) * u1 + o1
+		end
+
+		if not (v1 >= lo1 and v1 <= hi1) then
+			reject("number out of range")
+			v1 = lo1
+		end
+
+		result[n1] = v1
+
+		if count < 2 then
+			return result
+		end
+
+		local at2 = at + a2
+		local v2: number
+
+		if s2 == 1 then
+			v2 = buffer.readu8(src, at2) + o2
+		elseif s2 == 2 then
+			v2 = buffer.readu16(src, at2) + o2
+		elseif s2 == 3 then
+			v2 = buffer.readu32(src, at2) + o2
+		elseif s2 == 4 then
+			v2 = buffer.readf32(src, at2) + o2
+		elseif s2 == 5 then
+			v2 = buffer.readf64(src, at2) + o2
+		elseif s2 == 6 then
+			v2 = buffer.readu8(src, at2) * u2 + o2
+		elseif s2 == 7 then
+			v2 = buffer.readu16(src, at2) * u2 + o2
+		else
+			v2 = buffer.readu32(src, at2) * u2 + o2
+		end
+
+		if not (v2 >= lo2 and v2 <= hi2) then
+			reject("number out of range")
+			v2 = lo2
+		end
+
+		result[n2] = v2
+
+		if count < 3 then
+			return result
+		end
+
+		local at3 = at + a3
+		local v3: number
+
+		if s3 == 1 then
+			v3 = buffer.readu8(src, at3) + o3
+		elseif s3 == 2 then
+			v3 = buffer.readu16(src, at3) + o3
+		elseif s3 == 3 then
+			v3 = buffer.readu32(src, at3) + o3
+		elseif s3 == 4 then
+			v3 = buffer.readf32(src, at3) + o3
+		elseif s3 == 5 then
+			v3 = buffer.readf64(src, at3) + o3
+		elseif s3 == 6 then
+			v3 = buffer.readu8(src, at3) * u3 + o3
+		elseif s3 == 7 then
+			v3 = buffer.readu16(src, at3) * u3 + o3
+		else
+			v3 = buffer.readu32(src, at3) * u3 + o3
+		end
+
+		if not (v3 >= lo3 and v3 <= hi3) then
+			reject("number out of range")
+			v3 = lo3
+		end
+
+		result[n3] = v3
+
+		if count < 4 then
+			return result
+		end
+
+		local at4 = at + a4
+		local v4: number
+
+		if s4 == 1 then
+			v4 = buffer.readu8(src, at4) + o4
+		elseif s4 == 2 then
+			v4 = buffer.readu16(src, at4) + o4
+		elseif s4 == 3 then
+			v4 = buffer.readu32(src, at4) + o4
+		elseif s4 == 4 then
+			v4 = buffer.readf32(src, at4) + o4
+		elseif s4 == 5 then
+			v4 = buffer.readf64(src, at4) + o4
+		elseif s4 == 6 then
+			v4 = buffer.readu8(src, at4) * u4 + o4
+		elseif s4 == 7 then
+			v4 = buffer.readu16(src, at4) * u4 + o4
+		else
+			v4 = buffer.readu32(src, at4) * u4 + o4
+		end
+
+		if not (v4 >= lo4 and v4 <= hi4) then
+			reject("number out of range")
+			v4 = lo4
+		end
+
+		result[n4] = v4
+
+		if count < 5 then
+			return result
+		end
+
+		local at5 = at + a5
+		local v5: number
+
+		if s5 == 1 then
+			v5 = buffer.readu8(src, at5) + o5
+		elseif s5 == 2 then
+			v5 = buffer.readu16(src, at5) + o5
+		elseif s5 == 3 then
+			v5 = buffer.readu32(src, at5) + o5
+		elseif s5 == 4 then
+			v5 = buffer.readf32(src, at5) + o5
+		elseif s5 == 5 then
+			v5 = buffer.readf64(src, at5) + o5
+		elseif s5 == 6 then
+			v5 = buffer.readu8(src, at5) * u5 + o5
+		elseif s5 == 7 then
+			v5 = buffer.readu16(src, at5) * u5 + o5
+		else
+			v5 = buffer.readu32(src, at5) * u5 + o5
+		end
+
+		if not (v5 >= lo5 and v5 <= hi5) then
+			reject("number out of range")
+			v5 = lo5
+		end
+
+		result[n5] = v5
+
+		if count < 6 then
+			return result
+		end
+
+		local at6 = at + a6
+		local v6: number
+
+		if s6 == 1 then
+			v6 = buffer.readu8(src, at6) + o6
+		elseif s6 == 2 then
+			v6 = buffer.readu16(src, at6) + o6
+		elseif s6 == 3 then
+			v6 = buffer.readu32(src, at6) + o6
+		elseif s6 == 4 then
+			v6 = buffer.readf32(src, at6) + o6
+		elseif s6 == 5 then
+			v6 = buffer.readf64(src, at6) + o6
+		elseif s6 == 6 then
+			v6 = buffer.readu8(src, at6) * u6 + o6
+		elseif s6 == 7 then
+			v6 = buffer.readu16(src, at6) * u6 + o6
+		else
+			v6 = buffer.readu32(src, at6) * u6 + o6
+		end
+
+		if not (v6 >= lo6 and v6 <= hi6) then
+			reject("number out of range")
+			v6 = lo6
+		end
+
+		result[n6] = v6
+
+		if count < 7 then
+			return result
+		end
+
+		local at7 = at + a7
+		local v7: number
+
+		if s7 == 1 then
+			v7 = buffer.readu8(src, at7) + o7
+		elseif s7 == 2 then
+			v7 = buffer.readu16(src, at7) + o7
+		elseif s7 == 3 then
+			v7 = buffer.readu32(src, at7) + o7
+		elseif s7 == 4 then
+			v7 = buffer.readf32(src, at7) + o7
+		elseif s7 == 5 then
+			v7 = buffer.readf64(src, at7) + o7
+		elseif s7 == 6 then
+			v7 = buffer.readu8(src, at7) * u7 + o7
+		elseif s7 == 7 then
+			v7 = buffer.readu16(src, at7) * u7 + o7
+		else
+			v7 = buffer.readu32(src, at7) * u7 + o7
+		end
+
+		if not (v7 >= lo7 and v7 <= hi7) then
+			reject("number out of range")
+			v7 = lo7
+		end
+
+		result[n7] = v7
+
+		if count < 8 then
+			return result
+		end
+
+		local at8 = at + a8
+		local v8: number
+
+		if s8 == 1 then
+			v8 = buffer.readu8(src, at8) + o8
+		elseif s8 == 2 then
+			v8 = buffer.readu16(src, at8) + o8
+		elseif s8 == 3 then
+			v8 = buffer.readu32(src, at8) + o8
+		elseif s8 == 4 then
+			v8 = buffer.readf32(src, at8) + o8
+		elseif s8 == 5 then
+			v8 = buffer.readf64(src, at8) + o8
+		elseif s8 == 6 then
+			v8 = buffer.readu8(src, at8) * u8 + o8
+		elseif s8 == 7 then
+			v8 = buffer.readu16(src, at8) * u8 + o8
+		else
+			v8 = buffer.readu32(src, at8) * u8 + o8
+		end
+
+		if not (v8 >= lo8 and v8 <= hi8) then
+			reject("number out of range")
+			v8 = lo8
+		end
+
+		result[n8] = v8
+
+		return result
+	end
+end
+
+--[[
+	`unionWriter`'s mirror, with the one asymmetry every reader in this file has: the tag is a number
+	a peer chose, and a tag naming no branch has to be refused rather than raised (G4).
+
+	The tag has room the schema does not use whenever the branch count is not a power of two — three
+	branches are two bits, and a peer can put 3 in them — which is `enumReader`'s case exactly.
+
+	What comes back on that path is a shared frozen table rather than nil, for the reason
+	`fusedStructReader` returns a struct of minimums: a union nested in a larger payload handing up
+	nil would drop its key, and the next `.tag` read on it raises. It is never seen — the rejection
+	makes `Serdes.build`'s reader drop the whole value — and it reads no bytes, because there is no
+	branch to read them with.
+]]
+local function unionReader(node: Node): Reader
+	local variants = node.variants :: { string }
+	local branches = node.branches :: { Field }
+
+	local readers: { Reader } = sized(#branches)
+
+	for index, branch in branches do
+		readers[index] = buildReader(branch.node)
+	end
+
+	local chunks = node.tagChunks
+	local masks = node.tagMasks
+	local bits = if chunks then #chunks else 0
+
+	local refused = table.freeze({ tag = variants[1] })
+
+	if bits == 0 then
+		--[[ One branch carries no tag, so there is nothing a peer can say about which it is. ]]
+		local only = readers[1]
+		local name = variants[1]
+
+		return function(flags: Flags): any
+			return { tag = name, value = only(flags) }
+		end
+	end
+
+	local positions = chunks :: { number }
+	local bitmasks = masks :: { number }
+
+	return function(flags: Flags): any
+		local tag = 0
+
+		for bit = 1, bits do
+			if band(flags[positions[bit]], bitmasks[bit]) ~= 0 then
+				tag = bor(tag, bit32.lshift(1, bit - 1))
+			end
+		end
+
+		local index = tag + 1
+		local name = variants[index]
+
+		if name == nil then
+			reject("unknown union branch")
+			return refused
+		end
+
+		return { tag = name, value = readers[index](flags) }
+	end
+end
+
 local function structReader(node: Node): Reader
 	local fields = node.fields :: { Field }
 	local count = #fields
 	local template = node.template :: { [string]: boolean }
+
+	local fused = fusedStructReader(node)
+
+	if fused then
+		return fused
+	end
 
 	local names: { string } = sized(count)
 	local readers: { Reader } = sized(count)
@@ -723,7 +1855,7 @@ local function structReader(node: Node): Reader
 
 	return function(flags: Flags): any
 		--[[ Cloning a pre-sized template is why decode never rehashes. ByteNet does the same and
-		     it is the one axis where it beat both code generators in M0 (`RESEARCH §3.7-M`). An
+		     it is the one axis where it beat both code generators in M0 (`RESEARCH §3.8-S`; the 389 B figure is `RESEARCH-AND-PLAN.md:1237`). An
 		     absent optional assigns nil, which drops the key without resizing. ]]
 		local result = table.clone(template) :: any
 
@@ -855,6 +1987,26 @@ local function mapReader(node: Node): Reader
 			local entryKey = readKey(flags)
 			local entryValue = readValue(flags)
 
+			--[[
+				**A nil key is a rejection, not an assignment.**
+
+				`t.map(t.optional(K), V)` type-checks, lowers, and encodes honestly — a Lua table has
+				no nil key, so the presence bit the optional adds is dead weight that only a hostile
+				packet can clear. When it does, `readKey` answers nil with no rejection of its own and
+				`result[nil] = value` **raises**: the one path in this codec where wire data reaches a
+				Luau error rather than `Buffer.reject`, against everything the header of this file
+				says (M4 report, finding 3).
+
+				`t.map` refuses that key type now, so the honest route to here is closed. This stays
+				because `isType` is a duck check — any table with a string `kind` passes it — and
+				because G4 is structural: the reader is not allowed to depend on the constructor
+				having been used.
+			]]
+			if entryKey == nil then
+				reject("a map key is missing")
+				return result
+			end
+
 			--[[ A rejected key is a default, and defaults collide: writing them would fabricate an
 			     entry the sender never sent. ]]
 			if not rejected() then
@@ -881,6 +2033,37 @@ function buildReader(node: Node): Reader
 	elseif kind == "string" then
 		local readLength = lengthReader(node)
 
+		--[[ The half the finding is actually about: a *peer's* string is the one that reaches
+		     `SetAsync`, `Instance.Name` and chat, and invalid UTF-8 or a control character surfaces
+		     there as an error in game code with no packet to point at. Refused rather than raised —
+		     it is wire data (G4). ]]
+		local anchored = if node.pattern then `^{node.pattern}$` else nil
+		local unicode = node.utf8
+
+		if anchored or unicode then
+			return function(_flags: Flags): any
+				local length = readLength()
+
+				if length < 0 then
+					return ""
+				end
+
+				local value = readString(length)
+
+				if unicode and utf8.len(value) == nil then
+					reject("string is not valid UTF-8")
+					return ""
+				end
+
+				if anchored and not string.find(value, anchored :: string) then
+					reject("string does not match the declared pattern")
+					return ""
+				end
+
+				return value
+			end
+		end
+
 		return function(_flags: Flags): any
 			local length = readLength()
 
@@ -903,6 +2086,25 @@ function buildReader(node: Node): Reader
 			return readBuffer(length)
 		end
 	elseif kind == "vector2" then
+		local component = node.element
+
+		if component then
+			local axis = buildReader(component)
+
+			return function(flags: Flags): any
+				local x, y = axis(flags), axis(flags)
+
+				--[[ Still asked, because a component the schema narrowed cannot be non-finite but a
+				     bare `f32` one named through `t.vector2(t.f32)` can. One branch either way. ]]
+				if not (isFinite(x) and isFinite(y)) then
+					reject("non-finite vector2")
+					return Vector2.zero
+				end
+
+				return Vector2.new(x, y)
+			end
+		end
+
 		return function(_flags: Flags): any
 			local x, y = readF32(), readF32()
 
@@ -915,6 +2117,41 @@ function buildReader(node: Node): Reader
 		end
 	elseif kind == "vector3" then
 		local unit = node.unit
+		local component = node.element
+
+		--[[
+			**A quantised direction does not land on the unit sphere**, so the length check widens by
+			what the step can move it: each axis is off by at most half a step, and three of those
+			compose to `sqrt(3)` half-steps in the worst case.
+
+			Derived rather than guessed, and zero for every encoding that is not quantised — so a
+			bare `t.unitVector3` keeps exactly the tolerance it had. Without it, the compact spelling
+			the docstring recommends would be refused by its own reader on most values.
+		]]
+		local slack = UNIT_TOLERANCE
+			+ if component and component.step then math.sqrt(3) * (component.step :: number) / 2 else 0
+
+		if component then
+			local axis = buildReader(component)
+
+			return function(flags: Flags): any
+				local x, y, z = axis(flags), axis(flags), axis(flags)
+
+				if not (isFinite(x) and isFinite(y) and isFinite(z)) then
+					reject("non-finite vector3")
+					return Vector3.zero
+				end
+
+				local value = Vector3.new(x, y, z)
+
+				if unit and math.abs(value.Magnitude - 1) > slack then
+					reject("vector3 is not a unit vector")
+					return Vector3.zAxis
+				end
+
+				return value
+			end
+		end
 
 		return function(_flags: Flags): any
 			local x, y, z = readF32(), readF32(), readF32()
@@ -972,6 +2209,7 @@ function buildReader(node: Node): Reader
 		end
 	elseif kind == "instance" then
 		local class = node.class
+		local root = node.descendantOf
 
 		return function(_flags: Flags): any
 			local value = readInstance()
@@ -1006,6 +2244,22 @@ function buildReader(node: Node): Reader
 				return nil
 			end
 
+			--[[
+				And where it is. A class says *what* a client handed over; it says nothing about
+				where the client got it, and the sidecar admits anything the sender can reference —
+				a `BasePart` out of its own `PlayerGui`, a `Model` in `ReplicatedStorage` a script
+				parented there a frame ago (M4 report).
+
+				Not in the protocol hash, and that is deliberate: this is enforcement one endpoint
+				does over its own tree, like a rate limit. Two peers naming their own `workspace`
+				mean the same thing and hold different objects, and a hash that moved for it would
+				force a client redeploy for a server-side edit.
+			]]
+			if root and not value:IsDescendantOf(root) then
+				reject("instance is not inside " .. root.Name)
+				return nil
+			end
+
 			return value
 		end
 	elseif kind == "enum" then
@@ -1028,6 +2282,8 @@ function buildReader(node: Node): Reader
 		return mapReader(node)
 	elseif kind == "struct" then
 		return structReader(node)
+	elseif kind == "union" then
+		return unionReader(node)
 	end
 
 	error(`[netweave] no reader for a "{kind}"`)
@@ -1206,6 +2462,40 @@ end
 ]=]
 function Serdes.fromSchema(descriptor: Types.Descriptor): Codec
 	return Serdes.build(Ir.lower(descriptor))
+end
+
+--[=[
+	@within Serdes
+	@function nodeCodec
+	@param node Node -- a node from a lowered layout, with its bits already assigned
+	@return (value: any, flags: { number }) -> ()
+	@return (flags: { number }) -> any
+	@private
+
+	The writer and reader for **one node**, for a caller that is assembling a payload this module
+	does not know the shape of.
+
+	`src/replication/Delta.luau` is the only such caller: a patch interleaves its own decisions —
+	did this field change, is it there now — with ordinary values, so it walks the tree itself and
+	asks for a codec at each leaf rather than reimplementing fourteen kinds.
+
+	:::caution
+	The block optimisation is **off** for these. `Serdes.build` turns it on when a layout is
+	statically sized, because then one `allocate` covers the whole payload and every writer below it
+	can skip its own bounds check. A patch is never statically sized — that is what a patch is — so
+	a node built here uses the growth-checked writers, and mixing one built here into a blocked
+	layout would write past the block.
+	:::
+]=]
+function Serdes.nodeCodec(node: Ir.Node): (Writer, Reader)
+	local outer = blocked
+	blocked = false
+
+	local write = writerFor(node)
+	local read = readerFor(node)
+
+	blocked = outer
+	return write, read
 end
 
 return Serdes

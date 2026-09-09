@@ -29,7 +29,7 @@ local Config = require("./Config")
 local Observer = {}
 
 --[=[
-	@type Stage "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol" | "query"
+	@type Stage "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol" | "query" | "direction" | "replicate"
 	@within Observer
 
 	How far a packet got before it was refused.
@@ -81,6 +81,7 @@ export type Stage =
 	| "protocol"
 	| "query"
 	| "direction"
+	| "replicate"
 
 --[=[
 	@interface Rejection

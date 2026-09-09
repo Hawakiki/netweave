@@ -11,16 +11,17 @@
 ]=]
 
 --[[
-	Four things happen to a packet here and each can refuse it, which is why `nw.observe` reports a
-	stage rather than a boolean. `RESEARCH §3-G6` records that no surveyed library reports rejection
-	rates at all, and `§3.7-K` records what that costs: Warp blackholes a player whose packet fails
-	and nothing anywhere says so.
+	Ten stages can refuse a packet here (`Observer.Stage`), which is why `nw.observe` reports a
+	stage rather than a boolean. `RESEARCH §3-G6`, as corrected, records that the only surveyed
+	library to attempt reporting rejections is Warp and that it gets it wrong, and `§3.7-K` records
+	what that costs: Warp blackholes a player whose packet fails and nothing anywhere says so.
 
 	Nothing on this path raises. The bytes came from a peer, so every failure — including one thrown
 	by the game's own handler — is caught and reported, because a batch is other players' traffic
 	and one bad packet must not take it (`DESIGN-API.md` G4, G5).
 ]]
 
+local Baseline = require("../replication/Baseline")
 local Batch = require("./Batch")
 --[[ Aliased, because this module already exports a type named `Config` for its own constructor
      options and two `Config`s in one file is a reading hazard even where Luau permits it. ]]
@@ -47,6 +48,16 @@ local Inbound = {}
      Stored on the queue itself, because changing the limit must not desynchronise the ring
      arithmetic of a queue that already exists. ]]
 local DEFAULT_QUEUE_CAPACITY = 256
+
+--[[ Constant like every other refusal reason, and reached only by an endpoint that was handed a
+     replicated channel without anywhere to keep what the other end has — which is a wiring mistake
+     rather than anything a peer can provoke. ]]
+local NO_BASELINES = "a replicated packet arrived at an endpoint with no baseline store, so there "
+	.. "is nothing to fold it into. Pass `baselines` to Inbound.new"
+
+--[[ A peer asked for a channel that is not replicated, or is not a channel at all. Constant,
+     because it is the one thing about replication a hostile peer can send at will. ]]
+local NOT_REPLICATED = "a peer asked to be resynchronised on an id that is not a replicated channel"
 
 --[[ Constant because a flood is exactly when it is said. It used to carry `dropped {n} so far`,
      which allocated a string per dropped packet to print a number three times — the repeat
@@ -78,6 +89,14 @@ export type Config = {
 	--[[ Who has agreed on the declarations. Absent, every peer is taken at its word — which is what
 	     a test that is not about the handshake wants. ]]
 	agreement: Protocol.Agreement?,
+	--[[ What each peer has, per replicated subject. On a client this is what arrived; on a server
+	     it is what was sent, and the same store serves both because "the other end has this" is
+	     one fact seen from two directions. Absent, a replicated packet is reported and dropped. ]]
+	baselines: Baseline.Baseline?,
+	--[[ Called when a replicated packet was refused, which means this endpoint's picture of that
+	     channel is now unknowable. The driver wires it to the packet that asks for everything
+	     again; a test that does not care leaves it out and the baseline is simply cleared. ]]
+	desynced: ((channel: any) -> ())?,
 }
 
 export type Inbound = {
@@ -96,6 +115,43 @@ local read: (...any) -> ...any = Batch.read
      because a handler error is a game bug and the line is the whole of the diagnosis. ]]
 local function traceback(message: any): string
 	return `{tostring(message)}\n{debug.traceback("", 2)}`
+end
+
+--[[
+	What a `replicate` handler is given **is** this endpoint's baseline, and until M4 phase 8 it
+	could be written to.
+
+	`Delta`'s merger returns the value and whether it is a new one, so a subtree the patch did not
+	touch comes back by reference — and that sharing is the whole reason a twelve-field subject with
+	one field moved costs three bytes. The consequence nobody wrote down is that the table handed to
+	`:listen` is the same table `store.keep` records. The habit every state library teaches —
+	`Replica.Data.hp = 4`, a client-side prediction, `value.hp -= 1` — writes straight into it, and
+	the next patch carries only the fields the server changed while the rest are read back out of the
+	corrupted base. Measured: `seen.hp = 3`, then a gold-only patch, and the server says hp=10 while
+	the client sees hp=3 — silently, and for ever (M4 report).
+
+	A defensive copy is the other way out and it is the wrong one: it would have to be deep, it would
+	run per subject per patch, and it is precisely the sharing thrown away to protect it. Freezing
+	allocates nothing and turns a silent corruption into a raise on the line that caused it.
+
+	It is also nearly free for the same reason the hazard exists. An untouched subtree is already
+	frozen by the patch that built it, so the walk stops there and visits only what this patch made —
+	`table.clone` hands back an unfrozen copy, which is what lets the merger keep working above.
+
+	`table.freeze` is shallow in Luau, hence the recursion. A `t.buffer` field is carried by
+	reference and cannot be frozen at all, which is the same hole `Tick.snapshot` documents from the
+	sending end.
+]]
+local function harden(value: any)
+	if type(value) ~= "table" or table.isfrozen(value) then
+		return
+	end
+
+	for _, inner in value do
+		harden(inner)
+	end
+
+	table.freeze(value)
 end
 
 --[[
@@ -132,6 +188,10 @@ type Pending = {
 	channels: { any },
 	senders: { any },
 	values: { any },
+	--[[ Which replicated value this is. Its own array rather than packed into `values`, because
+	     packing would allocate a table per packet on the one path whose whole argument is that it
+	     does not. Empty for every other class. ]]
+	subjects: { any },
 	sizes: { number },
 	calls: { number },
 	statuses: { number },
@@ -143,6 +203,7 @@ local function emptyPending(): Pending
 		channels = {},
 		senders = {},
 		values = {},
+		subjects = {},
 		sizes = {},
 		calls = {},
 		statuses = {},
@@ -161,6 +222,8 @@ function Inbound.new(config: Config): Inbound
 	local admit = config.admit
 	local isServer = config.isServer
 	local queries = config.queries
+	local baselines = config.baselines
+	local onDesync = config.desynced
 	local agreement = config.agreement
 
 	--[[
@@ -190,7 +253,7 @@ function Inbound.new(config: Config): Inbound
 		lists because neither has returned its own. The high-water mark is the number of dispatches
 		in flight at once, which is what the depth counter was reaching for and could not express.
 
-		At one batch a frame — every ordinary frame — this is still the same six arrays reused
+		At one batch a frame — every ordinary frame — this is still the same seven arrays reused
 		forever and still costs nothing.
 	]]
 	local free: { Pending } = { emptyPending() }
@@ -210,6 +273,44 @@ function Inbound.new(config: Config): Inbound
 
 	local function report(channel: any, who: any?, stage: Observer.Stage, reason: string, bytes: number)
 		Observer.emit(if channel then channel.qualified else "?", who, stage, reason, bytes)
+	end
+
+	--[[
+		Everything this endpoint believed about a replicated channel, given up.
+
+		A change is only meaningful against the value it was computed from, so a change that did not
+		arrive — refused at any stage, for any reason — makes every change after it unreadable. There
+		is no partial recovery and no way to notice later: the values would simply be wrong.
+
+		So the baseline goes and the other end is asked to start again. `PLAN-M4` D-2 called this a
+		break detector and expected a sequence number on the wire to find the gap; there is none,
+		because **this endpoint already knows** — it is the one that refused the packet.
+	]]
+	local function desync(channel: any)
+		--[[
+			**Only the end that receives changes gives one up**, and the asymmetry is a bound rather
+			than a tidiness.
+
+			Replication flows server to client, so the client is the one that can lose a change. On
+			the server a packet on a replicated id is a client sending something it must not — G6
+			refuses it before decode — and the server's baseline is authoritative: nothing was lost.
+			Clearing it there would let any peer force a full resend of everything it can see with
+			one malformed byte, which is a cheaper amplifier than the resync packet that at least
+			has to name a real channel.
+		]]
+		if isServer then
+			return
+		end
+
+		local store = baselines
+
+		if store then
+			store.desync(sender, channel)
+		end
+
+		if onDesync then
+			onDesync(channel)
+		end
 	end
 
 	--[[
@@ -332,15 +433,26 @@ function Inbound.new(config: Config): Inbound
 		serving.answer(channel, who, id, Batch.OK, result)
 	end
 
-	local function call(channel: any, who: any?, value: any, bytes: number, id: number)
+	local function call(channel: any, who: any?, value: any, bytes: number, id: number, subject: any?)
 		--[[ Annotated so `xpcall` resolves: a handler read off an `any` channel is narrowed to "not
 		     false or nil" by the caller's check, which is not a callable type. ]]
 		local handler: (...any) -> ...any = channel.handler
 
 		if not isServer then
 			--[[ A client's inbound is the server's outbound, and the server is not a peer to be
-			     checked. No context, no policy — the payload alone. ]]
-			local ok, failure = xpcall(handler, traceback, value)
+			     checked. No context, no policy — the payload alone, and for a replicated channel
+			     the subject in front of it, because the client keeps one value per subject and a
+			     handler that could not tell them apart would be useless. A `nil` value there is the
+			     subject going away. ]]
+			--[[ Two statements rather than an `if` expression, which yields one value where this
+			     needs two. ]]
+			local ok, failure
+
+			if channel.class == "replicate" then
+				ok, failure = xpcall(handler, traceback, subject, value)
+			else
+				ok, failure = xpcall(handler, traceback, value)
+			end
 
 			if not ok then
 				report(channel, nil, "handler", tostring(failure), bytes)
@@ -406,6 +518,7 @@ function Inbound.new(config: Config): Inbound
 		local channels = list.channels
 		local senders = list.senders
 		local values = list.values
+		local subjects = list.subjects
 		local sizes = list.sizes
 		local calls = list.calls
 		local statuses = list.statuses
@@ -417,23 +530,40 @@ function Inbound.new(config: Config): Inbound
 			local channel = channels[index]
 			local who = senders[index]
 			local value = values[index]
+			local subject = subjects[index]
 			local id = calls[index]
 			local status = statuses[index]
 
 			channels[index] = nil
 			senders[index] = nil
 			values[index] = nil
+			subjects[index] = nil
 
 			--[[ A status of zero or more is a reply, and a reply resumes a thread instead of calling
 			     a handler. Anything else — including a query *request* — goes to `call`. ]]
 			if status >= 0 then
 				local waiting = queries
 
+				--[[ Not guarded: `answered` resumes a thread, and a resume returns false rather
+				     than raising. ]]
 				if waiting then
 					waiting.answered(channel, id, status, value)
 				end
 			else
-				call(channel, who, value, sizes[index], id)
+				--[[
+					Guarded per entry, not only per batch. `call` runs the policy and the handler
+					under `xpcall`, but the code between those two — the call-id record, the
+					context, the reply — is not, and a raise there used to reach `dispatch`'s one
+					`pcall`, which protects the list and not the entries behind the one that raised:
+					the rest of the batch was dropped with a report naming no channel and no player
+					(M4 report, finding 32). G5 is per packet in the read phase; this makes it per
+					packet here too. `pcall` with arguments allocates no closure.
+				]]
+				local ok, failure = pcall(call, channel, who, value, sizes[index], id, subject)
+
+				if not ok then
+					report(channel, who, "handler", `dispatch raised: {tostring(failure)}`, sizes[index])
+				end
 			end
 		end
 
@@ -520,7 +650,7 @@ function Inbound.new(config: Config): Inbound
 
 	     This is the reason a hostile peer can provoke most cheaply — send anything at all on a
 	     `state` or `event` id and every packet in the batch lands here — so building it per refusal
-	     would have made the check that stops the flood the thing the flood costs. Six classes, and
+	     would have made the check that stops the flood the thing the flood costs. Seven classes, and
 	     `isServer` is fixed for the life of this `Inbound`, so the table cannot grow. ]]
 	local directionReasons: { [string]: string } = {}
 
@@ -545,7 +675,43 @@ function Inbound.new(config: Config): Inbound
 	     because a batch that arrives inside another batch's dispatch has its own, and the outer
 	     one's state is restored around it the way `sender` and `filling` are. ]]
 	local full = false
-	local pendingCeiling = Settings.limitOf("pendingPerBatch")
+
+	--[[
+		How long a peer waits between resyncs that are acted on, in `tick` calls — frames, where the
+		driver runs it. Half a second at 60 Hz, which is the trade written out: an honest client's
+		*first* ask is always honoured immediately, so this is only ever the gap before a *second*
+		one, and a second one inside half a second is either a peer with a very bad connection or a
+		peer trying to make the server work. The first gets its state a frame or two later; the
+		second gets a sixtieth of what it asked for.
+	]]
+	--[[ Read from `Config` at each use rather than once: the limit takes effect immediately, which
+	     is what a game reaching for it under attack needs. ]]
+	local function resyncWindow(): number
+		return Settings.limitOf("resyncTicks")
+	end
+
+	--[[ Constant, so a peer asking every frame costs a report and no allocation: §9's "nothing on
+	     the receive path is silent" — a deferred ask used to return without a word, so a peer
+	     asking ninety times in ninety frames was invisible to `nw.observe` (M4-1). ]]
+	local RESYNC_DEFERRED = "a resync arrived inside the window since the last one was acted on; it is "
+		.. "remembered and honoured when the window closes. A peer asking every frame is either on a "
+		.. "very bad connection or trying to make this server work; nw.configure({ limits = { resyncTicks "
+		.. "= n } }) widens the window"
+
+	local ticks = 0
+
+	--[[ Per sender, the tick each channel's resync was last acted on; and per channel, the senders
+	     who asked again too soon. Two shapes because they are walked from opposite ends: the first
+	     by a packet that names a sender, the second by `tick`, which walks everything owed. ]]
+	local resyncs: { [any]: { [any]: number } } = {}
+	local owed: { [any]: { [any]: boolean } } = {}
+
+	--[[ What the game configured, and what this endpoint enforces — the same number on a server and
+	     no ceiling at all on a client. `refreshCeiling` below says why. Both are kept because the
+	     reason strings quote the configured one, and a client that reports nothing still has to be
+	     able to say what the limit was if it ever does. ]]
+	local configuredCeiling = Settings.limitOf("pendingPerBatch")
+	local pendingCeiling = if isServer then configuredCeiling else math.huge
 
 	--[[
 		The two reasons whose only variable is the ceiling, built when it moves rather than per
@@ -563,14 +729,42 @@ function Inbound.new(config: Config): Inbound
 	local ceilingReason = ""
 	local ceilingReplyReason = ""
 
+	--[[
+		**The ceiling is the server's, and applying it on a client is what broke replication at scale.**
+
+		The bound exists because the batch's size is chosen by an *untrusted* peer (`PLAN-M3` D-6). On
+		a client the peer is the server: the batch is what this game chose to send, already bounded at
+		the other end by this very limit, and refusing its tail saves no memory an attacker could have
+		claimed — it drops traffic the game asked for, and reports it against a peer that cannot be
+		asked to send less.
+
+		On a replicated channel it costs more than the tail. Past the ceiling the client refuses, a
+		refused change gives up the channel, and giving up clears the baselines it applied earlier in
+		the same batch; the resync then makes the server clear what it believed, and the next tick
+		sends the same oversized batch again. Measured with the real tick at the default limits before
+		this line existed:
+
+		  | subjects visible to one client | every frame |
+		  |---|---|
+		  | 256 | frame 1 converges, then 0 bytes |
+		  | 257 | 1,543 B down, 5 B up, mirror stuck at 256, **both sides holding nothing** |
+		  | 300 | 1,801 B down, 177 B up, 44 refusals and 44 resyncs, forever |
+
+		One subject over the limit was a channel that never worked, and the suite could not see it
+		because `tests/replication_runtime.luau` restored the limit after a single frame.
+
+		This is the same asymmetry `Driver` already writes down for `Baseline` — bounded on the
+		server, unbounded on the client — and for the same reason.
+	]]
 	local function refreshCeiling()
 		local limit = Settings.limitOf("pendingPerBatch")
 
-		if limit == pendingCeiling and ceilingReason ~= "" then
+		if limit == configuredCeiling and ceilingReason ~= "" then
 			return
 		end
 
-		pendingCeiling = limit
+		configuredCeiling = limit
+		pendingCeiling = if isServer then limit else math.huge
 		ceilingReason = `batch holds more than {limit} packets; the rest were dropped`
 		ceilingReplyReason = `the answer arrived in a batch holding more than {limit} packets and `
 			.. `was dropped`
@@ -629,6 +823,7 @@ function Inbound.new(config: Config): Inbound
 		filling.channels[count] = channel
 		filling.senders[count] = sender
 		filling.values[count] = value
+		filling.subjects[count] = nil
 		filling.sizes[count] = bytes
 		filling.calls[count] = id
 		filling.statuses[count] = status
@@ -706,6 +901,96 @@ function Inbound.new(config: Config): Inbound
 			if disagreement then
 				report(nil, sender, "protocol", disagreement, bytes)
 			end
+		end,
+
+		--[[
+			A peer asking for a replicated channel in full.
+
+			Clearing what this endpoint believes that peer has is the whole answer: the next tick
+			finds no baseline and writes a change against nothing, which is every field. There is no
+			separate snapshot path to invoke because there is no separate snapshot.
+
+			Refused rather than assumed when the id names nothing, or names something that is not
+			replicated — a peer that can ask about an id it made up could otherwise make the server
+			walk its channel table on demand.
+		]]
+		resync = function(id: number, bytes: number)
+			--[[
+				**A peer whose declarations disagree does not get to make this endpoint work.**
+
+				Control packets are read before `sink.admit` because resolving id 0 would fail, and
+				until M4 the verdict was consulted for `HELLO` and for data packets and not here — so
+				a peer already refused at `protocol`, whose every data packet costs an id read and a
+				seek, could still spend five bytes and buy a full state re-encode. `HELLO` stays
+				exempt because it is how a disagreement is discovered and how it is cleared; nothing
+				else is.
+			]]
+			if agreement then
+				local disagreement = agreement.verdict(sender)
+
+				if disagreement then
+					report(nil, sender, "protocol", disagreement, bytes)
+					return
+				end
+			end
+
+			local channel = resolve(id)
+
+			if not channel or channel.class ~= "replicate" then
+				report(nil, sender, "replicate", NOT_REPLICATED, bytes)
+				return
+			end
+
+			local store = baselines
+
+			--[[ Reported, the way `change` reports it: an endpoint with no baselines cannot honour
+			     the ask, and returning without a word was the one silent exit on this path — found
+			     by the fuzzer the moment its corpus learned to write a resync (PLAN-M4-BUG phase 6). ]]
+			if not store then
+				report(channel, sender, "replicate", NO_BASELINES, bytes)
+				return
+			end
+
+			--[[
+				**Coalesced, not refused**, and the difference is the whole design.
+
+				What a resync costs is not the clear — that is a table drop — it is the tick after it,
+				which finds no baseline and writes every subject that peer can see. One five-byte
+				packet a frame therefore bought a full state re-encode a frame, measured at 601 bytes
+				a frame downstream for a hundred subjects against a steady state of zero, outside
+				every budget netweave has: a replicated channel declares no `rate`, so `Budget.admit`
+				has nothing to charge (M4 report).
+
+				Refusing the extra ones would be worse than it sounds. A client asks once, at the
+				moment it gave up on the channel, and **nothing retries** — it has already cleared its
+				own baselines, so a refused resync leaves it holding nothing while the server believes
+				it holds everything, wrong for the rest of the session. A bound that can strand an
+				honest client is not a bound, it is a second defect.
+
+				So the ask is never dropped: it is honoured now if the window is open, and remembered
+				and honoured by `tick` if it is not. An attacker gets one full resend per window
+				however fast they send; a client that lost a change gets its resend on the next frame,
+				because the window starts open.
+			]]
+			local seen = resyncs[sender]
+
+			if not seen then
+				seen = {}
+				resyncs[sender] = seen
+			end
+
+			local honoured = seen[channel]
+
+			if honoured and ticks - honoured < resyncWindow() then
+				seen[channel] = honoured
+				owed[channel] = owed[channel] or {}
+				owed[channel][sender] = true
+				report(channel, sender, "replicate", RESYNC_DEFERRED, bytes)
+				return
+			end
+
+			seen[channel] = ticks
+			store.desync(sender, channel)
 		end,
 
 		deliver = function(channel: any, value: any, bytes: number, id: number?)
@@ -788,8 +1073,86 @@ function Inbound.new(config: Config): Inbound
 			filling.channels[count] = channel
 			filling.senders[count] = sender
 			filling.values[count] = value
+			filling.subjects[count] = nil
 			filling.sizes[count] = bytes
 			filling.calls[count] = id or 0
+			filling.statuses[count] = -1
+		end,
+
+		--[[
+			A replicated subject's change, folded into what this endpoint has.
+
+			The fold happens **here, during the read**, because the bytes are here and nowhere else;
+			the handler runs in the dispatch phase like every other class, so a handler that yields
+			cannot let the next packet decode against a half-applied value. That is D-6's
+			read-then-dispatch applied to a payload that mutates state rather than replacing it.
+		]]
+		change = function(channel: any, subject: any, bytes: number)
+			local store = baselines
+
+			if not store then
+				report(channel, sender, "replicate", NO_BASELINES, bytes)
+				return
+			end
+
+			local base = store.of(sender, channel, subject)
+			local value, failure = channel.delta.apply(base)
+
+			--[[ A change that could not be read is not a removal, and treating it as one would drop
+			     a subject because a peer sent a short packet. The baseline is left exactly as it was
+			     and the channel is given up on: this endpoint cannot know how much of that change it
+			     took before it ran out, so every change after it is against a value that may or may
+			     not be what the sender thinks. ]]
+			if failure then
+				report(channel, sender, "parse", failure, bytes)
+				desync(channel)
+				return
+			end
+
+			if value == nil then
+				--[[ Gone. Dropped here rather than left for the handler, so that a handler which
+				     raises cannot leave this endpoint believing it still has the subject. ]]
+				store.drop(sender, channel, subject)
+			else
+				--[[ Before it is recorded and before the handler sees it, because those are the same
+				     table. See `harden`. ]]
+				harden(value)
+				store.keep(sender, channel, subject, value)
+			end
+
+			--[[
+				Nobody is listening yet, and this class does not use the queue the others do: the
+				baseline *is* the queue (PLAN-M4-BUG D-3), and `drain` walks it when `:listen`
+				attaches. Queued here instead, the entry reached `call` with a nil handler — reported
+				as the game's own handler raising, with a traceback — and was never delivered,
+				because the baseline already said this client had the subject and the server sends
+				a snapshot once. A static subject in the first batch was invisible for the session,
+				on the join path, in exactly the module order the queue exists for (M4-1, 중대).
+			]]
+			if not channel.handler then
+				return
+			end
+
+			local count = filling.count + 1
+
+			if count > pendingCeiling then
+				full = true
+				report(channel, sender, "budget", ceilingReason, bytes)
+
+				--[[ The change was applied and is being dropped before the handler sees it, which
+				     leaves the game's own mirror behind this endpoint's baseline. Everything on this
+				     channel has to be asked for again. ]]
+				desync(channel)
+				return
+			end
+
+			filling.count = count
+			filling.channels[count] = channel
+			filling.senders[count] = sender
+			filling.values[count] = value
+			filling.subjects[count] = subject
+			filling.sizes[count] = bytes
+			filling.calls[count] = 0
 			filling.statuses[count] = -1
 		end,
 
@@ -797,6 +1160,13 @@ function Inbound.new(config: Config): Inbound
 
 		refuse = function(channel: any?, stage: string, reason: string, bytes: number, id: number?)
 			report(channel, sender, stage :: Observer.Stage, reason, bytes)
+
+			--[[ Any refusal of a replicated packet is a change this endpoint will never see, and
+			     every change after it is relative to one it does not have. The stage does not
+			     matter — parse, budget or protocol, the consequence is the same. ]]
+			if channel and channel.class == "replicate" then
+				desync(channel)
+			end
 
 			--[[
 				A refused query is answered rather than left hanging, in both directions.
@@ -853,9 +1223,46 @@ function Inbound.new(config: Config): Inbound
 		--[[ A handler has just been attached. Whatever arrived before it did is delivered now, in
 		     arrival order. ]]
 		drain = function(channel: any)
+			if not channel.handler then
+				return
+			end
+
+			--[[
+				A replicated channel keeps nothing in a queue: every subject that arrived before the
+				handler is in the baseline, and delivering the baseline is delivering the queue —
+				one copy, not two. The closure is one allocation per `:listen`, not per packet. A
+				handler attached, detached and attached again is handed everything a second time,
+				which is the same thing `:listen` on any class does with its queue.
+			]]
+			if channel.class == "replicate" then
+				local store = baselines
+
+				if isServer or not store then
+					return
+				end
+
+				local list = claim()
+
+				store.each(nil, channel, function(subject: any, value: any)
+					local count = list.count + 1
+
+					list.count = count
+					list.channels[count] = channel
+					list.senders[count] = nil
+					list.values[count] = value
+					list.subjects[count] = subject
+					list.sizes[count] = 0
+					list.calls[count] = 0
+					list.statuses[count] = -1
+				end)
+
+				dispatch(list)
+				return
+			end
+
 			local queue = queues[channel]
 
-			if not queue or not channel.handler then
+			if not queue then
 				return
 			end
 
@@ -887,6 +1294,32 @@ function Inbound.new(config: Config): Inbound
 		--[[ Once a frame. Every intent that arrived since the last one is delivered, at most one
 		     per player per channel. ]]
 		tick = function()
+			ticks += 1
+
+			--[[ The resyncs that arrived inside a window, honoured now that one has passed. Walked
+			     rather than scheduled: the table holds only peers who asked twice in half a second,
+			     which in a healthy server is nobody and the loop is one `next` that finds nothing. ]]
+			local store = baselines
+
+			if store then
+				for channel, senders in owed do
+					for who in senders do
+						local seen = resyncs[who]
+						local honoured = seen and seen[channel]
+
+						if not honoured or ticks - honoured >= resyncWindow() then
+							senders[who] = nil
+
+							if seen then
+								seen[channel] = ticks
+							end
+
+							store.desync(who, channel)
+						end
+					end
+				end
+			end
+
 			local list = claim()
 
 			for channel, byPlayer in coalescedValue do
@@ -915,6 +1348,14 @@ function Inbound.new(config: Config): Inbound
 		--[[ A player who left. Their pending intent is input nobody is waiting for, and their
 		     context record would otherwise outlive them. ]]
 		forget = function(who: any)
+			--[[ A departed peer's resync bookkeeping, which would otherwise hold their record for
+			     the life of the server — the same leak `PLAN-M3` D-6 is about, one table over. ]]
+			resyncs[who] = nil
+
+			for _, senders in owed do
+				senders[who] = nil
+			end
+
 			for _, byPlayer in coalescedValue do
 				byPlayer[who] = nil
 			end

@@ -26,6 +26,31 @@ That choice narrows the audience, and pretending otherwise would set the wrong e
 Blink and Zap serve anyone who can run a CLI. netweave asks for a typed codebase first. That is
 a smaller slice of the ecosystem, chosen on purpose.
 
+### The target audience is the group that does *not* get the new solver by default
+
+~~The solver setting is a gap in what a `--!strict` author knows.~~ **It is a default that runs
+against them**, and the general release is what made that precise rather than better
+([devforum 4084991](https://devforum.roblox.com/t/general-release-luau-s-new-type-solver/4084991),
+read 2026-09-06):
+
+> If you use `nocheck` or non-strict mode for all of your scripts, you will be automatically moved
+> to the New Type Solver with nonstrict enabled. **If you use strict mode, you will remain on the
+> old solver by default**, but can opt-in via Workspace Properties.
+
+So the row above is the wrong way round on the axis that matters. A `nocheck` author is moved to the
+new solver and gets nothing from it here, because netweave's guarantees are `--!strict` annotations
+they do not write. A `--!strict` author — netweave's stated target — keeps the **old** solver until
+they go and turn it on.
+
+Two things follow, and both are improvements on where this document was:
+
+- **The instruction is now concrete.** It used to be a Studio beta toggle; it is a per-project
+  setting under **Workspace Properties → Scripting**, which is a sentence netweave can put in its
+  own README rather than a paragraph about betas.
+- **The transition has an end.** Roblox is "committed to keep the old type inference engine
+  available through 2026", so the opt-in is a migration step with a horizon rather than a standing
+  condition. §7's decision does not change; what changes is that it stops being permanent.
+
 ### The guarantees are layered
 
 The inner layer is unconditional: framing, rate declaration, audience declaration, direction.
@@ -94,7 +119,7 @@ Everything else on the surface:
 | | What it is | The one thing to know |
 |---|---|---|
 | `nw.namespace(name, channels)` | a group of channels, declared once and required by both sides | declare every one at startup; ids depend on all of them (`WIRE-FORMAT.md` §3) |
-| `nw.types` | the schema library: `t.u8`, `t.string(0, 32)`, `t.array`, `t.struct`, `t.enum`, `t.optional` | every type is bounded, which is where each channel's byte ceiling comes from |
+| `nw.types` | the schema library: `t.u8`, `t.string(0, 32)`, `t.array`, `t.struct`, `t.enum`, `t.optional`, `t.union`, `t.quantized` | every type is bounded, which is where each channel's byte ceiling comes from |
 | `nw.policy(factory)` | two stages: the factory runs once, the check runs per request | a verdict is `nw.allow(value)` or `nw.deny(reason)`, and `ok == true` or it is a refusal |
 | `nw.all(...)` | composes policies, threading the allowed value onward | it stops at the first denial |
 | `nw.audience` | `everyone`, `owner`, `nearby(studs)`, `select(fn)` | only `everyone` gives a channel `broadcast` |
@@ -169,14 +194,49 @@ end)
 nw.observe(function(rejection)
 	refusals[#refusals + 1] = `{rejection.channel} at {rejection.stage}: {rejection.reason}`
 end)
+```
 
+What is *not* in it is as much the point. There is no middleware chain, no per-call options
+table, no place to pass a validator at the send site, and nothing that would let a second file
+change what `equip` accepts. The declaration is the whole security model.
+
+### The same file, replicating
+
+The seventh class in the same shape. The server never calls it: `store` is the only way in, so
+the absence of `publish` on the server view is the guarantee rather than a convention.
+
+<!-- example: tests/example_runtime.luau replication -->
+```lua
+--[[ The server never calls this channel. `store` is the only way in, so there is no `publish` on
+     the server view to be called by mistake — the absence is the guarantee. ]]
+local world: { [number]: { hp: number, gold: number } } = {}
+
+local vault = nw.namespace("vault", {
+	inventory = nw.replicate({
+		subject = t.u16,
+		data = t.struct({ hp = t.u8, gold = t.u16 }),
+		audience = nw.audience.everyone,
+		store = nw.store.of(world),
+	}),
+})
+
+--[[ The subject, then the value. `nil` is that subject leaving this client's audience or ceasing
+     to exist — the one packet shape says both. ]]
+vault.client.inventory:listen(function(subject, value)
+	held[subject] = value
+end)
+
+--[[ The game writes its own state and tells netweave nothing. Once a frame netweave reads the
+     store and sends each client the difference between what it should see and what it has: the
+     first frame is the whole value, and a frame where one field moved is that field. ]]
+world[1] = { hp = 10, gold = 500 }
+
+--[[ Everything is declared before anything is sent, and that is a rule rather than a habit: a
+     namespace declared after the first packet has moved raises, because an id depends on every
+     other channel in the program (`WIRE-FORMAT.md` §3). ]]
 combat.client.equip:send({ slot = 1 })
 combat.client.equip:send({ slot = 7 })
 ```
-
-What is *not* in it is as much the point. There is no middleware chain, no per-call options table,
-no place to pass a validator at the send site, and nothing that would let a second file change what
-`equip` accepts. The declaration is the whole security model, and it is nineteen lines.
 
 ## 3. Channel classes
 
@@ -230,9 +290,10 @@ declared below `rate`, because tokens accrue at the rate and a shallower bucket 
 difference away every second, leaving the declared rate unreachable and therefore fiction.
 
 `rate` is a *sustained* rate, enforced by a bucket rather than a window. A window that resets on a
-boundary admits a full allowance on each side of it: a channel declared `rate = 20` measured **39
-admissions across ten milliseconds** before M3 phase 0. The guarantee is now "no more than `rate`
-per second in any second", not "in the seconds netweave happened to draw".
+boundary admits a full allowance on each side of it: a channel declared `rate = 20` measured ~~**39
+admissions across ten milliseconds**~~ **40 admissions inside a sliding 1.0 s span** before M3 phase 0
+(`PLAN-M3` D-3, which is the document the earlier numbers claimed to quote — M4-1). The guarantee is
+now "no more than `rate` per second in any second", not "in the seconds netweave happened to draw".
 
 **`command`** changes authoritative state. Authorization is not optional, because a command
 without it is the exact shape of every Roblox exploit writeup.
@@ -288,6 +349,81 @@ event  ─┴── Outbound
 three, and the fourth was `query`'s response, which is not a separate primitive but the `Outbound`
 that `query` already owns. Corrected in M1 phase 5. The public surface is where meaning lives; the
 implementation stays small.
+
+### Replication is a seventh class, not `state` growing up
+
+`PLAN-M4` D-1, answered in phase 2 before any of L3 was written, because everything else in that
+milestone depends on it.
+
+**`nw.state` is not misnamed, and the plan was unfair to it.** "State" means the current state of a
+subject, sent to whoever should see it, and that is exactly what it does. What it never promised was
+delta compression. What was missing was a docstring saying which of the two it is.
+
+Replication is `nw.replicate`, and three things make it a different declaration rather than a flag
+on this one. Any one of them would be enough; the first is the plainest.
+
+**They have no method in common.** `nw.state` is `publish(subject, value)` — the game holds the
+value and hands it over each tick. `nw.replicate` takes a **store** at declaration and the game
+never calls netweave again; netweave reads the store and decides what each client is missing. Two
+surfaces with no call in common are not one class with an option.
+
+**They sit on opposite sides of the reliability trade, and G6's argument applies exactly.** A
+dropped `state` packet costs one tick of staleness and the next packet corrects it, which is why
+`unreliable` is legal there and why positional data belongs on it. A dropped *delta* leaves that
+client permanently and silently wrong, because every later delta is relative to a baseline it does
+not have. `unreliable` is therefore **forbidden** on `replicate` — and a single class with a flag
+that means "fine" on one setting and "silently wrong forever" on the other is precisely the shape
+this design exists to make unwritable.
+
+**They cost different memory on the server, and the declaration has to carry the limit.** `state`
+holds one coalesced value per player per channel and releases it at the tick. `replicate` holds a
+**baseline per client per subject** for as long as that client is connected — memory proportional to
+players times state size, chosen by how many people join, which is `PLAN-M3` D-6 territory and needs
+a declared ceiling that `state` has no use for.
+
+| Class | Direction | Required | Forbidden | Handler receives |
+|---|---|---|---|---|
+| `replicate` | S→C | `data`, `subject`, `audience`, `store` | `rate`, `burst`, `maxBytes`, `authorize`, `unreliable` | `(subject, T?)` — the client listener takes the subject first, and `nil` is the subject going away |
+
+The one thing they do share is the receiving end: `:listen(function(value) end)` hands the client
+the whole value, because a client that has to know whether it was sent a snapshot or a patch is a
+client the library has failed.
+
+They do not share what that value *is*. On `replicate` it **is the client's baseline**, frozen —
+a change is folded into what the client already had and every subtree the patch did not touch is
+shared with it, which is why one field of twelve costs three bytes and not a whole subject. Writing
+into it would rewrite the base the next change is applied to, so a prediction written as
+`value.hp -= 1` would leave that field wrong for ever with nothing on either side to say so
+(M4 report, measured). ~~A game that wants one to write to takes `table.clone(value)`~~ — which is
+**shallow**: `table.clone` returns an unfrozen top level over the same frozen subtrees, so
+`mine.hp = 3` works and `mine.pos.x = 3` raises (M4-1, measured), on exactly the nested schemas
+whose sharing motivated the freeze. A game that wants one to write to copies it as deep as it
+writes, or copies out the fields it needs; the freeze is there so that requirement is a raise on the
+offending line rather than a bug three patches later.
+
+#### Reliable delivery is the answer to D-2, and netweave's own limits are the hole in it
+
+`PLAN-M4` D-2 offered three shapes — reliable deltas, acknowledged baselines, periodic snapshots —
+as though loss were possible on the reliable path. **It is not.** netweave's reliable path is a
+`RemoteEvent`, which Roblox delivers reliably and in order, so a delta that netweave hands to the
+engine arrives. Acknowledgements and periodic re-snapshots are answers to a problem the transport
+does not have, and both cost what `PLAN-M3` spent a milestone bounding.
+
+~~What *can* drop a delta is **netweave itself**. `pendingPerBatch` drops the tail of an oversized
+batch and reports it; on a `signal` that is one lost packet and on a `replicate` it is a client
+that will never be right again. So the design is reliable deltas **plus a break detector**: a
+sequence per client per subject, and a client that sees a gap is sent a snapshot rather than
+another delta.~~ **Neither exists.** Since M4 phase 8 (236e4dd) a client applies no `pendingPerBatch`
+— the ceiling is server-only, because a batch's size is chosen by an untrusted peer only when the
+peer is a client — so nothing netweave-side drops a delivered change, and there is no sequence
+number on the wire (`WIRE-FORMAT.md` §2). What remains is the client's own refusal: a change it
+cannot read for any reason makes it give up the channel and ask for all of it again, which is the
+resync in §2. `PLAN-M4` phase 4 struck the sequence number; this section and D-2 were left saying it
+(M4-1).
+
+That same path answers D-4 for free. A client entering a `nearby` audience has no baseline, which
+is the same condition as a gap, so "you are out of sync, here is everything" is one mechanism
+serving a join, a drop and an audience transition alike.
 
 ## 4. Declaration
 
@@ -399,7 +535,10 @@ it was meant to guard, including `Trusted<number>`. That is strictly worse than 
 it breaks the honest caller and admits the dishonest one. Measured in `spike/declare/brand.luau`.
 
 Both brands are therefore type functions. They intersect the tag onto **table** payloads and pass
-anything else through unchanged:
+anything else through unchanged — with one refinement since 8bd883a: a **union** is branded
+component-wise, so `t.optional(struct)` and a tagged union carry the tag on each table member rather
+than being passed through as a non-table (the M4 report's finding 4). The sample below is the
+scalar/table rule; the union rule is `src/api/Trust.luau`:
 
 ```lua
 export type function Untrusted(payload)   -- T & { __nwUntrusted: true? } when T is a table,
@@ -583,7 +722,14 @@ Key 'send' not found in table '{ listen: ((unknown, { origin: number, seq: numbe
 Key 'publish' not found in table '{ listen: (({ health: number }) -> ()) -> () }'
 ```
 
-G6 is a compile-time guarantee.
+G6 is a compile-time guarantee — **for a namespace value that is not annotated**. The one spelling
+that removes it, and G3 and every payload type with it, is annotating the namespace with its own
+exported type: `local ns: nw.Views<typeof(decls)> = nw.namespace("x", decls)` analyses clean and
+then accepts `ns.client.fire:send(...)` on a server-to-client channel without a diagnostic (M4
+report, finding 37; M4-1). Write `local ns = nw.namespace(...)` and let it infer. The erasure is
+pinned as a canary in `tests/api_reject.luau`, and the type is documented in `src/netweave.luau`
+rather than removed, because a game that has already written the annotation would otherwise lose
+its type outright.
 
 ### The condition attached
 
@@ -605,6 +751,12 @@ they are nothing, and shipping a second untyped declaration path would mean main
 of this library that cannot keep its own promises. The last row above is the reason not to
 pretend otherwise: on the stock solver a user sees errors in code they did not write, and telling
 them to ignore those is worse than telling them to turn the solver on.
+
+**How to turn it on, as of the general release**: Workspace Properties → Scripting, per project. A
+`--!strict` codebase is *not* moved automatically and has to opt in — see §0, which has the quote and
+the date. The old engine stays available through 2026, so this is a migration step rather than a
+standing condition; `analyze.luau` passes `--flag:LuauSolverV2=true` explicitly either way, because a
+check that depends on a tool's default is a check that changes when the tool does.
 
 ## 8. Context
 
@@ -754,8 +906,16 @@ Limits are not all read at the same moment. `queueCapacity` is read when a chann
 created, so a queue that already exists keeps the depth it was made with; `unreliableBytes` and
 `repeatsPerDiagnostic` are read at the point of use and take effect immediately. Configuring before
 the first channel is declared makes all three behave alike, which is why that is the advice rather
-than the rule. `unreliableBytes` can only be *lowered*: 908 is Roblox's ceiling, not netweave's
-preference (`§3.7-F`).
+than the rule. `unreliableBytes` can only be *lowered*: ~~908 is Roblox's ceiling~~ 908 is the ceiling
+netweave enforces. Roblox's own page for `UnreliableRemoteEvent` says 1000 bytes; 908 is the figure
+measured on the devforum and recorded in `RESEARCH-AND-PLAN.md` §2, and `§3.7-F` records only that
+no surveyed library checks any limit. The conservative number is kept; the attribution was wrong
+(M4-1). **And it cannot be measured in Studio**: `tests/roblox_runtime.luau` fires raw unreliable
+payloads of 900 to 65,536 bytes to a real client in Play mode and every one arrives, with or without an
+instance in the sidecar — the loopback enforces no limit at all, so the figure is a property of the
+production network that this repository can only cite. What the suite does assert is netweave's half:
+908 is deliverable, and 1,206 is refused at the send with a report rather than dropped on the wire
+(PLAN-M4-BUG phase 6).
 
 **Two layers check a settings table, and they catch different things.** `Settings` catches the
 values — a severity that is not one of the three, a limit that is not a number, a `contextGuard`

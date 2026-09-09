@@ -201,9 +201,10 @@ function Budget.new(clock: (() -> number)?): Budget
 			What this sender has spent on this channel in the current window: packets, bytes, and
 			how many were refused.
 
-			Exposed because a budget nobody can read is not a security feature. `RESEARCH §3-G6`
-			records that no surveyed library reports this, and `§3.7-K` records what the absence
-			costs — a player can be silently blackholed and nothing anywhere says so.
+			Exposed because a budget nobody can read is not a security feature. `RESEARCH §3-G6`, as
+			corrected, records that the one surveyed library to attempt reporting this (Warp) gets it
+			wrong, and `§3.7-K` records what the absence costs — a player can be silently blackholed
+			and nothing anywhere says so.
 		]=]
 		usage = function(sender: any, channel: any): (number, number, number)
 			local byChannel = perSender[sender]
