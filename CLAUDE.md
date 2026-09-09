@@ -314,6 +314,11 @@ Half the guarantees in `docs/DESIGN-API.md` are type errors, so a file that *mus
   alone let a case be swapped for junk; the line alone let junk be swapped onto the marked line. Both
   were measured before the text was added.
 - `tests/*_runtime.luau` — executed by lune, and must also analyze clean
+- `tests/puppet.client.luau` — not a test: the client the Studio suite does not otherwise have. Emitted as
+  a client `Script` under `ReplicatedStorage`, it waits for `roblox_runtime` to create `NETWEAVE_PUPPET`,
+  then echoes what arrives on the netweave remotes and on a probe remote, so the server-side suite can
+  assert the other end of a real `RemoteEvent`. It arms itself only while asked, because the benchmark
+  place carries it too.
 
 **A security-relevant suite counts its own shape** through `tests/harness.luau`, and refuses to pass
 under the floor it declares. ~~Currently `budget_runtime` 100%, `hostile_runtime` 99%, `fuzz_runtime`
