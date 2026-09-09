@@ -325,6 +325,22 @@ elseif replication ~= quotedReplication then
 	print(`  test:     {#replication} characters`)
 end
 
+--[[ The README quotes both examples too, and rots the same way. Same fence markers, same rule. ]]
+local readme = fs.readFile("README.md")
+
+local quotedInReadme =
+	region(readme, "<!-- example: tests/example_runtime.luau -->\n```lua\n", "```", "README.md")
+local quotedReplicationInReadme =
+	region(readme, "<!-- example: tests/example_runtime.luau replication -->\n```lua\n", "```", "README.md")
+
+if quotedInReadme ~= example then
+	fail("the example in README.md is not the one tests/example_runtime.luau runs")
+end
+
+if quotedReplicationInReadme ~= replication then
+	fail("the replication example in README.md is not the one tests/example_runtime.luau runs")
+end
+
 local lines = #string.split(example, "\n") - 1
 
 if example == "" then

@@ -18,7 +18,7 @@ library can be published and read by the Roblox community without translation.
 
 | Artifact | Language |
 |---|---|
-| `CLAUDE.md`, `README.md` (not yet written) | **English** |
+| `CLAUDE.md`, `README.md` | **English** |
 | `docs/milestone/PLAN-M*.md` | **English** |
 | All Luau source, comments, identifiers, error messages | **English** |
 | All TypeScript definitions and JSDoc | **English** |
@@ -34,6 +34,8 @@ Do not mix languages inside one file. A Korean comment in a `.luau` file is a de
 
 ```
 CLAUDE.md                     this file
+README.md                     the front page: what it guarantees, the worked example, what it costs;
+                              its two code blocks are checked against tests/example_runtime.luau
 default.project.json          the library as a package: rojo build -o netweave.rbxm
 test.project.json             a Studio place for tests that need Roblox datatypes
 analyze.luau                  type checking, which is part of the test suite
