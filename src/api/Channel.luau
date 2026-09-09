@@ -4,7 +4,7 @@
 --[=[
 	@class Channel
 
-	The six channel classes. A class is a **security obligation**, not a transport mode: a reader
+	The seven channel classes. A class is a **security obligation**, not a transport mode: a reader
 	who sees `nw.intent` knows the server does not approve each packet, and a reader who sees
 	`nw.command` knows it does.
 

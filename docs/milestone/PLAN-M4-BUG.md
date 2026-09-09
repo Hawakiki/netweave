@@ -202,32 +202,38 @@ fix lands, and the commit message says which mutation was used.
 
 ### Phase 7 — the record
 
-- [ ] `bench/report.luau`: Down and FireAll columns; framerate p0..p100 and `n`; `correct` and drop rate;
+- [x] `bench/report.luau`: Down and FireAll columns; framerate p0..p100 and `n`; `correct` and drop rate;
       a missing field is a failure, not a `—`
-- [ ] run documents carry the commit they were produced on
-- [ ] the Studio ns ladder and the frame probe produced by a committed script; `STUDIO_NOW` and
-      `STUDIO_BEFORE` removed from `bench/profile.luau`
-- [ ] every probe's `BEFORE` comment names a way to reproduce it that works
-- [ ] `bench/envelope.luau` calls `Batch` instead of re-implementing it
+- [x] run documents carry the commit they were produced on (`bench/build.luau` → `results.tree`)
+- [x] the Studio ns ladder ~~and the frame probe~~ produced by a committed script — the three probes are
+      mapped into the place and run there by `require`; `STUDIO_NOW` and `STUDIO_BEFORE` removed from
+      `bench/profile.luau`. The frame probe stays `Config.FRAME_PROBE`, whose output is quoted with its
+      commit rather than pasted
+- [x] every probe's `BEFORE` comment names a way to reproduce it that works
+- [x] `bench/envelope.luau` calls `Batch` instead of re-implementing it
 - [ ] the matrix run twice on the tree at the end of phase 6; the Down cell's move settled or written as
       unsettled
 - [ ] `bench/RESULTS.md` regenerated over the newest run; the M1 tables under the M3 header struck; the
       acceptance table reconciled with its own §2; 31.4 ns → 31.4 µs
-- [ ] `bench/` type-checked by `analyze` (the `OutboundScope` type function error in `bench/tick.luau`)
+- [ ] ~~`bench/` type-checked by `analyze`~~ → `PLAN-M5` phase 6: the top-level scripts carry twenty
+      diagnostics (`table.create` against declared arrays, `@lune` requires, an arity in `envelope`), not one
 
 ### Phase 8 — the documents
 
-- [ ] `PLAN-M4.md`: the disposition table for both reports; D-2 / phase 2 / phase 4 / phase 6 sentences
-      overturned by phase-8 commits struck; acceptance 4, 8, 10, 11 given a status; a Result section
-- [ ] `DESIGN-API.md`: §3 sequence number and client `pendingPerBatch` struck; the `table.clone` escape
+- [x] `PLAN-M4.md`: the disposition table for both reports (§9); D-2 / phase 2 / phase 4 / phase 6 sentences
+      overturned by phase-8 commits struck
+- [ ] `PLAN-M4.md`: acceptance 4, 8, 10, 11 given a status; a Result section (after the second run)
+- [x] `DESIGN-API.md`: §3 sequence number and client `pendingPerBatch` struck; the `table.clone` escape
       corrected to a deep clone; §6 component-wise brands; §7 the `Views<D>` caution; the `replicate` row
-- [ ] `WIRE-FORMAT.md`: offset-binary integers; layouts for quantised, u53/i53, componented vectors,
+- [x] `WIRE-FORMAT.md`: offset-binary integers; layouts for quantised, u53/i53, componented vectors,
       strings with constraints; §4 lists the hashed attributes and says `descendantOf` is not one
-- [ ] the 908 citation, the 39/40 and "9%" numbers, `Batch.luau`'s resync sentence, `Buffer.luau`'s Zap
-      claim, the replication pointer-compare docstrings, the `§` citations that do not hold
-- [ ] `CLAUDE.md`: the four statements that measure false; §2 layout brought current
-- [ ] `SECURITY-REPORT.md` and `SECURITY-REPORT-M4.md`: the statements now wrong, struck
-- [ ] `PLAN-M5.md` opened with the non-goals above as its first entries
+- [x] the 908 citation, the 39/40 ~~and "9%"~~ numbers, `Batch.luau`'s resync sentence, `Buffer.luau`'s Zap
+      claim, the replication pointer-compare docstrings, the `§` citations that do not hold ("9%" in
+      `CLAUDE.md` §9 is left: PLAN-M3 does not carry it and the sentence is about the incident, not the number)
+- [x] `CLAUDE.md`: the four statements that measure false; §2 layout brought current
+- [x] `SECURITY-REPORT.md` and `SECURITY-REPORT-M4.md`: the statements now wrong, struck (the ones a
+      reader would act on; the appendix's inverted probe outcomes are noted in PLAN-M4 §9)
+- [x] `PLAN-M5.md` opened with the non-goals above as its first entries
 
 ## 7. Acceptance criteria
 

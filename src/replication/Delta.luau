@@ -12,7 +12,8 @@
 	into a baseline.
 
 	**Why this belongs inside the codec rather than beside it.** `delta-compress` writes a type tag
-	per value — twenty-one ids covering datatypes and diff operations — because it has no schema
+	per value — nineteen ids covering datatypes and diff operations
+	(`_refsrc/delta-compress/src/TypeId.luau:4-22`) — because it has no schema
 	and cannot do otherwise (`RESEARCH §1`, M4 phase 1). netweave has one, so a patch of a
 	twelve-field struct is *twelve bits saying which moved, then the moved values in schema order*.
 	Field identity is a position, not a serialised key. Measured on that schema: three bytes against
@@ -25,9 +26,9 @@
 	Two walks rather than one codec, and the reason is allocation.
 
 	The obvious shape is `diff(old, new) -> patchTable` followed by an ordinary encode, and a decode
-	followed by `apply(baseline, patchTable)`. That builds a table per patch on each side, which is
-	the "decode into a table and then walk it" that `RESEARCH §3.8-S` criticises ByteNet for and
-	that `Serdes`'s template clone exists to avoid.
+	followed by `apply(baseline, patchTable)`. That builds a table per patch on each side — the
+	decode-then-rehash cost `RESEARCH §3.8-S` measures in Blink's and Zap's readers, and that
+	`Serdes`'s template clone (ByteNet's trick, the one axis where it beat both) exists to avoid.
 
 	It is also *wrong* on the receive side, not merely wasteful. A patch table cannot express "this
 	optional field changed to nil": an absent key and a key set to nil are the same table. Charm
@@ -89,10 +90,13 @@ end
 --[[
 	Whether two values of this node's type are the same.
 
-	Reference equality first, at every level, and that is not only an optimisation: a store that
-	hands back the same table has told us nothing changed, which is how Charm's immutable atoms make
-	their own diff cheap (`charm-sync/src/patch.luau:60`). A game that mutates in place pays the
-	deep walk; one that replaces pays a pointer compare.
+	Reference equality first, at every level. ~~That is how Charm's immutable atoms make their own
+	diff cheap; a game that replaces pays a pointer compare.~~ Not through the tick: the baseline it
+	compares against is always `Tick.snapshot`'s copy, so the top-level compare never fires there and
+	an atom costs what a plain table costs (M4 report finding 59; M4-1). What the pointer compare
+	still buys is the merge — a value folded into its base shares every untouched subtree with it,
+	and those compare in one step the next time round. Charm's own diff does use it that way
+	(`charm-sync/src/patch.luau:60`).
 ]]
 local function sameFor(node: Node): (a: any, b: any) -> boolean
 	local kind = node.kind

@@ -60,8 +60,11 @@
 	truth", because when it does not, the freeze is the behaviour.
 
 	So the seam is `subjects` and `read`, which every store can answer, and netweave does the
-	comparing. Charm's immutable atoms still make it cheap, for the reason they always did: a
-	subject whose table was replaced fails the comparison on the first key.
+	comparing. ~~Charm's immutable atoms still make it cheap: a subject whose table was replaced fails
+	the comparison on the first key.~~ They do not: the tick compares against its own snapshot, over the
+	schema's keys, so an atom costs what a plain table costs and a replaced-but-equal table is found
+	equal after the walk (M4 report finding 59; M4-1). The seam is still the right one — it is just not
+	cheaper for Charm than for anyone else.
 ]]
 
 local Store = {}
@@ -101,8 +104,9 @@ export type Store = {
 
 	:::note
 	The table is read live rather than copied, so mutating a value in place is visible to the next
-	tick. That is deliberate — `Delta` compares by reference first, so a game that replaces a
-	subject's table pays a pointer comparison and one that mutates in place pays the walk.
+	tick. That is deliberate. ~~A game that replaces a subject's table pays a pointer comparison and
+	one that mutates in place pays the walk.~~ Both pay the same walk over the schema's keys: the tick
+	compares against its own snapshot, never against the game's table (M4 report finding 59).
 	:::
 ]=]
 function Store.of(source: { [any]: any }): Store
@@ -151,8 +155,10 @@ end
 	signal was never read, and when it was finally measured it was worth 0.23 ms of an idle tick
 	against a silent freeze if it ever missed one — see the note at the top of this file.
 
-	Charm still gets the cheap path, from the property that makes it Charm: an atom's tables are
-	replaced rather than written to, so a subject that moved differs on its first key.
+	~~Charm still gets the cheap path: an atom's tables are replaced rather than written to, so a
+	subject that moved differs on its first key.~~ There is no cheap path to get — see `of`. What the
+	atom's immutability buys is correctness: the tick's snapshot can never alias a table the game
+	then writes into.
 	:::
 ]=]
 function Store.charm(getter: () -> { [any]: any }): Store

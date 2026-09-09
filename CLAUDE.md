@@ -18,7 +18,7 @@ library can be published and read by the Roblox community without translation.
 
 | Artifact | Language |
 |---|---|
-| `CLAUDE.md`, `README.md` | **English** |
+| `CLAUDE.md`, `README.md` (not yet written) | **English** |
 | `docs/milestone/PLAN-M*.md` | **English** |
 | All Luau source, comments, identifiers, error messages | **English** |
 | All TypeScript definitions and JSDoc | **English** |
@@ -55,8 +55,10 @@ docs/
   WIRE-FORMAT.md              frozen wire format, v1
   milestone/
     PLAN-M0.md                one file per milestone, English
-    PLAN-M1.md
-    PLAN-M2.md
+    PLAN-M1.md … PLAN-M4.md
+    PLAN-M4-BUG.md            a sub-milestone that gates M4's close
+    PLAN-M5.md
+  SECURITY-REPORT*.md         external audits, one per milestone; the tracker for each is PLAN-M4 §9
 bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
@@ -123,6 +125,10 @@ Rules:
   or the shipped API — never delete the original plan to make it look right in hindsight.
 - If reality contradicts the plan, **write the correction into the plan** with a strikethrough
   on the old claim. Same discipline as `docs/RESEARCH-AND-PLAN.md`.
+- A plan may be written before its milestone opens, to hold what the current one defers. It says
+  `**Status: not opened.**` under its title, and `tools/messages` does not count it as the newest plan
+  until that line is removed — which is the act of opening the milestone, and moves `nw.milestone`
+  with it.
 
 ---
 
@@ -201,15 +207,21 @@ Run benchmarks through the **Roblox Studio MCP** (`start_stop_play`, `run_as_job
 
 ## 6. Tooling
 
-Managed by `rokit` (`rokit.toml`). Rokit shims resolve only inside a directory with a manifest —
-if a tool "is not found", check the manifest before assuming it is not installed.
+Managed by `rokit` (`rokit.toml`). ~~Rokit shims resolve only inside a directory with a manifest.~~ A
+shim searches the working directory, every ancestor, then the home manifests, then `PATH` — measured:
+`luau-lsp --version` answers from a directory with no manifest (M4-1). If a tool "is not found",
+check the manifest before assuming it is not installed.
 
 - `rojo` — build/serve places
 - `lune` — scripts, codegen, report generation, test runners
 - `stylua` — formatting; `stylua.toml` sets `syntax = "Luau"`, without which nested generics fail
   to parse. `.styluaignore` excludes vendored sources.
 - `selene` — linting; `netweave.toml` declares the `types` global that exists only inside a
-  `type function` body, because selene has no scoped lint filters
+  `type function` body. ~~because selene has no scoped lint filters~~ Selene does have
+  `-- selene: allow(undefined_variable)` for the block it precedes (M4-1, measured); moving the
+  hand-kept global list to block allows is `PLAN-M5`. `roblox.yml` beside it is selene's generated
+  Roblox standard library and is load-bearing: renaming it takes `selene src tests` from 0 to 212
+  errors.
 - `luau-lsp` — **type checking, which is part of the test suite**, not a convenience
 
 ### Checks

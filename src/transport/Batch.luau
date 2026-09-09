@@ -135,9 +135,11 @@ local HELLO = 1
 	that has never heard of it steps over it and says so rather than dying.
 
 	It is also the only packet in netweave a client sends that makes the server do work it did not
-	choose. The bound is that clearing a baseline it has already cleared costs a table lookup, and
-	the resend it provokes happens once in the tick that follows however many arrive — so the worst
-	a peer can extract is a whole state per tick, which is what `nw.state` sends unconditionally.
+	choose. ~~The bound is that the resend it provokes happens once in the tick that follows however
+	many arrive — so the worst a peer can extract is a whole state per tick.~~ That was the wrong bound,
+	measured in M4 phase 8: one per tick is one full state per frame. The bound that holds is in
+	`Inbound`, not here — one resend per `resyncTicks` window per (peer, channel), the asks inside a
+	window remembered and honoured when it closes (`WIRE-FORMAT.md` §2).
 ]]
 local RESYNC = 2
 

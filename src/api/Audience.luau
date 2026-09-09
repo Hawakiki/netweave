@@ -20,8 +20,10 @@
 ]=]
 
 --[[
-	Evaluation belongs to M2, which owns the frame loop and can cache a recipient set per tick
-	(`DESIGN-API.md` §10.4). What M1 fixes is the *shape*: an audience carries a `scope` singleton
+	Evaluation belongs to the transport (`src/transport/Recipients.luau`), which resolves an audience
+	per publish and, on a replicated channel, per subject per tick; caching a recipient set per tick
+	is still open (`DESIGN-API.md` §11, `PLAN-M5`). What this module fixes is the *shape*: an audience
+	carries a `scope` singleton
 	that the directional views branch on, which is what makes G3 a type error rather than a
 	runtime check nobody runs.
 ]]
@@ -45,8 +47,8 @@ export type Scope = "everyone" | "subset"
 	.select ((subject: any) -> { Player })? -- `select`
 
 	:::caution
-	`select` runs per publish. Until M2 caches it per tick, an expensive selector is charged to
-	every send.
+	`select` runs per publish, and on a replicated channel per subject per tick. An expensive
+	selector is charged to every one of those; nothing caches it yet (`PLAN-M5`).
 	:::
 ]=]
 export type Audience<S> = {

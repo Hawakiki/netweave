@@ -39,8 +39,9 @@
 
 	Two stages: the outer function runs once at load, the inner runs per request. The structural
 	idea comes from Flamework (`RESEARCH §3.5-S3`); what differs is the attachment point. Flamework
-	spreads the guard over a decorator and a registry, so answering "what is enforced here" means
-	reading two files. netweave attaches it to the channel declaration, so the answer is one line.
+	declares the guard as middleware in `createServer({ middleware })`, so answering "what is enforced
+	here" means reading the server setup rather than the handler. netweave attaches it to the channel
+	declaration, so the answer is one line.
 ]=]
 
 --[[

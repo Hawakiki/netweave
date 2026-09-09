@@ -344,7 +344,8 @@ a refused request), each with the argument written beside the code rather than o
 Every code fix landed with its probe run against the pre-fix code first, per `CLAUDE.md` §9, and
 each is pinned by a test that fails without it. The one exception is
 `Recipients.roblox().owner`, whose test is in `tests/roblox_runtime.luau` because that module's
-whole body is Roblox API calls — **it has not been run yet**, and it is on the next Studio pass.
+whole body is Roblox API calls — ~~**it has not been run yet**, and it is on the next Studio pass~~
+(run in M3 phase 9 and on every Studio pass since; 19 of 19 at 75668a7).
 
 Two of the 26 are corrections to this report rather than to netweave:
 
@@ -464,7 +465,7 @@ print("ceiling:", feed(), #delivered, reports[1] and reports[1].reason)
 -- a table in the sidecar
 reset()
 d.channels.part.handler = function() end
-Batch.writePacket(d.channels.part, { who = { fake = true } })
+Batch.writePacket(d.channels.part, { who = { fake = true } }) -- refused by the encoder since M3 phase 9; this probe no longer reaches the sidecar
 print("sidecar table:", feed({ { fake = true } }))
 
 -- a number where an Instance was promised
