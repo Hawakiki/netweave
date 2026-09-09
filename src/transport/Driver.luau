@@ -195,9 +195,10 @@ function Driver.install()
 
 	if isServer then
 		Players.PlayerRemoving:Connect(function(player)
-			--[[ Four places hold something per player: an unsent batch, a pending intent and a
-			     context record, a rate window, and the call slots of any query still running for
-			     them. None of them mean anything once the player is gone, and all four would
+			--[[ Six places hold something per player: an unsent batch, a pending intent, a context
+			     record, a rate window, the call slots of any query still running for them, and
+			     the replication baselines. None of them mean anything once the player is gone, and
+			     every one would
 			     otherwise grow with every join.
 
 			     `query.forget` releases the accounting and nothing else — a handler already parked

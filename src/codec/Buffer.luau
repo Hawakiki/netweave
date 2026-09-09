@@ -96,7 +96,8 @@ export type Save = {
 	buffer — silently, until a growth happens to land mid-packet.
 	:::
 
-	Growth doubles. Blink grows by 1.5x and Zap by 2x; doubling costs at most one wasted copy per
+	Growth doubles. Blink grows by 1.5x (`_refsrc/blink/src/Templates/Base.luau:81`) and Zap by 2x
+	(`_refsrc/zap/zap/src/output/luau/base.luau:45`); doubling costs at most one wasted copy per
 	frame and keeps the amortised cost flat under the saturation loads the benchmark applies.
 ]=]
 local function allocate(length: number): number
@@ -140,8 +141,10 @@ Codec.allocate = allocate
 	This is `PLAN-M1` D-2's first layout pass, and it was missing until M2. `Ir.lower` has always
 	computed `fixedSize`; nothing read it, so a 100-entity `ArrayHeavy` packet made **600 separate
 	allocations** — six hundred bounds checks, growth checks and cursor stores for six hundred
-	bytes, and 120,000 of them a frame at the benchmark's load. Blink and Zap emit one allocation
-	for a block and then write at `offset + k` (`RESEARCH §3.7-D`, §3.8-T).
+	bytes, and 120,000 of them a frame at the benchmark's load. Blink emits one allocation for a
+	block and then writes at `offset + k` (`RESEARCH §3.7-D`); Zap does not — its `push_writeu8`
+	calls `alloc(1)` per primitive (`§3.8-O`, `§3.9-V1`), which an earlier version of this comment
+	had the wrong way round and cited a section about named-type inlining for.
 
 	Inside a block the buffer cannot grow, because the space is already claimed. That is what makes
 	the `put*` writers below safe without a bounds check.

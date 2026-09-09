@@ -15,7 +15,7 @@ reached the same defect independently it is said so. Line numbers were verified 
 `0cb731d` by the auditing agent and spot-checked during synthesis.
 
 **Baseline:** green. `lune run analyze` 52 files clean, the three rejection files at their declared
-counts (23 / 8 / 8), all eighteen `*_runtime` files pass (`replication_runtime` at 49% failure-path
+counts ~~(23 / 8 / 8)~~ (24 / 8 / 11 at `460aa41`), all eighteen `*_runtime` files pass (`replication_runtime` at ~~49%~~ 41% tagged, 17% honest — M4-1, PLAN-M4-BUG phase 6 — failure-path
 against a declared floor of 30%), `tools/messages`, `bench/check`, `bench/envelope`, `selene src`,
 `stylua --check` all pass. **None of what follows is caught by the suite.**
 

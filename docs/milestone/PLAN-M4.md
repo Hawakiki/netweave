@@ -94,10 +94,15 @@ which Roblox delivers reliably and in order. A delta netweave hands to the engin
 Acknowledgements and periodic re-snapshots buy nothing and cost exactly what `PLAN-M3` spent a
 milestone bounding — an upstream packet per client per tick, a baseline history sized by a client.
 
-**What can drop a delta is netweave.** `pendingPerBatch` drops the tail of an oversized batch and
+~~**What can drop a delta is netweave.** `pendingPerBatch` drops the tail of an oversized batch and
 reports it; on a `signal` that is one lost packet, and on a `replicate` it is a client that will
 never be right again. So: **reliable deltas, plus a break detector** — a sequence per client per
-subject, and a client that sees a gap gets a snapshot instead of another delta.
+subject, and a client that sees a gap gets a snapshot instead of another delta.~~ **Both halves were
+overturned in phase 8 and this decision was left saying them (M4-1).** 236e4dd made the ceiling
+server-only, because a batch's size is chosen by an untrusted peer only when the peer is a client, so
+nothing netweave-side drops a delivered change; phase 4 struck the sequence number. What remains is
+reliable deltas plus the client's own refusal: a change it cannot read makes it give up the channel
+and ask for everything again (`WIRE-FORMAT.md` §2).
 
 `unreliable` is forbidden on the class rather than merely discouraged (D-1). A game that wants
 lossy positional updates already has `nw.state`, un-delta'd, and that is why the two classes exist.
@@ -284,10 +289,11 @@ else is in that frame.
       `RemoteEvent` — Roblox delivers it reliably and in order. There is nothing to measure between
       an answer to a real problem and two answers to a problem the transport does not have.
 
-      What the framing missed is that **netweave is the thing that drops deltas**: `pendingPerBatch`
+      ~~What the framing missed is that **netweave is the thing that drops deltas**: `pendingPerBatch`
       takes the tail of an oversized batch, which is one lost packet on a `signal` and a permanently
       wrong client on a `replicate`. Reliable deltas plus a **break detector** — a sequence per
-      client per subject, a gap answered with a snapshot.
+      client per subject, a gap answered with a snapshot.~~ Struck with D-2: the client applies no
+      ceiling since 236e4dd and there is no sequence number.
 - [x] **D-4's design answered by the same mechanism**, which is the part worth having: a client
       entering an audience has no baseline, a client that missed a packet has a stale one, and a
       client that just joined has neither — three conditions, one path.
@@ -368,8 +374,11 @@ else is in that frame.
 - [x] `baselinesPerClient` in `Config` — default 256, the same shape as `queueCapacity` — and a
       `replicate` stage in `Observer` to report against. Past the limit netweave stops holding a
       baseline, which means that subject is sent **whole** to that client every tick: correct and
-      expensive, degrading to exactly what `nw.state` does for a living. That is how a bound should
-      fail. An already-held baseline stays replaceable at the limit, or a full store would freeze
+      expensive, ~~degrading to exactly what `nw.state` does for a living~~ — which it does not:
+      `nw.state` sends when the game publishes and this sends every tick whether anything moved or
+      not, 265 B per idle frame at 300 subjects (M4 report; struck in `Baseline.luau` at 2dcc87f and
+      here only now, M4-1). That is how a bound should fail, and PLAN-M4-BUG phase 5 declined the
+      per-client flag that would quiet it, with the argument in `Baseline.luau`. An already-held baseline stays replaceable at the limit, or a full store would freeze
       every subject it already knew about.
 - [x] `forget` on disconnect, tested the way `PLAN-M3` tested the queued packets it forgot:
       interleaved subjects, one departure, nothing of theirs survives and nothing of anyone else's
@@ -544,8 +553,11 @@ API to write an example against.
       see, every batch, forever. It is gated to the endpoint that *receives* changes. Confirmed by
       removing the guard and watching `the server holds exactly what it held` go from 2 to 0.
 - [x] The resync control packet is the one thing a client sends that makes the server work it did
-      not choose, so it is bounded rather than refused: 300 in one batch clear a baseline once and
-      the tick that follows resends once. A resync naming a channel that is not replicated, and one
+      not choose, so it is bounded rather than refused: ~~300 in one batch clear a baseline once and
+      the tick that follows resends once~~ — that was the wrong bound, measured in phase 8 (one per
+      tick is a full state per frame); efa3a91 coalesced it to one resend per `resyncTicks` window
+      per (peer, channel), a `Config` limit since PLAN-M4-BUG phase 5, with the deferred asks
+      reported. A resync naming a channel that is not replicated, and one
       naming id 60000, are both refused at `replicate` rather than assumed — a peer that could ask
       about ids it invented could otherwise walk the channel table on demand.
 - [x] A malformed delta is refused per packet, at `parse`, and the batch survives. **Two defects
@@ -973,6 +985,48 @@ against, and the answer is a comparison rather than an argument.
 **The state libraries have moved and `_refsrc/` is a snapshot.** ReplicaService in particular has a
 v1/v2 split. Mitigation: pin by commit in `_refsrc/README.md` like every other vendored source, and
 state the version in every claim.
+
+## 9. Disposition of the security reports
+
+`docs/SECURITY-REPORT-M4.md` (78 findings at `0cb731d`) and `docs/SECURITY-REPORT-M4-1.md` (84 at
+`460aa41`). Phase 8 above said "the report is the tracker" and neither report had one; this is it.
+
+**The M4 report's 78.** M4-1's "Disposition" table re-established every row from the code at
+`460aa41`: closed 18, closed differently 4, partial 4, declined 1, open 51. `PLAN-M4-BUG` then
+closed, from those 51: 8 (`readVarint` past 32 bits), 17 (`t.struct` by reference, and `t.union`),
+19 (`owner`/`nearby` through `roster.has`), 20 (a tick raise isolated per channel), 23 (the instance
+writer's class and container), 24 (a change past 16,383 left alone until it moves), 32 (a raise
+between the guards costs one packet), 54 and 55 (DESIGN-API §3), 57 (acceptance 11 judged on the
+honest share), 59 (the pointer-compare docstrings), 63 (TypeId 21 → 19), 65 and 66 (CLAUDE.md), 68
+(the older report's stale lines). Still open, and named in `PLAN-M5`: 5, 6, 7, 42, 43, 45, 46, 47,
+48, 50 (the type layer, phase 3 there), 73, 74, 76, 77 (optimisation, phase 4 there). Open and not
+yet placed: 9 (`nw.internal` exposure), 13 (nested `Observer.emit`), 16 (a failed `nw.namespace`
+leaves `qualified`), 22 (`nw.signature()` seals), 25–30 (five small runtime edges), 31 (the joiner
+snapshot bound, still inferred), 34–36, 40, 41 (nineteen analysis/runtime disagreements, of which
+the numeric-bound ones cannot be closed at analysis), 51, 52, 53, 56, 58, 60, 61, 62, 64, 67, 69
+(docs), 71 (the root static payload is not spanned), 75 (client `desync` per refusal).
+
+**The M4-1 report's 84**, by severity:
+
+| # | Finding | Where it went |
+|---|---|---|
+| 중대 | `replicate` before `:listen` loses the join-time snapshot | closed, PLAN-M4-BUG phase 3 (565b5d3) |
+| 중대 | `t.map(t.u16, Entity)` does not compile | closed, phase 3 (de11140), with `t.optional`/`t.array` on the same seam |
+| 중대 | the `select` hole test passes with the walk reverted | closed, phase 1 (ae11158) |
+| 중대 ×3 | `RESULTS.md` against `bench/runs/` | phase 1 put the 1.15x on record (790c17f); phase 7 regenerates the tables and archives two attributed runs |
+| 위험 | `t.string` pattern cost | closed, phase 2 (2eb3c1d): `max^k ≤ 2^16` |
+| 위험 ×4 | the checkers (`--!strict`, exit code, `expect N`, string coverage) | closed, phase 1 (07397c9, a1ed785) |
+| 위험 | the Studio numbers have no committed script | closed, phase 7 (249ca27): the probes run in Studio, the run carries its tree |
+| 경고, 15 in `src/` | malformed pattern, resync report and limit, `owner`/`nearby`, `ctx` write, `whole`, arrays of optionals, the cycle, over-limit resend (declined), `t.union` keys, `t.unitVector3`, anchor check, schema-unaware gate, `select`-all pass, decode span (unchanged), `__call` arity (M5), unnameable types (M5), `TextOptions` keys (M5) | closed in phases 2, 4, 5 except the three marked M5 and the decode span, which stays as measured |
+| 경고, 12 in `docs/` | dispositions, overturned decisions, DESIGN-API §3/§6/§7, WIRE-FORMAT, 908, 39/40 | closed, phase 8 (this section, the struck decisions above, the two documents) |
+| 경고, 4 comments | `Batch` resync sentence, `Buffer` Zap claim, pointer-compare docstrings, unreachable `Query.abandon` | first three closed, phase 8; `Query.abandon`'s comments are open |
+| 경고, 9 tests | floors, `span` invariant, corpus, `UNCOVERED`, D-5/union pins, departed e2e, `roblox_runtime` skip, hostile crash, Studio coverage | closed, phase 6, except the `Driver`/`Link.roblox` Studio sections, which are open |
+| 경고, 8 bench | `BEFORE` notes, `bench/` unchecked, `report` degrades, no spread, no drop rate, envelope copy, fairness, provenance | closed, phase 7, except `bench/` under `analyze` (M5) |
+| 경고, 8 tools | repair markers, `src/types` messages, `findLuauLsp`, `messages` extraction, selene allows, unchecked checkers | open; selene allows and the checkers under `analyze` are M5, the rest not yet placed |
+| 미미, 16 | | the counted-fact comments closed in phase 8; the rest open |
+
+Everything marked open here is open in the plan that owns it or in no plan yet; nothing is closed
+by silence.
 
 **`nw.state` growing into replication breaks games that used it as a push channel.** Nothing is
 shipped yet, so the cost is documentation rather than migration — but the decision still has to be

@@ -361,8 +361,15 @@ else
 	for _, entry in fs.readDir("docs/milestone") do
 		local named = string.match(entry, "^PLAN%-M(%d+)%.md$")
 
+		--[[ A plan may be written before its milestone opens — PLAN-M5 was, to hold what
+		     PLAN-M4-BUG deferred — and says so under its title. It is not the newest until the
+		     marker comes off, which is the same act as opening the milestone (CLAUDE.md §3). ]]
 		if named then
-			table.insert(plans, tonumber(named))
+			local head = string.sub(fs.readFile(`docs/milestone/{entry}`), 1, 600)
+
+			if not string.find(head, "Status: not opened", 1, true) then
+				table.insert(plans, tonumber(named))
+			end
 		end
 	end
 

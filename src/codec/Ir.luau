@@ -567,7 +567,7 @@ local function lowerArray(descriptor: Descriptor): Node
 				A dynamic array cannot fold its elements' flags into the enclosing scope, because the
 				count is not known until runtime. Each element opens a scope of its own, so `boolean[]`
 				costs a byte per element. Zap has the same limitation; carrying flags across elements
-				is possible and deferred (`RESEARCH §3.9-P`).
+				is possible and deferred (`RESEARCH §3.8-P`).
 			]]
 			element.scope = makeScope(element.bits)
 		end

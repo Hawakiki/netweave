@@ -18,7 +18,7 @@
 	only Roblox-shaped part, and putting it behind an interface is what lets the audience rules be
 	tested in-process rather than by watching who received what in Studio.
 
-	`DESIGN-API.md` §10.4 left open whether `nearby` is evaluated per subject or cached per tick.
+	`DESIGN-API.md` §11 (Open) left open whether `nearby` is evaluated per subject or cached per tick.
 	It is per subject here, and that is a decision this milestone is allowed to revisit once phase
 	5 measures it — at 100 players and a 60 Hz state channel the difference is four orders of
 	magnitude, and guessing which way is the risk `PLAN-M2` R-3 names.

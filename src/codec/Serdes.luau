@@ -1855,7 +1855,7 @@ local function structReader(node: Node): Reader
 
 	return function(flags: Flags): any
 		--[[ Cloning a pre-sized template is why decode never rehashes. ByteNet does the same and
-		     it is the one axis where it beat both code generators in M0 (`RESEARCH §3.7-M`). An
+		     it is the one axis where it beat both code generators in M0 (`RESEARCH §3.8-S`; the 389 B figure is `RESEARCH-AND-PLAN.md:1237`). An
 		     absent optional assigns nil, which drops the key without resizing. ]]
 		local result = table.clone(template) :: any
 

@@ -137,7 +137,7 @@ export type Rules = {
 | `baselinesPerClient` | on every baseline a replicated channel is about to keep, so lowering it stops new ones rather than releasing held ones |
 	| `resyncTicks` | on every resync request and every tick, so it takes effect immediately. It was a constant until PLAN-M4-BUG phase 5: with a 30 KB replicated state each hostile client could extract 60 KB/s of encode for 10 B/s up, and a game could not tune it (M4-1) |
 
-	Configuring before the first channel is declared makes all three behave the same way, which is
+	Configuring before the first channel is declared makes all of them behave the same way, which is
 	why that is the advice rather than the rule.
 ]=]
 export type Limits = {
@@ -669,7 +669,7 @@ end
 	:::caution Configure before you declare
 	Limits are read when the thing they limit needs them, and that is not the same moment for each —
 	see [Config.Limits]. Raising `queueCapacity` after a channel has already built its queue moves
-	the number this function reports and not that queue. Configuring first makes all three behave
+	the number this function reports and not that queue. Configuring first makes all of them behave
 	alike.
 	:::
 ]=]

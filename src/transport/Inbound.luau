@@ -11,10 +11,10 @@
 ]=]
 
 --[[
-	Four things happen to a packet here and each can refuse it, which is why `nw.observe` reports a
-	stage rather than a boolean. `RESEARCH §3-G6` records that no surveyed library reports rejection
-	rates at all, and `§3.7-K` records what that costs: Warp blackholes a player whose packet fails
-	and nothing anywhere says so.
+	Ten stages can refuse a packet here (`Observer.Stage`), which is why `nw.observe` reports a
+	stage rather than a boolean. `RESEARCH §3-G6`, as corrected, records that the only surveyed
+	library to attempt reporting rejections is Warp and that it gets it wrong, and `§3.7-K` records
+	what that costs: Warp blackholes a player whose packet fails and nothing anywhere says so.
 
 	Nothing on this path raises. The bytes came from a peer, so every failure — including one thrown
 	by the game's own handler — is caught and reported, because a batch is other players' traffic
@@ -253,7 +253,7 @@ function Inbound.new(config: Config): Inbound
 		lists because neither has returned its own. The high-water mark is the number of dispatches
 		in flight at once, which is what the depth counter was reaching for and could not express.
 
-		At one batch a frame — every ordinary frame — this is still the same six arrays reused
+		At one batch a frame — every ordinary frame — this is still the same seven arrays reused
 		forever and still costs nothing.
 	]]
 	local free: { Pending } = { emptyPending() }
@@ -650,7 +650,7 @@ function Inbound.new(config: Config): Inbound
 
 	     This is the reason a hostile peer can provoke most cheaply — send anything at all on a
 	     `state` or `event` id and every packet in the batch lands here — so building it per refusal
-	     would have made the check that stops the flood the thing the flood costs. Six classes, and
+	     would have made the check that stops the flood the thing the flood costs. Seven classes, and
 	     `isServer` is fixed for the life of this `Inbound`, so the table cannot grow. ]]
 	local directionReasons: { [string]: string } = {}
 

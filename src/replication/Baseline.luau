@@ -24,8 +24,8 @@
 	a walk on a flat one. The one that is not — "everything for this subject, across clients" — is
 	rare and is paid for with the walk.
 
-	`PLAN-M3` D-6's rule applies unchanged: this is memory sized by how many people join, so it is
-	bounded, and the bound reports rather than grows.
+	The principle `PLAN-M3` D-6 applied to the pending set applies unchanged: this is memory sized by
+	how many people join, so it is bounded, and the bound reports rather than grows.
 ]]
 
 local Observer = require("../api/Observer")

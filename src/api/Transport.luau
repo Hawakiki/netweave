@@ -6,9 +6,10 @@
 
 	The seam between the declaration surface and the thing that actually moves bytes.
 
-	M1 defines what a channel *is*: its schema, its budget, its audience, its policy, its wire id.
-	M2 defines what happens when you send on one — batching, flush scheduling, budget enforcement,
-	audience evaluation, intent coalescing. This module is where the second half attaches.
+	M1 defined what a channel *is*: its schema, its budget, its audience, its policy, its wire id.
+	M2 defined what happens when you send on one — batching, flush scheduling, budget enforcement,
+	audience evaluation, intent coalescing — and M4 added replication. This module is where that
+	second half attaches.
 ]=]
 
 --[[

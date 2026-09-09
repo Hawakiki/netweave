@@ -54,7 +54,7 @@ local Outbound = {}
 --[[
 	Roblox drops an unreliable payload past this size **silently** — no error, no warning, nothing
 	on either side. `grep` for `900|908|buffer.len` across `blink/src` and `zap/src/output/luau`
-	returns nothing, so all three surveyed libraries are exposed to it (`RESEARCH §3.7-F`).
+	returns nothing, so all four surveyed libraries are exposed to it (`RESEARCH §3.7-F`).
 
 	908 is the documented limit for an `UnreliableRemoteEvent`'s payload. The instance sidecar adds
 	overhead this number does not model, so the check is a floor rather than an exact boundary; a
@@ -114,7 +114,6 @@ export type Outbound = {
 	@function new
 	@param link Link
 	@param roster Roster
-	@param isServer boolean
 	@return Outbound
 ]=]
 function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound

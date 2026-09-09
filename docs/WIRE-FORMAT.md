@@ -3,9 +3,12 @@
 Frozen by PLAN-M1 phase 2. Changing anything here after M1 ships is a breaking change, so the
 reasoning is recorded alongside each decision.
 
-The query correlation in §2 is the one addition since the freeze, and it is a gap being filled
+~~The query correlation in §2 is the one addition since the freeze~~, and it was a gap being filled
 rather than a change: `nw.query` had no implementation until M3 phase 4, so no query packet had
-ever crossed the wire and there was nothing yet to break.
+ever crossed the wire and there was nothing yet to break. Since then: the `RESYNC` control kind
+(§2), the tagged-union layout (§5), and the M4 phase 8 kinds in §5 — quantised numbers, 53-bit
+integers, componented vectors, string constraints. Each is an addition a v1 reader that predates it
+refuses or steps over rather than misreads.
 
 Everything is little-endian, matching Roblox's `buffer` accessors. There are no alignment
 requirements.
@@ -188,10 +191,13 @@ baseline and writes a change against nothing, which is everything — there is n
 path to invoke, because there is no separate snapshot.
 
 **There is no sequence number**, which is what a break detector usually needs. Roblox delivers a
-reliable `RemoteEvent` reliably and in order, so a change netweave hands to the engine arrives; the
+reliable `RemoteEvent` reliably and in order, so a change netweave hands to the engine arrives; ~~the
 only thing that drops one is netweave's own `pendingPerBatch`, and that reports it at the moment it
-happens. A number on the wire would pay every change to rediscover something the receiver was
-already told — on a three-byte change, a varint would have been a third of it.
+happens~~ and since M4 phase 8 nothing netweave-side drops a delivered change either — the client
+applies no `pendingPerBatch` (`src/transport/Inbound.luau`, `refreshCeiling`). The gap a receiver can
+have is its own refusal, which it already knows about the moment it happens. A number on the wire
+would pay every change to rediscover something the receiver was already told — on a three-byte
+change, a varint would have been a third of it.
 
 It is the only packet a client sends that makes the server do work it did not choose.
 
@@ -283,6 +289,16 @@ qualified name, the class, and the lowered node tree of every schema the channel
 `replicate` channel that is the **subject as well as the data**, because the subject's bytes come
 first in a change and a peer that reads them narrower is one byte short for every packet on that
 channel — plus the derived framing and size numbers as a cross-check on the lowering itself.
+
+Of a node, exactly these attributes reach the hash (`Protocol.ATTRIBUTES`, and
+`tests/protocol_runtime.luau` changes each one alone and asserts the hash moves): `bits`,
+`fixedSize`, `instances`, `storage`, `min`, `max`, `utf8`, `pattern`, `step`, `whole`, `unit`, `class`,
+`lengthStorage`, `count`, and the names of a struct's fields, an enum's variants and a union's
+branches through the tree walk. `utf8`, `pattern`, `step`, `whole` and `unit` are hash-visible without
+being wire-visible: two peers reading the same bytes and refusing different values are two protocols.
+`descendantOf` is deliberately **not** hashed — it is enforcement one endpoint does over its own tree,
+like a rate limit, and two peers naming their own `workspace` mean the same thing while holding
+different objects.
 
 What stays out is everything only one side enforces — `rate`, `burst`, `maxBytes`, `authorize`,
 `audience`, `unreliable`. A hash that moved when a server tuned a rate limit would force a client
@@ -376,6 +392,28 @@ chose, and it never reaches a branch reader.
 
 Written at their declared width. A range constraint narrows the width and subtracts the lower
 bound: `u16(1000..1255)` is stored as `u8` holding `value - 1000`.
+
+**Signed integers are offset-binary, not two's complement**, whether or not a range was declared: the
+lower bound of the encoding is subtracted first and the result goes into unsigned storage of the same
+width. `i8` −1 is `7f` and −128 is `00`; `i16` −1 is `ff 7f`; `i32` −1 is `ff ff ff 7f`. Floats are IEEE
+and are not offset (`f32` −1 is `00 00 80 bf`). A second implementation written from an earlier
+version of this section would have emitted two's complement and mis-decoded every negative integer
+(M4-1).
+
+The kinds added in M4 phase 8, each measured in `tests/serdes_runtime.luau`:
+
+  * **`quantized(min, max, step)`** — a count of steps from `min`, in the narrowest unsigned storage
+    that holds the level count: `u8` up to 256 levels, `u16` up to 65,536, `u32` beyond. The value
+    on the wire is `round((v − min) / step)`, so `t.quantized(-1, 1, 2 / 254)` is one byte per axis
+    and the reader hands back `min + count × step`.
+  * **`u53` / `i53`** — narrowed like `u32` when the declared range fits four bytes; otherwise an
+    `f64` whose wholeness is checked on both sides, which is why `whole` is in the hash.
+  * **componented vectors** — `t.vector3(component)` is three component nodes in x, y, z order,
+    each a number node laid out by the rules above, so a `t.vector3(t.i16(-2048, 2048))` is six
+    bytes and a quantised direction is three. `unit` is checked on read with a tolerance derived
+    from the step.
+  * **string constraints** — `utf8` and `pattern` write nothing; they refuse on both sides and
+    reach the hash.
 
 ### Instances
 

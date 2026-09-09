@@ -290,9 +290,10 @@ declared below `rate`, because tokens accrue at the rate and a shallower bucket 
 difference away every second, leaving the declared rate unreachable and therefore fiction.
 
 `rate` is a *sustained* rate, enforced by a bucket rather than a window. A window that resets on a
-boundary admits a full allowance on each side of it: a channel declared `rate = 20` measured **39
-admissions across ten milliseconds** before M3 phase 0. The guarantee is now "no more than `rate`
-per second in any second", not "in the seconds netweave happened to draw".
+boundary admits a full allowance on each side of it: a channel declared `rate = 20` measured ~~**39
+admissions across ten milliseconds**~~ **40 admissions inside a sliding 1.0 s span** before M3 phase 0
+(`PLAN-M3` D-3, which is the document the earlier numbers claimed to quote — M4-1). The guarantee is
+now "no more than `rate` per second in any second", not "in the seconds netweave happened to draw".
 
 **`command`** changes authoritative state. Authorization is not optional, because a command
 without it is the exact shape of every Roblox exploit writeup.
@@ -382,7 +383,7 @@ a declared ceiling that `state` has no use for.
 
 | Class | Direction | Required | Forbidden | Handler receives |
 |---|---|---|---|---|
-| `replicate` | S→C | `data`, `audience`, `store` | `rate`, `burst`, `maxBytes`, `authorize`, `unreliable` | `T` |
+| `replicate` | S→C | `data`, `subject`, `audience`, `store` | `rate`, `burst`, `maxBytes`, `authorize`, `unreliable` | `(subject, T?)` — the client listener takes the subject first, and `nil` is the subject going away |
 
 The one thing they do share is the receiving end: `:listen(function(value) end)` hands the client
 the whole value, because a client that has to know whether it was sent a snapshot or a patch is a
@@ -393,8 +394,12 @@ a change is folded into what the client already had and every subtree the patch 
 shared with it, which is why one field of twelve costs three bytes and not a whole subject. Writing
 into it would rewrite the base the next change is applied to, so a prediction written as
 `value.hp -= 1` would leave that field wrong for ever with nothing on either side to say so
-(M4 report, measured). A game that wants one to write to takes `table.clone(value)`; the freeze is
-there so that requirement is a raise on the offending line rather than a bug three patches later.
+(M4 report, measured). ~~A game that wants one to write to takes `table.clone(value)`~~ — which is
+**shallow**: `table.clone` returns an unfrozen top level over the same frozen subtrees, so
+`mine.hp = 3` works and `mine.pos.x = 3` raises (M4-1, measured), on exactly the nested schemas
+whose sharing motivated the freeze. A game that wants one to write to copies it as deep as it
+writes, or copies out the fields it needs; the freeze is there so that requirement is a raise on the
+offending line rather than a bug three patches later.
 
 #### Reliable delivery is the answer to D-2, and netweave's own limits are the hole in it
 
@@ -404,11 +409,17 @@ as though loss were possible on the reliable path. **It is not.** netweave's rel
 engine arrives. Acknowledgements and periodic re-snapshots are answers to a problem the transport
 does not have, and both cost what `PLAN-M3` spent a milestone bounding.
 
-What *can* drop a delta is **netweave itself**. `pendingPerBatch` drops the tail of an oversized
+~~What *can* drop a delta is **netweave itself**. `pendingPerBatch` drops the tail of an oversized
 batch and reports it; on a `signal` that is one lost packet and on a `replicate` it is a client
 that will never be right again. So the design is reliable deltas **plus a break detector**: a
 sequence per client per subject, and a client that sees a gap is sent a snapshot rather than
-another delta.
+another delta.~~ **Neither exists.** Since M4 phase 8 (236e4dd) a client applies no `pendingPerBatch`
+— the ceiling is server-only, because a batch's size is chosen by an untrusted peer only when the
+peer is a client — so nothing netweave-side drops a delivered change, and there is no sequence
+number on the wire (`WIRE-FORMAT.md` §2). What remains is the client's own refusal: a change it
+cannot read for any reason makes it give up the channel and ask for all of it again, which is the
+resync in §2. `PLAN-M4` phase 4 struck the sequence number; this section and D-2 were left saying it
+(M4-1).
 
 That same path answers D-4 for free. A client entering a `nearby` audience has no baseline, which
 is the same condition as a gap, so "you are out of sync, here is everything" is one mechanism
@@ -524,7 +535,10 @@ it was meant to guard, including `Trusted<number>`. That is strictly worse than 
 it breaks the honest caller and admits the dishonest one. Measured in `spike/declare/brand.luau`.
 
 Both brands are therefore type functions. They intersect the tag onto **table** payloads and pass
-anything else through unchanged:
+anything else through unchanged — with one refinement since 8bd883a: a **union** is branded
+component-wise, so `t.optional(struct)` and a tagged union carry the tag on each table member rather
+than being passed through as a non-table (the M4 report's finding 4). The sample below is the
+scalar/table rule; the union rule is `src/api/Trust.luau`:
 
 ```lua
 export type function Untrusted(payload)   -- T & { __nwUntrusted: true? } when T is a table,
@@ -708,7 +722,14 @@ Key 'send' not found in table '{ listen: ((unknown, { origin: number, seq: numbe
 Key 'publish' not found in table '{ listen: (({ health: number }) -> ()) -> () }'
 ```
 
-G6 is a compile-time guarantee.
+G6 is a compile-time guarantee — **for a namespace value that is not annotated**. The one spelling
+that removes it, and G3 and every payload type with it, is annotating the namespace with its own
+exported type: `local ns: nw.Views<typeof(decls)> = nw.namespace("x", decls)` analyses clean and
+then accepts `ns.client.fire:send(...)` on a server-to-client channel without a diagnostic (M4
+report, finding 37; M4-1). Write `local ns = nw.namespace(...)` and let it infer. The erasure is
+pinned as a canary in `tests/api_reject.luau`, and the type is documented in `src/netweave.luau`
+rather than removed, because a game that has already written the annotation would otherwise lose
+its type outright.
 
 ### The condition attached
 
@@ -885,8 +906,11 @@ Limits are not all read at the same moment. `queueCapacity` is read when a chann
 created, so a queue that already exists keeps the depth it was made with; `unreliableBytes` and
 `repeatsPerDiagnostic` are read at the point of use and take effect immediately. Configuring before
 the first channel is declared makes all three behave alike, which is why that is the advice rather
-than the rule. `unreliableBytes` can only be *lowered*: 908 is Roblox's ceiling, not netweave's
-preference (`§3.7-F`).
+than the rule. `unreliableBytes` can only be *lowered*: ~~908 is Roblox's ceiling~~ 908 is the ceiling
+netweave enforces. Roblox's own page for `UnreliableRemoteEvent` says 1000 bytes; 908 is the figure
+measured on the devforum and recorded in `RESEARCH-AND-PLAN.md` §2, and `§3.7-F` records only that
+no surveyed library checks any limit. The conservative number is kept; the attribution was wrong
+(M4-1).
 
 **Two layers check a settings table, and they catch different things.** `Settings` catches the
 values — a severity that is not one of the three, a limit that is not a number, a `contextGuard`
