@@ -196,9 +196,38 @@ fix lands, and the commit message says which mutation was used.
 - [x] the D-5 ceiling and the union bit-fork each pinned by an assertion (the fork's mutation is
       caught first by `Ir`'s require-time self-check, so its pin cannot be shown to bite on its own)
 - [x] `roblox_runtime` prints `skip` when no player is present; a table in the sidecar (two cases)
-- [ ] `roblox_runtime` sections for `Driver`, `Link.roblox`, the 908 limit, `Context.acquire` on a real
-      `Player` — written at Studio, where they can be run while being written
-- [ ] the Studio pass run and its console read
+- [x] `roblox_runtime` sections for `Driver`, `Link.roblox`, the 908 limit, `Context.acquire` on a real
+      `Player` — written at Studio, where they can be run while being written. The suite has no client,
+      so `tests/puppet.client.luau` is one: a client script the server section drives and reads back
+      through a remote. What the four sections found:
+      - **`Driver` had a defect**, and it is fixed with the section as its regression. The driver kept
+        its own "sealed" flag, and `Namespace.reset()` did not clear it, so a namespace declared after a
+        real send went on the wire under channel id **0**, the reserved control id — the puppet read the
+        byte off the batch, and the assertion goes red on the pre-fix tree and green after (`Driver`
+        asks `Namespace.sealed()` now). Test-only in production terms, since only tests reset; it would
+        have broken the benchmark place the first time the suite sent through the real transport.
+      - **`Link.roblox`**: the remotes exist with the right classes and a second link reuses them; a
+        reliable, an unreliable and a `sendAll` each reach the client at their length; a visible
+        instance survives the sidecar and an unparented one **arrives as nil**, which is the case the
+        reader's "missing instance" refusal is for; a string and a non-table sidecar are dropped before
+        any handler, and a 3-byte buffer is handed to `Inbound`, which refuses it and names the sender.
+      - **The 908 limit cannot be measured in Studio**: 900 to 65,536 bytes all arrive over an
+        `UnreliableRemoteEvent` in Play mode, with or without an instance beside them. Written into
+        `DESIGN-API.md` §9. What is asserted is netweave's half — 908 delivered, 1,206 refused at the
+        send with the size in the report and nothing on the wire.
+      - **`Context.acquire` on a real `Player`**: `character` and `humanoid` are the real ones, the
+        guard is on, a write raises, a released context is refused, `detached` and `forget` behave.
+      - The player joins *after* the suite starts, every time; the file waits up to fifteen seconds for
+        one and says once when none comes, so the two older skip lines are gone from a Play with a player.
+- [x] the Studio pass run and its console read — 19 of 19 on the test place and on the benchmark place.
+      The console: 755 lines, of which **65 entries carried a stack trace** — 49 `protocol`, 10
+      `direction`, 6 `handler`. The first two are the `error` severity doing what it says on refusals a
+      fuzz corpus produces by design (mutated hashes, swapped ids), three per channel and stage, so the
+      suppression holds and the severity is misapplied for that file; `fuzz_runtime` now configures both
+      rules to `warn` and resets. The six `handler` traces carry a deliberately broken handler's own
+      error, which is the trace a game wants. Also read: a dozen G2 "rate = 100000" warnings from the
+      corpus declarations, one line each; the two "batch version 0 is not 1" refusals from the puppet's
+      junk, naming the sender; nothing unexplained.
 
 ### Phase 7 — the record
 
