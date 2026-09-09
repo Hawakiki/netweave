@@ -240,14 +240,16 @@ else is in that frame.
       visited — so the Studio decode column reads "at least this much".
 - [x] Record it in `bench/RESULTS.md` — "M4 phase 0: the instrument, rebuilt on the send side",
       including what did not work. `bench/README.md` carries the same for whoever runs it next.
-- [ ] **Acceptance 9 is met on three of four columns and stays open on the fourth.** Encode
+- [x] **Acceptance 9 is met on three of four columns and stays open on the fourth.** Encode
       `ArrayHeavy` within 1.7%; decode flags identical to the decimal for all five modes; encode
       flags at the **±5.12 B quantisation floor** rather than inside 10%, which no arrangement of
       windows improves on because `collectgarbage("count")` reports kilobytes. Decode `ArrayHeavy`
       moves 13-17% — far better than the M3 instrument's 76% and 146%, still outside the bar. A
       window big enough to hold an `ArrayHeavy` batch is one the collector almost always visits, and
       Roblox exposes enough to detect that and not enough to correct for it. **Carried to phase 7**,
-      which is the only phase that needs that cell.
+      which is the only phase that needs that cell. **Closed at `PLAN-M4-BUG` phase 7 with the same
+      verdict**: run a → run b, decode `ArrayHeavy` 25-85% for the competitors and 4.8% for netweave;
+      not met as written, and the §7 status table says so.
 
 ### Phase 1 — read the neighbours — **done**
 
@@ -663,7 +665,7 @@ API to write an example against.
       arity where the fused writer hands back to the loop: 48.6 ns a value fused against 64.9 on the
       loop, so a six-field struct went 38.9 → 29.1 us a packet. The hand-built reconstruction that
       first said 38,434 was faithful to 1.3%.
-- [ ] **One inconsistency is left, and reasoning will not close it.** The codec is 1.96 ms a frame
+- [x] **One inconsistency is left, and reasoning will not close it.** The codec is 1.96 ms a frame
       cheaper and the frame is 0.3 ms shorter, with the control group at 2-5%. The probe that settles
       it is the one that now exists, run on `ab5541e` — the tree phase 7 was applied to. If the send
       loop there is ~8.2 ms, something outside the codec grew by what phase 7 removed; if it is
@@ -676,6 +678,11 @@ API to write an example against.
       `everything else` at +12%. 0.3 ms is less than half that drift, so a single reading either side
       would compare two samples of a quantity whose spread nobody had measured. What the probe can
       answer is the send loop; what it needs is repeats on both trees.
+
+      **Never run on `ab5541e`, and the question dissolved at phase 8 instead of being answered**: with
+      the encode work in, the phase 8 run measured 115 FPS and the two `PLAN-M4-BUG` runs 114 and 115,
+      against Blink's 131-134. What is left open with a number on it is the Down cell
+      (`bench/RESULTS.md`, "The Down cell, written as unsettled").
 - [x] **An independent target came out of the same run.** ByteNet spends 5.43 ms in its send loop
       against netweave's 6.27 and **3.12 ms outside it against netweave's 5.30**, and runs 30 FPS
       faster. What is outside the loop is the flush and — one process, both peers — the server's
@@ -965,6 +972,25 @@ run under lune is the half that goes red quietly).
 10. `stylua --check`, `selene`, `lune run analyze`, every `*_runtime`, `tools/messages`, `bench/check` and `bench/envelope` pass, and the Studio suite is run and green before the milestone closes.
 11. Failure-path assertions outnumber success-path assertions in `replication_runtime`, enforced by the harness floor.
 
+### Status, written at the close of PLAN-M4-BUG
+
+M4-1 found four of these stated as checkable and their status never written. Each is judged here
+against an artifact, and the ones that are not met say so.
+
+| # | Status | Evidence |
+|---|---|---|
+| 1 | **met** | `tests/replication_runtime.luau`, "Two clients, two baselines": a client joining after a change is correct on its first frame |
+| 2 | **met** | `tests/delta_runtime.luau`, "The bytes": one of twelve fields moving is three bytes against twelve |
+| 3 | **met** | `tests/delta_runtime.luau`, the property over the sixteen `ir_runtime` schemas |
+| 4 | **not met as written** | both rigs still move the player by swapping the audience's answer by hand; a `nearby` case with the subject *moving* needs Studio geometry and `roblox_runtime` has none. Listed for the Studio pass in `PLAN-M4-BUG` phase 6 |
+| 5 | **met** | `tests/baseline_runtime.luau`: the fourth baseline over a limit of three is refused and reported once, re-armed below the line |
+| 6 | **met** | `tests/replication_runtime.luau`, "A player who has left stays gone, through the real tick" (PLAN-M4-BUG phase 4) — the M4-1 report's point was that no test ran `forget` against the real tick, and one does now |
+| 7 | **met** | `tests/fuzz_runtime.luau`, the second run: 4,000 mutated changes, no raise, nothing lost in silence, the safety net under the read phase never fires |
+| 8 | **not measured** | no replication mode in the matrix and no crossover artifact. Carried to `PLAN-M5` as a named task rather than closed by omission |
+| 9 | **not met as written** | run a → run b (`bench/runs/2026-09-09-m4bug-a.json`, `-b.json`): encode `ArrayHeavy` within 1.7%, decode flags within 3%, encode flags at the ±5.12 B quantisation floor, decode `ArrayHeavy` 25-85% for the competitors and 4.8% for netweave — the same column phase 0 named. `bench/RESULTS.md`, "Allocation per packet, run b, with run a beside it" |
+| 10 | **met at 75668a7** | every lune check green through `scripts/check.ps1`; the Studio suite 19 of 19 with `roblox_runtime`'s new cases, run from this session through the Studio MCP and recorded here rather than only in a commit message |
+| 11 | **missed** | the honest failure-path share of `replication_runtime` is 17% (PLAN-M4-BUG phase 6); the file's floor is that number, and the criterion as written is not met and not softened |
+
 ## 8. Risks
 
 **The adapter seam is wrong and both adapters end up reaching around it.** D-3 is answered from
@@ -1031,3 +1057,47 @@ by silence.
 **`nw.state` growing into replication breaks games that used it as a push channel.** Nothing is
 shipped yet, so the cost is documentation rather than migration — but the decision still has to be
 made before the code, which is why D-1 gates phase 2.
+
+## 10. Result
+
+Written 2026-09-09 at the close of `PLAN-M4-BUG`, the pass that worked through this milestone's two
+security reports. Every number below comes from a committed artifact named beside it.
+
+**What shipped.** L3 as four modules — `Delta` (a structural patch over the lowered IR; snapshot,
+change and removal are one packet shape), `Baseline` (per client, bounded by `baselinesPerClient`,
+reported when the bound is passed), `Store` (the seam: `subjects` and `read`, with `Store.of` and
+`Store.charm`; `changed` deleted in phase 8 after four phases in which nothing read it) and `Tick`
+(the loop, with schema-shaped snapshots and a `pcall` per channel) — and **`nw.replicate`** as the
+seventh class, `:listen` on the client and nothing on the server. There is no `src/replication/adapters/`:
+the seam asks two functions of a store, and the Charm and Replica adapters collapsed into that (phase 5).
+Around it: the per-frame allocation window in Studio (phase 0), `Config.FRAME_PROBE` (phase 7), the three
+ladders runnable in Studio by `require` (`PLAN-M4-BUG` phase 7), the resync window as a `Config` limit,
+and `scripts/check.ps1` with the pre-commit hook.
+
+**The numbers.**
+
+| | |
+|---|---|
+| bytes on the wire, `ArrayHeavy` / flags | 601 / 8 — unchanged since M1, and level with Blink and Zap on the array |
+| one of twelve fields moved | 3 bytes against 12 for a resend (`tests/delta_runtime.luau`) |
+| snapshot against change | one packet shape; six bytes either way on the four-field probe struct (phase 5b) |
+| `ArrayHeavy` Up, p50 | 114 and 115 against Blink's 131 and 134 — **1.15x and 1.17x**, `PLAN-M1` criterion 5 met in two runs after missing since M1 |
+| `ArrayHeavy` Down, p50 | 63 and 54 against Blink's 78 and 83 — **unsettled**, `bench/RESULTS.md` "The Down cell, written as unsettled" |
+| encode B/call, `ArrayHeavy`, run a → run b | 1909.8 → 1917.4 (+0.4%); Zap 1914.9, Blink 2729.0, ByteNet 614.4 |
+| decode B/packet, `ArrayHeavy`, run a → run b | 10447.9 → 9951.2 (−4.8%), a lower bound; the competitors moved 25-85% on unchanged code |
+| Studio ladders at `249ca27` | encode 27,952 ns a packet against a 6,458 ceiling, 4.33x; decode 35,073 against 12,476, 2.81x |
+| `bench/tick`, median ms a tick at 50x500 | select-all 14.32 → 3.00, extra key 31.02 → 1.69, subtree 1.85 → 1.71 (`PLAN-M4-BUG` phase 5) |
+| the suites | 25 lune steps green through `scripts/check.ps1`; the Studio suite 19 of 19 at `75668a7`, run through the Studio MCP |
+| the reports | 78 findings (`SECURITY-REPORT-M4.md`) and 84 (`SECURITY-REPORT-M4-1.md`), each with a disposition in §9 |
+
+**Acceptance**, from the status table under §7: 1, 2, 3, 5, 6, 7 and 10 met; 4, 9 and 11 not met as
+written; 8 not measured. None of the four was softened to fit.
+
+**What this milestone did not do, and where each item went.**
+
+- A replication mode in the matrix and the delta crossover (acceptance 8): `PLAN-M5` phase 5.
+- The `nearby` case with the subject moving (acceptance 4) and the Studio-only `roblox_runtime` sections
+  for `Driver`, `Link.roblox`, the 908 limit and a real `Player`: open in `PLAN-M4-BUG` phase 6.
+- The type layer and the optimisation residue of both reports: `PLAN-M5` phases 3 and 4, with the
+  client decode ladder added there.
+- The Down cell: written as unsettled with the probe that would settle it named, in `bench/RESULTS.md`.

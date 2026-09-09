@@ -211,9 +211,11 @@ fix lands, and the commit message says which mutation was used.
       commit rather than pasted
 - [x] every probe's `BEFORE` comment names a way to reproduce it that works
 - [x] `bench/envelope.luau` calls `Batch` instead of re-implementing it
-- [ ] the matrix run twice on the tree at the end of phase 6; the Down cell's move settled or written as
-      unsettled
-- [ ] `bench/RESULTS.md` regenerated over the newest run; the M1 tables under the M3 header struck; the
+- [x] the matrix run twice on the tree at the end of phase 6; the Down cell's move settled or written as
+      unsettled — `bench/runs/2026-09-09-m4bug-a.json` (75668a7) and `-b.json` (249ca27); criterion 5 at
+      1.15x and 1.17x; the Down cell written as unsettled, with its ranking settled by four runs and its
+      mechanism priced by `bench/decode` in Studio (2.81x the ceiling)
+- [x] `bench/RESULTS.md` regenerated over the newest run; the M1 tables under the M3 header struck; the
       acceptance table reconciled with its own §2; 31.4 ns → 31.4 µs
 - [ ] ~~`bench/` type-checked by `analyze`~~ → `PLAN-M5` phase 6: the top-level scripts carry twenty
       diagnostics (`table.create` against declared arrays, `@lune` requires, an arity in `envelope`), not one
@@ -222,7 +224,8 @@ fix lands, and the commit message says which mutation was used.
 
 - [x] `PLAN-M4.md`: the disposition table for both reports (§9); D-2 / phase 2 / phase 4 / phase 6 sentences
       overturned by phase-8 commits struck
-- [ ] `PLAN-M4.md`: acceptance 4, 8, 10, 11 given a status; a Result section (after the second run)
+- [x] `PLAN-M4.md`: acceptance 4, 8, 10, 11 given a status; a Result section (after the second run) —
+      and 9, from the two runs
 - [x] `DESIGN-API.md`: §3 sequence number and client `pendingPerBatch` struck; the `table.clone` escape
       corrected to a deep clone; §6 component-wise brands; §7 the `Views<D>` caution; the `replicate` row
 - [x] `WIRE-FORMAT.md`: offset-binary integers; layouts for quantised, u53/i53, componented vectors,
