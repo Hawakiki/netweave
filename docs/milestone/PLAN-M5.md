@@ -91,6 +91,12 @@ Ordered by phase; sized when the milestone opens.
 - [ ] `PayloadOf`, `StructPayload`, `UnionPayload`, `MapPayload`, `OptionalPayload`, `ArrayPayload` look through an intersection
 - [ ] every `readproperty` site in `Trust`, `Channel`, `View` does the same
 - [ ] `types_reject` gains a case per constructor for a wrong-typed argument; Q5 re-run
+- [ ] the fifth `nw.Views` spelling, measured writing the tutorial (2026-09-10): passing a namespace
+      *bare* to a parameter typed `nw.Views<typeof(ns.channels)>` or `typeof(ns)` turns the payloads of
+      the handlers already written on that namespace into `unknown`, retroactively; the cast at the call
+      keeps them. `tests/tutorial_ok.luau` carries the cast with the measurement beside it. Pin the bare
+      call in `api_reject` as a canary the way the annotated-local spelling is, or find the instantiation
+      that loses the brand and fix it in `View`
 
 ### Phase 2 — a type for every public value
 - [ ] re-export `Policy<T>`, `Check<T>`, `Snapshot`, `Described`, `Rules`, `Limits`, `Audience<S>`, `Observer`

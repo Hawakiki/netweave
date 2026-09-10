@@ -27,6 +27,12 @@ however many `aim` packets a player sends inside one frame, the handler runs onc
 Stale input has no value, and an attacker filling the rate budget cannot convert that into per-packet
 work on the server.
 
+An `intent` may declare `unreliable = true`, and for movement it usually should: a lost datagram
+costs one frame of input the next frame supersedes anyway, and an unreliable packet is not held
+back behind a reliable one that is still being retransmitted. `signal` accepts the flag on the same
+terms. `command` and `query` refuse it, because a command that might not arrive is a class name
+that is a promise it does not keep.
+
 ## `signal` — no authority, and typed to say so
 
 ```lua
@@ -71,8 +77,10 @@ else
 end
 ```
 
-`timeout` is required and has no unlimited value, because a request that never resolves is a leaked
-thread. `returns` may not be a top-level `t.optional`, because `invoke` reports failure as `nil` and
+`invoke` yields the calling thread until the answer, a refusal, or the timeout, so it is called from
+somewhere that may wait — a button handler, a `task.spawn` — and never from a `RenderStepped`
+callback. `timeout` is required and has no unlimited value, because a request that never resolves
+is a leaked thread. `returns` may not be a top-level `t.optional`, because `invoke` reports failure as `nil` and
 an answer that may itself be nil would be indistinguishable from a call that never came back. The
 server handler is `:handle`, not `:listen`, and it is the one handler in the library that may yield:
 it runs on its own thread with a context of its own, and a player's parked handlers are bounded by
@@ -116,8 +124,20 @@ the channel `broadcast(value)` and ignores the subject. `owner` sends to the pla
 subject, where a `Player` owns themselves and a character owns its player. `nearby(studs)` measures
 from the subject — a `Player`'s character, a `Model`'s root, or a `BasePart` — to each player's
 character, and a player with no character is not near anything. `select(fn)` sends to whatever
-list your function returns, checked against the players who are actually here, with duplicates and
-departed players dropped and reported at stage `send`. Making the recipient set a declaration rather
+list your function returns for the subject, checked against the players who are actually here, with
+duplicates and departed players dropped and reported at stage `send`:
+
+```lua
+teamChat = nw.event({
+	data = t.string(1, 200),
+	audience = nw.audience.select(function(subject)
+		return teammatesOf(subject :: Player)   -- your own list, rebuilt per publish
+	end),
+}),
+```
+
+The function runs per publish, and on a replicated channel per subject per tick, so it is not the
+place for a tree walk; return a list you already keep. Making the recipient set a declaration rather
 than a call site turns "who can see this" into a reviewable line, which is how positional data stops
 leaking to wallhacks by accident.
 
@@ -140,6 +160,9 @@ differs from the server's is refused at stage `protocol` on its first batch, bef
 packets decode as the wrong channel. `nw.protocol().hash` is the number, and `nw.signature()` is
 the text it is hashed from, which is what to diff when a deploy went out half-way.
 
-That is the whole surface. The README has it on one page, `docs/DESIGN-API.md` has the contract,
-and `tests/tutorial_ok.luau` is every snippet in these seven steps in one file the analyzer has to
-accept, which is the place to look when a spelling here does not match what you see.
+That is every class. Two steps remain: what each type costs and refuses, and how to name what
+netweave hands you in your own annotations. `tests/tutorial_ok.luau` is every snippet in these nine
+steps in one file the analyzer has to accept, which is the place to look when a spelling here does
+not match what you see.
+
+**Next:** [Step 8 — Types, bytes, and what the decoder refuses](step8-types-and-bytes.md)

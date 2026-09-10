@@ -84,4 +84,21 @@ test that provokes them on purpose. A misspelled rule or limit is refused at the
 analysis, because a setting that reads as "configured" while the default silently stays in force is
 the one thing a settings table must not allow (`docs/DESIGN-API.md` §10).
 
+There are eleven rules. Ten are the stages above, one per stage, and the eleventh is
+`rateUnbounded`: a channel declared with a `rate` above what any client could reach — `rate =
+100000` — is a channel whose budget cannot bind, and the console says so once at declaration, at
+`warn` by default, because guarantee G2 has then been satisfied on paper only. Turn it off for a
+channel where that is deliberate, and say why in the declaration.
+
+The third section of the table is `contextGuard`. In Studio every `ctx` is wrapped in the guard Step
+3 describes, at two allocations per packet; `nw.configure({ contextGuard = false })` turns that off,
+which is what the benchmark does so that a debug facility no competitor has is not charged to
+netweave's numbers. Production never pays for it either way.
+
+Two calls read the configuration back. `nw.config.snapshot()` returns what is in force — `rules`,
+`limits` and `contextGuard` — frozen at every level, so a diagnostics screen cannot become a way to
+reconfigure the library by accident; `nw.configure` returns the same snapshot. `nw.config.describe()`
+lists every rule with its current setting, its default and one line on what it reports, which is
+the list to print when someone asks what they can configure.
+
 **Next:** [Step 6 — Replicate a store](step6-replicate.md)
