@@ -22,7 +22,7 @@ local combat = nw.namespace("combat", {
 `authorize`를 빼면 파일이 타입 체크를 통과하지 못합니다. `rate`를 빼도 통과하지 못합니다. 대신
 `signal`로 선언하면 핸들러는 `Untrusted<T>`를 받는데, `Trusted<T>`로 주석된 함수는 그 값을 받지
 않습니다. 이것이 제품입니다. 이 페이지의 나머지는 그 비용과 이 라이브러리가 거부하는 것들이고,
-[튜토리얼](docs/tutorial/README.md)은 같은 내용을 빈 place에서 따라 할 수 있는 일곱 단계로 나눈
+[튜토리얼](docs/tutorial/README.md)은 같은 내용을 빈 place에서 따라 할 수 있는 아홉 단계로 나눈
 것입니다.
 
 ## 누구를 위한 것인가

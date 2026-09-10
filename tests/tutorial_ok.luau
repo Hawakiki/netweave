@@ -14,7 +14,11 @@
 ]]
 
 local nw = require("../src/netweave")
-local t = nw.types
+
+--[[ Required directly rather than taken as `nw.types`, because the type names — `t.PayloadOf`,
+     `t.Type`, `t.InstanceOptions` — hang off the module and a value cannot carry them. Step 9 says
+     so; the values are the same either way. ]]
+local t = require("../src/types")
 
 local refusals: { string } = {}
 local held: { [number]: { hp: number, gold: number }? } = {}
@@ -247,5 +251,152 @@ world[1].gold = 480
 vault.client.inventory:listen(function(subject, value)
 	held[subject] = value
 end)
+
+-- ---------------------------------------------------------------------------------------------
+-- Step 7 — unreliable on an intent, and a select audience
+-- ---------------------------------------------------------------------------------------------
+
+local function teammatesOf(_player: Player): { Player }
+	return {}
+end
+
+local squad = nw.namespace("squad", {
+	move = nw.intent({
+		data = t.struct({ x = t.f32, z = t.f32 }),
+		rate = 60,
+		unreliable = true,
+	}),
+
+	teamChat = nw.event({
+		data = t.string(1, 200),
+		audience = nw.audience.select(function(subject)
+			return teammatesOf(subject :: Player)
+		end),
+	}),
+})
+
+squad.client.move:send({ x = 0, z = 0 })
+squad.server.teamChat:publish(nil, "go")
+
+-- ---------------------------------------------------------------------------------------------
+-- Step 5 — the rest of the settings table
+-- ---------------------------------------------------------------------------------------------
+
+nw.configure({ rules = { rateUnbounded = "off" } })
+nw.configure({ contextGuard = false })
+
+local snapshot = nw.config.snapshot()
+local _queue: string = snapshot.rules.queue
+local _capacity: number = snapshot.limits.queueCapacity
+local _guarded: boolean? = snapshot.contextGuard
+
+for _, described in nw.config.describe() do
+	local _line = described
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Step 8 — every spelling in the vocabulary, and a union that narrows
+-- ---------------------------------------------------------------------------------------------
+
+local _u53 = t.u53
+local _i53 = t.i53
+local _offset = t.u16(1000, 1255)
+local _normal = t.quantized(-1, 1, 2 / 254)
+local _heading = t.quantized(-180, 180, 0.25)
+local _three = t.enum({ primary = true, secondary = true, melee = true })
+local _named = t.string(1, 20, { utf8 = true, pattern = "[%w_]+" })
+local _exact = t.array(t.u8, 100)
+local _bytes = t.buffer(0, 900)
+local _flat = t.vector2(t.i16(-1024, 1024))
+local _compact = t.unitVector3(t.quantized(-1, 1, 2 / 254))
+local _where: t.InstanceOptions = { descendantOf = workspace }
+local _contained = t.instance("BasePart", _where)
+
+local Action = t.union({
+	move = t.struct({ x = t.u8, y = t.u8 }),
+	wait = t.u8,
+})
+
+type Action = t.PayloadOf<typeof(Action)>
+local _actionSchema: t.Type<Action> = Action
+
+local function cost(action: Action): number
+	if action.tag == "move" then
+		return action.value.x + action.value.y
+	end
+
+	return action.value
+end
+
+local _cost: number = cost({ tag = "wait", value = 3 })
+
+-- ---------------------------------------------------------------------------------------------
+-- Step 9 — the types, named
+-- ---------------------------------------------------------------------------------------------
+
+local function equipFor(_player: Player, _chosen: nw.Trusted<Equip>) end
+
+combat.server.equip:listen(function(ctx, chosen)
+	equipFor(ctx.player :: Player, chosen)
+end)
+
+combat.server.openedMenu:listen(function(_ctx, opened)
+	local _screen: number = opened.screen
+end)
+
+local authored = ({ slot = 1 } :: any) :: nw.Trusted<Equip>
+equipFor(nil :: any, authored)
+
+local SPAWN = Vector3.new(0, 0, 0)
+
+local function nearSpawn(ctx: nw.Ctx): boolean
+	local character = ctx.character
+	return character ~= nil and (character:GetPivot().Position - SPAWN).Magnitude < 50
+end
+
+policy.nearSpawn = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: Equip)
+		return nearSpawn(ctx) and nw.allow() or nw.deny("too far from spawn")
+	end
+end)
+
+local Shot = t.struct({ origin = t.vector3, seq = t.u16 })
+type Shot = t.PayloadOf<typeof(Shot)>
+local _shotSchema: t.Type<Shot> = Shot
+local _shot: Shot = { origin = Vector3.zero, seq = 1 }
+
+local function wire(namespace: nw.Views<typeof(combat.channels)>)
+	namespace.server.equip:listen(function(_ctx, _chosen) end)
+end
+
+--[[ Cast at the call, not passed bare. Measured while writing the tutorial: `wire(combat)` — and
+     a parameter typed `typeof(combat)` alike — turns the payloads of the handlers written on
+     `combat` *above* this line into `unknown`, retroactively, on a namespace that has already been
+     used; `tests/api_ok.luau`'s `attach(shots)` passes because `shots` is used nowhere else. The
+     cast is the spelling that keeps every handler typed, and step 9 says so (PLAN-M5 phase 1). ]]
+wire(combat :: nw.Views<typeof(combat.channels)>)
+
+local function onRejection(rejection: nw.Rejection)
+	local stage: nw.Stage = rejection.stage
+	local _stage = stage
+end
+
+nw.observe(onRejection)
+
+local level: nw.Severity = "warn"
+local settings: nw.Settings = { rules = { budget = level } }
+nw.configure(settings)
+
+local function verdictOf(ok: boolean): nw.Verdict
+	return if ok then nw.allow() else nw.deny("no")
+end
+
+local _verdict = verdictOf(true)
+local _diagnostics: nw.Diagnostics = nw.diagnostics()
+local _schema: t.Type<number> = t.u8
+local _ranged: t.Ranged<number> = t.u16
+local _text: t.Text = t.string
+local _componented: t.Componented<Vector3> = t.vector3
+local _classed: t.Classed = t.instance
 
 return true

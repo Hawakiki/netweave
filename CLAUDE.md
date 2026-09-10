@@ -57,7 +57,7 @@ docs/
   RESEARCH-AND-PLAN.md        research log + roadmap (Korean, append-only in spirit)
   DESIGN-API.md               the agreed API shape and the guarantees behind it
   WIRE-FORMAT.md              frozen wire format, v1
-  tutorial/                   step1-….md to step7-….md, from an empty place to a replicated store;
+  tutorial/                   step1-….md to step9-….md, from an empty place to a replicated store and the types to name it;
                               every snippet's declarations and calls are in tests/tutorial_ok.luau,
                               which analyze has to accept — the prose is hand-kept against DESIGN-API
   milestone/
