@@ -332,6 +332,14 @@ end
 	error, the header count says they do not, and if the count ever moves to 25 this caution can come
 	off. Found by M4's security report, which also found the reason nothing had caught it: no file in
 	`tests/` had ever written `Views<` at all.
+
+	**The parameter row above counted the wrong thing**, and `tests/tutorial_ok.luau` measured what it
+	missed (2026-09-10): the two direction diagnostics survive, and the *payloads* of every handler
+	written on `ns` before the call do not — `wire(ns)` against `namespace: Views<D>`, or against
+	`typeof(ns)`, makes `chosen.slot` in a `:listen` forty lines earlier read as `unknown`. A namespace
+	used nowhere else, which is what the row and `api_ok`'s `attach(shots)` both use, does not show it.
+	Casting at the call, `wire(ns :: Views<D>)`, keeps every handler typed, and is what the tutorial
+	tells a game to write. `PLAN-M5` phase 1 owns finding the instantiation that loses it.
 ]]
 export type Views<D> = {
 	name: string,

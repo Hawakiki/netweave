@@ -23,7 +23,7 @@ local combat = nw.namespace("combat", {
 Leave out `authorize` and the file does not type-check. Leave out `rate` and it does not type-check.
 Declare it a `signal` instead and the handler receives `Untrusted<T>`, which no function annotated
 `Trusted<T>` will accept. That is the product. The rest of this page is what it costs and what it
-refuses, and the [tutorial](docs/tutorial/README.md) is the same material as seven short steps you
+refuses, and the [tutorial](docs/tutorial/README.md) is the same material as nine short steps you
 can follow in an empty place.
 
 ## Who it is for
