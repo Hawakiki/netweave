@@ -36,8 +36,11 @@ ecosystem than the generators serve, chosen on purpose.
 It requires the new Luau type solver. Half the guarantees are `type function` errors, and the old
 solver rejects the syntax outright. As of the solver's general release, a `--!strict` project stays
 on the old solver by default and opts in under **Workspace Properties → Scripting**, per project.
-Without it the declaration surface still runs, but the guarantees below that are type errors go
-unchecked. `docs/DESIGN-API.md` §0 and §7 say why this was decided rather than worked around.
+Without it the library still runs, because the VM does not type-check, but the editor reports
+hundreds of errors inside netweave's own files — `This syntax is not supported` on every
+`type function`, `read keyword is illegal here` on every read-only field — and none of the guarantee
+diagnostics; the solver setting is the first thing to check when the library folder is red.
+`docs/DESIGN-API.md` §0 and §7 say why this was decided rather than worked around.
 
 ## What it guarantees
 
