@@ -1,12 +1,12 @@
 # PLAN-M5 — the declaration surface, typed all the way down
 
-**Status: not opened.** Written during `PLAN-M4-BUG` so that nothing deferred from the M4-1 report is
-lost in a margin; `nw.milestone` stays `M4` until this line is removed, which is the act of opening
-it (`tools/messages` reads the marker).
+**Status: opened 2026-09-11**, on `develop`. Written during `PLAN-M4-BUG` so that nothing deferred
+from the M4-1 report was lost in a margin, and held until the owner's hosting situation changed; it
+did not, and the milestone is opened anyway because nothing in it needs a remote. `CLAUDE.md` §8
+stands unchanged: no remote, nothing published.
 
-Drafted from `PLAN-M4-BUG` §4. This
-is a plan in outline: the tasks are named, the design decisions are the ones the reports already
-argued, and the phases are ordered but not yet sized.
+Drafted from `PLAN-M4-BUG` §4, extended on 2026-09-11 with what the tutorial pass exposed. The
+phases below are numbered by subject, not by the order they run in; the order is under §6.
 
 ## 1. Goal
 
@@ -193,7 +193,20 @@ first in `spike/declare/`, because the type API's `is` may not name it.
 
 ## 6. Tasks
 
-Ordered by phase; sized when the milestone opens.
+Numbered by subject. **Run in this order**, decided at opening (2026-09-11), smallest blast radius
+and highest user-facing value first, the type layer's callable rewrite last because it touches every
+payload type function at once:
+
+1. phase 9's correction of step 1 and the README on the old solver — a false sentence, not a feature
+2. phase 8, the `ServerScriptService` refusal — one `error(` and a Studio case, mistake 1 on the list
+3. phase 7, the yield report and `nw.keep` — the generation compare exists, this is one integer
+4. phase 8, the per-namespace digest — a control kind, the fuzzer and `protocol_runtime`
+5. phase 7, the server stage (D-5) — the seam becomes the library's
+6. phase 3 item 43 and D-8 — `Policy<T>` composition and one bad channel staying one
+7. phase 7, client-side pacing (D-6) — last of the lifecycle work, because it changes what `send` does
+8. phases 2, 4, 5, 6 — types for public values, the optimisation residue with probes, additions, tooling
+9. phase 1 — the callable shape
+10. phase 9's remaining documents, re-ranked as each mechanism lands rather than at the end
 
 ### Phase 1 — the callable shape
 - [ ] `Ranged<T>`, `Text`, `Componented<T>`, `Classed` as `Type<T> & ((…) -> Type<T>)`

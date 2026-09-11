@@ -84,7 +84,7 @@ local nw = {}
 	@prop milestone string
 	@within netweave
 
-	Which milestone this build is. `"M4"`.
+	Which milestone this build is. `"M5"`.
 
 	It moves when the **plan** for the next milestone appears, not when that milestone's code lands,
 	because the question this answers is "what was the tree doing when it produced that number" and
@@ -102,7 +102,7 @@ local nw = {}
 	`docs/WIRE-FORMAT.md` and `nw.protocol()`.
 	:::
 ]=]
-nw.milestone = "M4"
+nw.milestone = "M5"
 
 --[=[
 	@prop types Types
