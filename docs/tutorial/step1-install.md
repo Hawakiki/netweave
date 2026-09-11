@@ -62,10 +62,14 @@ On the server and on the client, the first lines are the same:
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local nw = require(ReplicatedStorage.netweave.netweave)
-local t = nw.types
+local t = require(ReplicatedStorage.netweave.types)
 ```
 
-Requiring it inside Roblox installs the transport. It creates a folder named `NETWEAVE` under
+`nw.types` is the same table of constructors, and `local t = nw.types` works for every schema in
+this tutorial. The direct require is the one to prefer because it also carries the *type names* —
+`t.PayloadOf`, `t.Type` — and a value cannot; Step 2 uses the first of those on its first schema.
+
+Requiring `netweave` inside Roblox installs the transport. It creates a folder named `NETWEAVE` under
 `ReplicatedStorage` with one `RemoteEvent` and one `UnreliableRemoteEvent`, connects a flush to
 `PostSimulation`, and waits. There is nothing to configure: a game that declares its channels has
 already said everything the transport needs, and the rate, the audience and the batching are not

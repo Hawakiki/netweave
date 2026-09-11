@@ -105,6 +105,20 @@ Ordered by phase; sized when the milestone opens.
 
 ### Phase 3 — the M4 report's type-layer residue
 - [ ] items 5, 6, 7, 42, 43, 45, 46, 47, 48, 50 of `docs/SECURITY-REPORT-M4.md`, each its own commit
+- [ ] for 43, the measurement from the tutorial (2026-09-11): a payload-agnostic policy cannot be composed
+      onto two payloads through `nw.all` in any spelling — `Policy<Equip>` is not `Policy<Offer>`,
+      unannotated and `unknown` mismatch the same way, `any` reaches `CommandPayload` as `*error-type*`
+      and drops the namespace's views, and `read __nwCheck` on the `Policy<T>` field changes nothing
+      (tried and reverted: 71 diagnostics elsewhere). The schema-witness helper in `tests/tutorial_ok.luau`
+      is the working spelling and the tutorial teaches it; the fix is a `Policy<T>` that is contravariant in
+      `T`, or an `nw.all` whose `T` is taken from the channel rather than from its arguments. A second
+      measurement from the same session, ten spellings: a policy whose check names its request through a
+      `t.PayloadOf` alias composes through `nw.all` only as a bare local with a parameterless factory and an
+      `if` expression; as a field of a `local policy = {}`, as a configured factory, or with the
+      `and … or` idiom, one side is inferred `Policy<unknown>` and the pair is refused. Hand-written request
+      types compose in every shape. The tutorial writes policy request types by hand until this closes, and
+      says so in step 3; the alias is the spelling the fix has to make work, because it is the one that
+      cannot drift from the schema
 
 ### Phase 4 — optimisation residue
 - [ ] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe

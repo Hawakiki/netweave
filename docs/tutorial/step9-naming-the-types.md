@@ -59,7 +59,10 @@ type Shot = t.PayloadOf<typeof(Shot)>            -- { origin: Vector3, seq: numb
 
 The payload type of any schema, so that a function which builds or inspects one is typed from the
 same source as the wire. Writing `{ origin: Vector3, seq: number }` by hand works too and drifts;
-this does not. It is also how a union's `tag`/`value` pair is named (Step 8).
+this does not. It is also how a union's `tag`/`value` pair is named (Step 8). The one place not
+to use it is a policy's request parameter, where `nw.all` needs two payload types to be identical
+and the alias is not reliably identical to itself; Step 3 has the measurement, and until `PLAN-M5`
+closes it that parameter is written by hand.
 
 One thing the earlier steps glossed: `local t = nw.types` binds the *values*, and a value cannot
 carry type names, so `t.PayloadOf`, `t.Type` and `t.InstanceOptions` are not reachable through it.

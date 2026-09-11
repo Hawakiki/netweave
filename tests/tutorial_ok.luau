@@ -63,15 +63,91 @@ local _player = t.player
 -- Step 3 — two real policies
 -- ---------------------------------------------------------------------------------------------
 
+--[[
+	Hand-written, not `t.PayloadOf<typeof(Equip)>`, for every type a policy's check names in its
+	parameter. Measured across ten spellings (2026-09-11): with the alias, `nw.all` refuses to compose
+	two policies in most shapes a module takes — policies kept as fields of a `local policy = {}`,
+	a factory that takes `config`, a check written with the `and ... or` idiom — reading "expected
+	Policy, got Policy" because one side's payload is `unknown`; the same shapes with a hand-written
+	type compose every time, which is what the README example does. `t.PayloadOf` stays right for
+	handlers, helpers and unions (steps 8 and 9). `PLAN-M5` phase 3 item 43.
+]]
 type Equip = { slot: number }
 
 local policy = {}
+
+--[[ Where the two stages run: the factory at load on both sides, the check on the server only, so
+     a server-only dependency is reached through a seam the server fills. ]]
+local Offer = t.struct({ to = t.player, gold = t.u32(0, 1_000_000) })
+type Offer = { to: Player, gold: number }
+
+local server = {} :: { wallet: { goldOf: (Player) -> number }? }
+
+policy.canAfford = nw.policy(function()
+	return function(ctx: nw.Ctx, offer: Offer)
+		local wallet = server.wallet
+
+		if not wallet then
+			return nw.deny("wallet not attached")
+		end
+
+		local balance = wallet.goldOf(ctx.player)
+		return if balance < offer.gold
+			then nw.deny(`offers {offer.gold} gold, holds {balance}`)
+			else nw.allow()
+	end
+end)
+
+server.wallet = {
+	goldOf = function(_player: Player)
+		return 0
+	end,
+}
+
+--[[ A policy that closes over game state. ]]
+local Decision = t.struct({ tradeId = t.u16, accept = t.boolean })
+type Decision = { tradeId: number, accept: boolean }
+
+type Pending = { from: number, to: number, gold: number, state: "offered" | "accepted" | "declined" }
+local pending: { [number]: Pending } = {}
+local parties: { Player } = {}
+
+policy.party = nw.policy(function()
+	return function(ctx: nw.Ctx, decision: Decision)
+		local offer = pending[decision.tradeId]
+
+		if not offer or offer.to ~= ctx.player.UserId or offer.state ~= "offered" then
+			return nw.deny("not this player's open offer")
+		end
+
+		return nw.allow()
+	end
+end)
 
 policy.alive = nw.policy(function()
 	return function(ctx: nw.Ctx, _request: Equip)
 		return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
 	end
 end)
+
+--[[
+	A policy that reads no field of the request, written so it can go on any channel.
+
+	Measured (2026-09-11), each against `nw.all(alive, onlyB)` where `onlyB` is `Policy<B>`: a check
+	annotated `_request: Equip` is `Policy<Equip>` and cannot also be `Policy<Offer>`; unannotated
+	and `unknown` are "expected Policy, got Policy"; `any` reaches the class type function as
+	`*error-type*` and takes the whole namespace's views down with it; a generic helper with no
+	argument, `alive()`, is not inferred from its sibling. What works is a helper that takes the
+	schema as a witness, so `T` is inferred from the argument and each channel gets its own
+	instance. Step 3 says so; `PLAN-M5` phase 3 item 43 owns making `Policy<T>` composable.
+]]
+local function alive<T>(_schema: t.Type<T>)
+	return nw.policy(function()
+		return function(ctx: nw.Ctx, _request: T)
+			return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
+		end
+	end)
+end
 
 policy.ownsSlot = nw.policy(function(config)
 	local slots: number = config.slots or 3
@@ -137,7 +213,7 @@ local combat = nw.namespace("combat", {
 		returns = t.struct({ primary = t.u16, secondary = t.u16 }),
 		rate = 2,
 		timeout = 5,
-		authorize = policy.alive,
+		authorize = alive(t.u8),
 	}),
 
 	playerState = nw.state({
@@ -156,7 +232,31 @@ local combat = nw.namespace("combat", {
 		rate = 5,
 		authorize = allow,
 	}),
+
+	offer = nw.command({
+		data = Offer,
+		rate = 1,
+		authorize = nw.all(alive(Offer), policy.canAfford),
+	}),
+
+	decide = nw.command({
+		data = Decision,
+		rate = 2,
+		authorize = nw.all(alive(Decision), policy.party),
+	}),
+
+	resolved = nw.event({
+		data = t.struct({ tradeId = t.u16, accepted = t.boolean }),
+		--[[ The return is annotated: without it `if offer then parties else {}` is `{} | { Player }`,
+		     and `select` wants `{ Player }`. ]]
+		audience = nw.audience.select(function(subject): { Player }
+			local offer = pending[subject :: number]
+			return if offer then parties else {}
+		end),
+	}),
 })
+
+combat.server.resolved:publish(1, { tradeId = 1, accepted = true })
 
 -- Step 4, server
 combat.server.equip:listen(function(ctx, chosen)
