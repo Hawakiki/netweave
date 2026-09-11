@@ -307,13 +307,22 @@ payload type function at once:
       `ServerScriptService.netweaveServerOnly.declares`, refused with `ReplicatedStorage` in the message,
       while every namespace the suite declares from `ReplicatedStorage` is not. `messages` counts the
       `error(`: 75 now
-- [ ] control kind 3 in `Batch`, the per-namespace digest, written by the refusing peer with its hello
-      answer and read by `Protocol.disagree`, which rewrites the reason to name the namespace that is
-      missing or differs. `docs/WIRE-FORMAT.md` §4 gains the kind with its layout beside `hello`
-- [ ] `protocol_runtime`: two peers differing by one namespace, and by one channel inside a shared
-      namespace — the reason names the namespace in both, on both peers. A peer sending 300 digests costs
-      what 300 hellos cost after M3 phase 9, a table read, and `hostile_runtime` counts it
-- [ ] the fuzzer's corpus gains kind 3 with a mutated body, and the receive path never raises on it
+- [x] control kind 3 in `Batch`, the per-namespace digest, written beside *every* hello — the client's
+      first packet as well as the server's answer, so both consoles can name it — and read by
+      ~~`Protocol.disagree`~~ `Protocol.difference` through `agreement.digest`, which rewrites a refused
+      peer's reason once. `Batch.read` hands the body over undecoded and `Batch.readDigest` is called only
+      when `agreement.wants` says the peer is refused and unnamed. `docs/WIRE-FORMAT.md` §4 has the layout
+      and the two bounds (1,024 namespaces, 255-byte names)
+- [x] `protocol_runtime`: a namespace only one side declares, said from either side, and a channel
+      differing inside a shared namespace — named in the reason on both; the digest round-trips beside a
+      hello with the packet behind it decoding; a body past the bound is refused, not decoded. Three
+      hundred digests from a refused peer are one named report and no parse reports; from an agreeing peer,
+      nothing at all (`hostile_runtime`)
+- [x] the fuzzer's corpus gains kind 3 with a mutated body, and the receive path never raises on it. The
+      fuzzer found two silences on the way: a digest from a peer the endpoint had not refused was stepped
+      over without a word (counted now, through `wants`, the way a hello is counted through `hash`), and on
+      an endpoint with no agreement the kind was accepted and dropped — it is absent from that sink now, so
+      `Batch` reports it as a kind this build does not read, which there it is
 
 ### Phase 9 — the documents the above move
 - [ ] the vocabulary card's `intent` row says "send at the declared rate" now, and says the client paces

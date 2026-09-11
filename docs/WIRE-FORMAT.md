@@ -267,11 +267,22 @@ that point, before decode, at stage `protocol`.
 ```
 control := 0:varint  kind:u8  length:varint  body
 hello   := kind=1  length=4  hash:u32
+digest  := kind=3  length    count:varint  ( length:varint  name:bytes  hash:u32 )*
 ```
 
 The length is what lets id 0 hold "anything v2 needs": a kind a reader has never heard of is
 stepped over rather than fatal. Three bytes of overhead, once per session, against having to bump
 the batch version to add a control message.
+
+**The digest** (kind 3, `PLAN-M5` D-7) rides beside every hello: a client's first packet, and the
+server's answer to a mismatch. It lists the peer's namespaces in name order, each with an FNV-1a
+hash over that namespace's channel signatures in id order, so the peer that refuses this one can say
+*which* namespace the two builds disagree in — one side lacks it, or a channel in it differs —
+instead of printing two hashes. A reader decodes it only for a peer it has already refused and not
+yet named; every other digest is stepped over at the cost of a table read, which is what bounds a
+flood of them. A body claiming more than 1,024 namespaces or a name past 255 bytes is refused as
+malformed. Kind 3 is steppable by a v1 reader that predates it, which is what the length is for; the
+whole-program hash in the hello is still what decides agreement, and the digest only names.
 
 ### The hash covers the lowered IR
 
