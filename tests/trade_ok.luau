@@ -41,8 +41,21 @@ type Offer = { to: Player, items: { number }, gold: number }
 type Decision = { tradeId: number, accept: boolean }
 type Pending = t.PayloadOf<typeof(Pending)>
 
-local server = {} :: {
-	wallet: { goldOf: (Player) -> number }?,
+type Wallet = { goldOf: (Player) -> number, transfer: (number, number, number) -> () }
+
+--[[ ServerStorage.Wallet and ServerStorage.Market, stubbed: the example requires them, and the
+     stage below reaches the first from the server only. ]]
+local Wallet: Wallet = {
+	goldOf = function(_player: Player): number
+		return 1000
+	end,
+	transfer = function(_from: number, _to: number, _gold: number) end,
+}
+
+local Market = {
+	price = function(_itemId: number): number
+		return 5
+	end,
 }
 
 local pending: { [number]: Pending } = {}
@@ -75,13 +88,13 @@ policy.notSelf = nw.policy(function()
 end)
 
 policy.canAfford = nw.policy(function()
+	local wallet: Wallet? = nil
+
 	return function(ctx: nw.Ctx, offer: Offer)
-		local wallet = server.wallet
-		if not wallet then
-			return nw.deny("wallet not attached")
-		end
-		local balance = wallet.goldOf(ctx.player)
+		local balance = (wallet :: Wallet).goldOf(ctx.player)
 		return if balance < offer.gold then nw.deny(`offers {offer.gold}, holds {balance}`) else nw.allow()
+	end, function()
+		wallet = Wallet
 	end
 end)
 
@@ -150,21 +163,6 @@ export type Trade = nw.Views<typeof(trade.channels)>
 -- ---------------------------------------------------------------------------------------------
 -- ServerScriptService/Trade.server.luau
 -- ---------------------------------------------------------------------------------------------
-
-local Wallet = {
-	goldOf = function(_player: Player): number
-		return 1000
-	end,
-	transfer = function(_from: number, _to: number, _gold: number) end,
-}
-
-local Market = {
-	price = function(_itemId: number): number
-		return 5
-	end,
-}
-
-server.wallet = Wallet
 
 local nextId = 0
 

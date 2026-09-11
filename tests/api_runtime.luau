@@ -17,6 +17,7 @@ local t = require("../src/types")
 
 local Namespace = nw.internal.namespaces
 local Observer = nw.internal.observer
+local Policy = require("../src/api/Policy")
 local Context = nw.internal.context
 local Transport = nw.internal.transport
 
@@ -197,6 +198,115 @@ do
 	refuses("configuring with a non-table", function()
 		(configured :: any)(9)
 	end, "table")
+end
+
+do
+	--[[
+		The server stage (`PLAN-M5` D-5): a factory's second return, run once on the server at seal.
+
+		The factory runs on both sides at load, so it is not where a server-only module is reached;
+		the stage is, and it is the seam the tutorial had a game write by hand, folded into the
+		library. Confirmed to fail on the pre-fix tree by absence: a second return was ignored, and
+		`Namespace.runStages` did not exist.
+	]]
+	Namespace.reset()
+
+	local ran = 0
+	local wallet: { goldOf: (any) -> number }? = nil
+
+	local canAfford = nw.policy(function()
+		return function(_ctx: nw.Ctx, offer: { gold: number })
+			local attached = wallet
+
+			if not attached then
+				return nw.deny("wallet not attached")
+			end
+
+			return if attached.goldOf(nil) >= offer.gold then nw.allow() else nw.deny("poor")
+		end, function()
+			ran += 1
+			wallet = {
+				goldOf = function()
+					return 100
+				end,
+			}
+		end
+	end)
+
+	--[[ Typed to the same payload as `canAfford`, because `nw.all` composes only identical
+	     `Policy<T>` (`PLAN-M5` phase 3, item 43). ]]
+	local plain = nw.policy(function()
+		return function(_ctx: nw.Ctx, _offer: { gold: number })
+			return nw.allow()
+		end
+	end)
+
+	equals("a factory's second return is the policy's stage", #Policy.stagesOf(canAfford), 1)
+	equals("and a factory without one has none", #Policy.stagesOf(plain), 0)
+	equals("nw.all carries its members' stages", #Policy.stagesOf(nw.all(plain, canAfford)), 1)
+
+	refuses("a second return that is not a function", function()
+		nw.policy(function()
+			return function()
+				return nw.allow()
+			end, 42 :: any
+		end)
+	end, "server stage")
+
+	--[[ Attached to two channels, one of them through `nw.all`: the stage is one function and runs
+	     once. Before it runs the check fails closed, which is what the tutorial's seam did by hand. ]]
+	nw.namespace("staged", {
+		buy = nw.command({ data = t.struct({ gold = t.u16 }), rate = 1, authorize = canAfford }),
+		sell = nw.command({
+			data = t.struct({ gold = t.u16 }),
+			rate = 1,
+			authorize = nw.all(plain, canAfford),
+		}),
+	})
+
+	local afford = (canAfford :: any).__nwCheck
+	equals("before the stage runs, the check has nothing and denies", afford(nil, { gold = 5 }).ok, false)
+	equals("and the stage has not run", ran, 0)
+
+	Namespace.runStages()
+	equals("after seal the stage ran once, not once per channel", ran, 1)
+	equals("and the check sees what it filled", afford(nil, { gold = 5 }).ok, true)
+
+	Namespace.runStages()
+	equals("a second call runs nothing", ran, 1)
+
+	Namespace.reset()
+	nw.namespace("staged", {
+		buy = nw.command({ data = t.struct({ gold = t.u16 }), rate = 1, authorize = canAfford }),
+	})
+	Namespace.runStages()
+	equals("a reset lets the next declaration's seal run it again", ran, 2)
+	Namespace.reset()
+
+	--[[ A stage that raises, and one that yields, are startup errors that name the channel. ]]
+	local broken = nw.policy(function()
+		return function()
+			return nw.allow()
+		end, function(): ()
+			error("the wallet module is missing")
+		end
+	end)
+
+	nw.namespace("broken", { buy = nw.command({ data = t.u8, rate = 1, authorize = broken }) })
+	refuses("a stage that raises fails the seal naming the channel", Namespace.runStages, "broken.buy")
+	Namespace.reset()
+
+	local parked = nw.policy(function()
+		return function()
+			return nw.allow()
+		end, function(): ()
+			coroutine.yield()
+		end
+	end)
+
+	nw.namespace("parked", { buy = nw.command({ data = t.u8, rate = 1, authorize = parked }) })
+	refuses("a stage that yields is refused rather than waited on", Namespace.runStages, "yielded")
+	Namespace.reset()
 end
 
 do

@@ -107,43 +107,41 @@ reaches for `ServerStorage` breaks the client at startup, and this is the first 
 runs into: a wallet, a datastore wrapper, an inventory service, all of which exist on one side.
 
 The inner function runs only where a packet is received, which for every inbound class is the
-server. So the answer is to keep the factory pure and reach the server-only thing from inside the
-check, through a seam the server fills in before any traffic arrives:
+server. So a factory has a third piece for exactly this: a **server stage**, a second function it
+may return, which netweave runs once on the server when the protocol is sealed — before any packet
+decodes — and discards on the client. It is the place to reach the module that exists on one side:
 
 ```lua
 -- ReplicatedStorage/Net/Trade.luau — required by both sides
 local Offer = t.struct({ to = t.player, gold = t.u32(0, 1_000_000) })
 type Offer = { to: Player, gold: number }
 
---[[ What the server attaches at startup. Empty on the client, and never read there. ]]
-local server = {} :: { wallet: { goldOf: (Player) -> number }? }
+type Wallet = { goldOf: (Player) -> number }
 
 policy.canAfford = nw.policy(function()
-	return function(ctx: nw.Ctx, offer: Offer)
-		local wallet = server.wallet
+	local wallet: Wallet? = nil                         -- filled by the stage; nil on the client, unread there
 
-		if not wallet then
-			return nw.deny("wallet not attached")   -- fail closed: a missing seam refuses, never allows
-		end
-
-		local held = wallet.goldOf(ctx.player)
+	return function(ctx: nw.Ctx, offer: Offer)          -- per request, server only
+		local held = (wallet :: Wallet).goldOf(ctx.player)
 		return if held < offer.gold then nw.deny(`offers {offer.gold} gold, holds {held}`) else nw.allow()
+	end, function()                                     -- once, at seal, server only
+		wallet = require(game:GetService("ServerStorage").Wallet)
 	end
 end)
-
-return { ns = trade, server = server }
 ```
 
-```lua
--- ServerScriptService/Trade.server.luau
-local Trade = require(ReplicatedStorage.Net.Trade)
-Trade.server.wallet = require(ServerStorage.Wallet)
-```
+The check can cast `wallet` without a guard, because the stage has run before the first packet
+that could reach the check: a stage that raises or yields fails the seal with the channel named,
+loudly, at startup, rather than letting a check run over nothing. A policy attached to two
+channels — or a member of two `nw.all` compositions — runs its stage once. A `require` inside the
+stage is fine, because the stage runs synchronously at seal and never inside the receive loop.
 
-A `require` written inside the check also works, and is cached after the first call, but the first
-call runs the module's body inside the receive loop, and **a check must not yield**: it holds a
-`ctx` that is recycled the moment it returns, and the loop behind it is waiting. The seam costs one
-table read and cannot yield, which is why it is the shape to prefer.
+Before `PLAN-M5` the same problem was solved by hand with a seam: an empty table the shared file
+exports, the server fills at startup, and the check reads and denies when empty. That spelling
+still works and is what a library older than this milestone needs; the stage is the seam folded
+into the declaration, with the fail-closed behaviour enforced by the seal instead of by the game.
+Either way, **a check must not yield**: it holds a `ctx` that is recycled the moment it returns,
+and the loop behind it is waiting.
 
 ## A policy that needs game state
 

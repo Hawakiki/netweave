@@ -44,11 +44,7 @@ type Decision = { tradeId: number, accept: boolean }
 -- Everything else is derived.
 type Pending = t.PayloadOf<typeof(Pending)>
 
--- The seam the server fills at startup. Empty on the client, and never read there ---------------
-
-local server = {} :: {
-	wallet: { goldOf: (Player) -> number }?,
-}
+type Wallet = { goldOf: (Player) -> number, transfer: (number, number, number) -> () }
 
 local pending: { [number]: Pending } = {}   -- filled by the server; the client's copy stays empty
 
@@ -83,14 +79,16 @@ policy.notSelf = nw.policy(function()
 	end
 end)
 
+-- A server-only module, reached from the server stage: the factory's second return, run once on
+-- the server at seal and never on the client. The check can cast, because the stage ran first.
 policy.canAfford = nw.policy(function()
+	local wallet: Wallet? = nil
+
 	return function(ctx: nw.Ctx, offer: Offer)
-		local wallet = server.wallet
-		if not wallet then
-			return nw.deny("wallet not attached")   -- fail closed
-		end
-		local balance = wallet.goldOf(ctx.player)
+		local balance = (wallet :: Wallet).goldOf(ctx.player)
 		return if balance < offer.gold then nw.deny(`offers {offer.gold}, holds {balance}`) else nw.allow()
+	end, function()
+		wallet = require(game:GetService("ServerStorage").Wallet)
 	end
 end)
 
@@ -162,7 +160,7 @@ local trade = nw.namespace("trade", {
 
 export type Trade = nw.Views<typeof(trade.channels)>
 
-return { ns = trade, pending = pending, server = server }
+return { ns = trade, pending = pending }
 ```
 
 ## 2. The server — `ServerScriptService/Trade.server.luau`
@@ -176,8 +174,6 @@ local nw = require(ReplicatedStorage.netweave.netweave)
 local Trade = require(ReplicatedStorage.Net.Trade)
 local Wallet = require(ServerStorage.Wallet)
 local Market = require(ServerStorage.Market)
-
-Trade.server.wallet = Wallet          -- fill the seam, before the first packet
 
 local trade, pending = Trade.ns, Trade.pending
 local nextId = 0
@@ -290,6 +286,12 @@ annotation, because `if p then playersOf(p) else {}` is `{ Player } | {}` to the
 audience wants `{ Player }`. And `policy.alive` became the `alive(schema)` helper, because one
 `Policy<Offer>` cannot also be the policy on `decide` — Step 3 has the ten spellings that were tried.
 Everything else survived contact with the analyzer as written.
+
+One thing changed after that, when `PLAN-M5` phase 7 landed: the reader's hand-built seam — an
+empty `server` table the shared file exported and the server filled with the wallet before the
+first packet — became the server stage, the factory's second return, which netweave runs once on
+the server at seal. The example above is the stage; the seam is still on Step 3 as the spelling
+an older library needs.
 
 [The mistakes this example avoids](mistakes.md) is the list of what went wrong on the way here,
 ranked by how quietly each one fails.

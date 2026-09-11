@@ -46,7 +46,7 @@ works", which is why this one lasts.
 **The fix.** Send at the rate you declared — a `Heartbeat` accumulator, as the example does — or
 declare the rate you send at.
 
-## 3. Requiring a server module inside a policy factory
+## 3. Requiring a server module inside a policy factory — ~~by hand~~ the stage, since M5
 
 ```lua
 policy.canAfford = nw.policy(function()
@@ -59,10 +59,13 @@ end)
 whichever side is requiring it. The client crashes at startup with `Wallet is not a valid member of
 ServerStorage`.
 
-**The fix.** The seam: the shared file exports an empty `server` table, the server fills it before
-any traffic, and the check reads it and denies when it is empty. A `require` inside the check also
-works and is cached, but its first call runs the module body inside the receive loop, and a check
-must not yield.
+**The fix.** ~~The seam: the shared file exports an empty `server` table, the server fills it before
+any traffic, and the check reads it and denies when it is empty.~~ Since `PLAN-M5` phase 7 the
+factory returns a second function, the **server stage**, and does the `require` there: netweave runs
+it once on the server at seal, before any packet decodes, and never on the client, and a stage that
+raises fails the seal loudly. The seam still works for a library older than that. A `require`
+inside the check also works and is cached, but its first call runs the module body inside the
+receive loop, and a check must not yield.
 
 ## 4. Reusing a payload-agnostic policy, then "fixing" it with `any`
 

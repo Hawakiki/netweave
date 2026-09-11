@@ -265,17 +265,25 @@ payload type function at once:
 - [ ] `bench/` top-level scripts and `tools/` under `analyze`
 
 ### Phase 7 — the lifecycle, folded
-- [ ] `Factory<T>` may return a second function; `callable` keeps it as `__nwServer`, `all` collects its
-      members', and `Channel.make` registers the channel's for seal. A second return that is not a function
-      is refused at `nw.policy` with the message saying what the stage is
-- [ ] `Namespace.seal()` runs every registered stage once per policy identity — a policy attached to two
-      channels runs once — on the server only (`Driver` knows the side), before the id table is built. A
-      stage that raises fails seal with the policy's channel in the message; a startup error, loud
-- [ ] the stage runs through the yield detector below, so a stage that yields is the same startup error
-      and not a parked seal
-- [ ] `Policy.luau`'s docstring stops saying "resolve services" in the factory — that sentence is
-      `mistakes.md` 3 written as advice — and shows the stage instead; step 3's seam becomes the stage,
-      with the seam kept on the page as the spelling for a library older than this milestone
+- [x] `Factory<T>` may return a second function; `callable` keeps it as ~~`__nwServer`~~ `__nwStages`, a
+      list, so `all` can carry its members' and `Namespace.runStages` can dedupe by function; the command
+      and query records carry `stages = Policy.stagesOf(authorize)`. A second return that is not a function
+      is refused at `nw.policy` with the message saying what the stage is. One thing measured on the way:
+      `Factory<T>` typed `-> (Check<T>, Stage?)` refused every factory that returns the check alone (35
+      diagnostics), because a pack of one is not a subtype of a pack of two; it is `-> (Check<T>, ...Stage?)`
+- [x] ~~`Namespace.seal()` runs every registered stage~~ `Namespace.runStages()` does, once per distinct
+      function, and `Driver.ensure` calls it on the server after the seal *and* whenever it finds the
+      protocol already sealed — because `nw.protocol()` seals too, from a game printing its hash before its
+      first packet, and a seal that ran there must not leave the stages unrun; the second call is one
+      boolean. A stage that raises fails with the channel named, once (marked ran before running, so a
+      startup error is loud rather than repeated per batch)
+- [x] the stage runs on a coroutine of its own, so a yield is seen and refused as the same startup error
+      rather than parked on; `api_runtime` has the raise, the yield, the once-for-two-channels count, the
+      reset re-running it, and the check reading what the stage filled; `roblox_runtime`'s Driver section
+      counts the stage running once at the first send's seal, on the server
+- [x] `Policy.luau`'s docstring stops saying "resolve services" in the factory and shows the stage; step 3's
+      seam became the stage, with the seam kept on the page (and in `tutorial_ok`) as the spelling for a
+      library older than this milestone; `DESIGN-API.md` §5 records it beside the Flamework citation
 - [x] `Context.generation(player)` exposed to the transport; `Inbound` reads it before
       `xpcall(handler)` and `xpcall(authorize)` and compares after, and a moved generation reports at
       `handler` / `authorize` with a reason naming ~~`nw.keep`~~ the field copy and `query`. One compare

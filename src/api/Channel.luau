@@ -813,6 +813,7 @@ function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<
 		burst = checkedBurst(raw, "command", rate),
 		maxBytes = checkedMaxBytes(raw, "command"),
 		authorize = requirePolicy(raw, "command"),
+		stages = Policy.stagesOf(raw.authorize),
 	})
 end
 
@@ -959,6 +960,7 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 		burst = checkedBurst(raw, "query", rate),
 		maxBytes = checkedMaxBytes(raw, "query"),
 		authorize = requirePolicy(raw, "query"),
+		stages = Policy.stagesOf(raw.authorize),
 		timeout = timeout,
 		returns = returns,
 		responseCodec = Serdes.fromSchema(returns),

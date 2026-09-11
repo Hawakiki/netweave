@@ -76,14 +76,37 @@ type Equip = { slot: number }
 
 local policy = {}
 
---[[ Where the two stages run: the factory at load on both sides, the check on the server only, so
-     a server-only dependency is reached through a seam the server fills. ]]
+--[[ Where the three pieces run: the factory at load on both sides, the check on the server per
+     request, and the server stage once at seal — which is where a server-only module is reached. ]]
 local Offer = t.struct({ to = t.player, gold = t.u32(0, 1_000_000) })
 type Offer = { to: Player, gold: number }
 
-local server = {} :: { wallet: { goldOf: (Player) -> number }? }
+type Wallet = { goldOf: (Player) -> number }
+
+local WalletModule: Wallet = {
+	goldOf = function(_player: Player)
+		return 0
+	end,
+}
 
 policy.canAfford = nw.policy(function()
+	local wallet: Wallet? = nil
+
+	return function(ctx: nw.Ctx, offer: Offer)
+		local balance = (wallet :: Wallet).goldOf(ctx.player)
+		return if balance < offer.gold
+			then nw.deny(`offers {offer.gold} gold, holds {balance}`)
+			else nw.allow()
+	end, function()
+		wallet = WalletModule
+	end
+end)
+
+--[[ The older spelling, a seam the server fills by hand, kept because a library before PLAN-M5
+     needs it: an empty table the shared file exports, read by the check, denying when empty. ]]
+local server = {} :: { wallet: Wallet? }
+
+policy.canAffordBySeam = nw.policy(function()
 	return function(ctx: nw.Ctx, offer: Offer)
 		local wallet = server.wallet
 
@@ -98,11 +121,7 @@ policy.canAfford = nw.policy(function()
 	end
 end)
 
-server.wallet = {
-	goldOf = function(_player: Player)
-		return 0
-	end,
-}
+server.wallet = WalletModule
 
 --[[ A policy that closes over game state. ]]
 local Decision = t.struct({ tradeId = t.u16, accept = t.boolean })

@@ -419,6 +419,76 @@ function Namespace.get(name: string): Namespace?
 	return namespaces[name]
 end
 
+local stagesRan = false
+
+--[=[
+	@within Namespace
+	@function runStages
+	@private
+
+	Runs every policy's server stage once — once per distinct function, so a policy attached to two
+	channels, or a member of two compositions, runs its stage a single time. Called by the transport
+	on the server after the seal and before the first packet decodes, never on a client, and a
+	second call is one boolean.
+
+	A stage that raises or yields is a startup error and is raised as one, with the channel named:
+	a check that ran before its stage did would be a policy deciding on nothing, and a seal parked
+	on a yield would be a server that never opens (`PLAN-M5` D-5).
+]=]
+function Namespace.runStages()
+	if stagesRan then
+		return
+	end
+
+	--[[ Marked before running, so a stage that raises is raised once — loud at startup — rather
+	     than on every batch that follows. ]]
+	stagesRan = true
+
+	local seen: { [() -> ()]: boolean } = {}
+
+	for _, name in order do
+		for _, channel in namespaces[name].channels do
+			local stages: { () -> () }? = channel.stages
+
+			if not stages then
+				continue
+			end
+
+			for _, stage in stages do
+				if seen[stage] then
+					continue
+				end
+
+				seen[stage] = true
+
+				--[[ On a thread of its own so a yield is seen rather than parked on: a stage that
+				     does not finish synchronously has not filled what the check will read. ]]
+				local thread = coroutine.create(stage)
+				local ok, failure = coroutine.resume(thread)
+
+				if not ok then
+					error(
+						`the server stage of a policy on {channel.qualified} raised: {tostring(failure)}. `
+							.. `It runs once at seal, before any packet decodes, so this is a startup error; `
+							.. `fix it there instead of letting the check run over nothing.`,
+						0
+					)
+				end
+
+				if coroutine.status(thread) ~= "dead" then
+					error(
+						`the server stage of a policy on {channel.qualified} yielded, and a stage has to `
+							.. `finish before the first packet decodes. Remove the yield — read what is `
+							.. `already loaded, or require the module rather than waiting for it — so the `
+							.. `check never runs over a value the stage has not filled.`,
+						0
+					)
+				end
+			end
+		end
+	end
+end
+
 --[=[
 	@within Namespace
 	@function sealed
@@ -447,6 +517,7 @@ function Namespace.reset()
 	table.clear(byId)
 	protocol = nil
 	sealed = false
+	stagesRan = false
 end
 
 return Namespace

@@ -523,6 +523,29 @@ return policy
 
 Named values, so they are reusable and unit-testable without a network. `nw.all` composes.
 
+**The factory runs on both sides, and since `PLAN-M5` phase 7 there is a third piece for what may
+run on one.** A declaration file is required by the client too, so a factory that reaches for
+`ServerStorage` crashes the client at load; a first reader ranked that third among the mistakes
+they made (`docs/tutorial/mistakes.md`). The factory may return a second function, the **server
+stage**: netweave runs it once on the server when the protocol is sealed, before any packet
+decodes, and discards it on the client. A policy attached to two channels runs its stage once; a
+composed policy's stages are its members'; a stage that raises or yields fails the seal with the
+channel named, because a check that ran before its stage did would be a policy deciding on nothing.
+The structural idea is still Flamework's two-stage middleware (`RESEARCH §3.5-S3`); what is added is
+a stage that knows which side it is on, which Flamework gets from `createServer` and a shared
+declaration file cannot (D-5 of that plan).
+
+```lua
+policy.canAfford = nw.policy(function()
+    local wallet: Wallet? = nil
+    return function(ctx, offer)                                  -- per request, server only
+        return (wallet :: Wallet).goldOf(ctx.player) >= offer.gold and nw.allow() or nw.deny("poor")
+    end, function()                                              -- once at seal, server only
+        wallet = require(game:GetService("ServerStorage").Wallet)
+    end
+end)
+```
+
 ## 6. Trust
 
 `Untrusted<T>` records provenance in the type: this value came off the wire.
