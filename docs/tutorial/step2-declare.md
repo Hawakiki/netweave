@@ -103,11 +103,13 @@ enforced.
 
 Every channel's wire id is derived from the sorted names of *every* channel in the program, and so
 is the protocol hash both peers compare on the first batch. That has a consequence worth its own
-sentence: **a namespace declared in a server-only script refuses every client.** The server's hash
-includes it, the client's cannot, and each client is refused at stage `protocol` from its first
-batch onward, with "nothing works" as the symptom and one console line as the cause. Admin commands
-are declared in a shared module like everything else; what is server-only is the policy's
-dependency, reached through a seam (Step 3), not the declaration.
+sentence: **a namespace declared in a server-only script can never agree with any client.** The
+server's hash would include it, the client's cannot, and each client would be refused at stage
+`protocol` from its first batch onward, with "nothing works" as the symptom. So `nw.namespace`
+refuses it where it is written: a declaring module under `ServerScriptService` or `ServerStorage`
+raises at that line, naming the module and the fix. Admin commands are declared in a shared module
+like everything else; what is server-only is the policy's dependency, reached through a seam
+(Step 3), not the declaration.
 
 A namespace declared after the first packet has moved would renumber the ids the other peer already
 agreed to. netweave refuses that: declaring after the protocol is sealed raises. On a client "the

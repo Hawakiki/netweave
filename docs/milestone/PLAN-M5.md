@@ -296,10 +296,16 @@ payload type function at once:
       the handler seeing the newest each tick in both
 
 ### Phase 8 — the declaration that cannot work
-- [ ] `Namespace.declare` reads `debug.info(2, "s")` and refuses a declaring module under
-      `ServerScriptService` or `ServerStorage` with the fix in the message; a source that is neither a
-      full name nor a path does nothing. `roblox_runtime` carries the case both ways — a namespace from
-      `ReplicatedStorage` is not refused — and `messages` counts the new `error(`
+- [x] ~~`Namespace.declare` reads `debug.info(2, "s")`~~ `nw.namespace` reads it — level 2 from there is
+      the game's module, from `declare` it would be `nw.namespace` — and hands it to `Namespace.declare`
+      as a third argument, which refuses a source under `ServerScriptService` or `ServerStorage` with the
+      fix in the message and does nothing for any other shape. The lune half (`api_runtime`) hands the
+      source in and was confirmed to fail on the pre-fix tree, four assertions; the Studio half
+      (`roblox_runtime`) requires `tests/serveronly/declares.luau` through the second mapping both place
+      files give it under `ServerScriptService` and measured the real `debug.info` value to be
+      `ServerScriptService.netweaveServerOnly.declares`, refused with `ReplicatedStorage` in the message,
+      while every namespace the suite declares from `ReplicatedStorage` is not. `messages` counts the
+      `error(`: 75 now
 - [ ] control kind 3 in `Batch`, the per-namespace digest, written by the refusing peer with its hello
       answer and read by `Protocol.disagree`, which rewrites the reason to name the namespace that is
       missing or differs. `docs/WIRE-FORMAT.md` §4 gains the kind with its layout beside `hello`

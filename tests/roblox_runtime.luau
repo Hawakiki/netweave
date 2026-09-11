@@ -1009,6 +1009,49 @@ if player then
 	Context.forget(player)
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- A namespace declared where the client cannot require it (PLAN-M5 D-7)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`tests/api_runtime.luau` proves the guard against a source it hands in. What only Studio can say is
+	that `debug.info(2, "s")` inside `nw.namespace` really is the declaring module's full name, with
+	the prefix the guard looks for: `tests/serveronly/declares.luau` is mapped a second time under
+	`ServerScriptService` by both place files and declares a namespace when called. The namespaces
+	this file and the rest of the suite declare from `ReplicatedStorage` are the other direction.
+]]
+
+do
+	local ServerScriptService = game:GetService("ServerScriptService")
+	local folder = ServerScriptService:FindFirstChild("netweaveServerOnly")
+	local declares = if folder then folder:FindFirstChild("declares") else nil
+
+	if declares then
+		Namespace.reset()
+
+		local ok, err = pcall(function()
+			(require :: any)(declares)(nw, t)
+		end)
+
+		check("a namespace declared from ServerScriptService is refused", not ok)
+		check(
+			"with ReplicatedStorage named as the fix",
+			not ok and string.find(tostring(err), "ReplicatedStorage", 1, true) ~= nil
+		)
+		check(
+			`and the module named as the cause: {tostring(err)}`,
+			not ok
+				and string.find(tostring(err), "ServerScriptService.netweaveServerOnly.declares", 1, true)
+					~= nil
+		)
+		check("and nothing was declared", Namespace.get("serverOnly") == nil)
+
+		Namespace.reset()
+	else
+		print("        skip: ServerScriptService.netweaveServerOnly is not mapped in this place")
+	end
+end
+
 puppet:Destroy()
 probe:Destroy()
 
