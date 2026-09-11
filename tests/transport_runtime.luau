@@ -1230,6 +1230,102 @@ end
 do
 	reset()
 
+	--[[
+		A handler that yields across another packet of the same player (`PLAN-M5` D-5, acceptance 8).
+
+		The record behind `ctx` is shared per player and refreshed by every `acquire`, so a handler
+		parked on a yield resumes holding a `ctx` that now describes a later request. Studio's guard
+		raises on the read; production used to hand over the other request's data with nothing said.
+		The transport compares the player's release count around the handler and reports at `handler`
+		when it moved — a constant reason, one integer compare, no allocation.
+
+		Driven with coroutines because that is what a yield is: the first receive runs on its own
+		thread and parks inside the handler; the second, on this thread, dispatches the same player's
+		next packet and releases; the first resumes and returns. Confirmed to fail on the pre-fix
+		tree: no report, and the resumed handler reading the second packet's channel.
+	]]
+	local channel = outboundChannel(96, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[96] = channel
+
+	local other = outboundChannel(97, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[97] = other
+
+	local seenAfter: string? = nil
+	local resumed = false
+
+	channel.handler = function(ctx: any, _value: any)
+		coroutine.yield()
+		resumed = true
+		seenAfter = ctx.channel
+	end
+
+	other.handler = function(_ctx: any, _value: any) end
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ `inboundOf` records stage and channel; the reason is what this section is about. ]]
+	local reasons: { string } = {}
+	local stop = Observer.observe(function(rejection)
+		table.insert(reasons, rejection.reason)
+	end)
+
+	Batch.writePacket(channel, { a = 1 })
+	local first = Buffer.take()
+
+	Batch.writePacket(other, { a = 2 })
+	local second = Buffer.take()
+
+	local parked = coroutine.create(function()
+		inbound.receive(first, nil, alice)
+	end)
+
+	check(
+		"the first receive parks inside its handler",
+		coroutine.resume(parked) and coroutine.status(parked) == "suspended"
+	)
+	equals("nothing is reported while it is parked", #reported, 0)
+
+	--[[ The same player's next packet, on this thread, while the first handler is parked. ]]
+	inbound.receive(second, nil, alice)
+	equals("the second packet is dispatched and reports nothing of its own", #reported, 0)
+
+	check(
+		"the parked handler resumes and finishes",
+		coroutine.resume(parked) and coroutine.status(parked) == "dead"
+	)
+	check("it ran to the end", resumed)
+
+	--[[ What the handler saw after the yield is the other request's channel: the corruption the
+	     report is for, shown rather than asserted away. With the guard off, that is production. ]]
+	equals("the ctx it held now describes the later packet", seenAfter, other.qualified)
+
+	equals("and exactly one report says so", #reported, 1)
+	check("at the handler stage", string.find(reported[1], "handler:", 1, true) ~= nil)
+	check("naming the yield", #reasons == 1 and string.find(reasons[1], "yielded", 1, true) ~= nil)
+	check(
+		"and the query class as the way to wait",
+		#reasons == 1 and string.find(reasons[1], "query", 1, true) ~= nil
+	)
+
+	--[[ A handler that yields with nobody else's packet in between is neither detected nor harmed. ]]
+	local alone = coroutine.create(function()
+		inbound.receive(first, nil, bob)
+	end)
+	coroutine.resume(alone)
+	coroutine.resume(alone)
+	equals("a yield with no packet in between is not a report", #reported, 1)
+
+	stop()
+	channel.handler = nil
+	other.handler = nil
+	byId[96] = nil
+	byId[97] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
 	--[[ Refused before the payload is decoded, so a flood costs an id read and a seek rather than
 	     a deserialisation (`PLAN-M2` R-2). ]]
 	local channel = outboundChannel(43, t.struct({ a = t.u8 }), { class = "signal" })

@@ -82,7 +82,7 @@ diagnostic, and nothing says which channel did it.
 **The fix.** The schema-witness helper, `alive(Offer)`, `alive(Decision)`, `alive(t.u16)`: each
 channel gets its own `Policy<T>`, and `nw.all` accepts it (Step 3).
 
-## 5. Yielding inside a `command` handler
+## 5. Yielding inside a `command` handler — ~~quiet~~ reported at `handler` since M5
 
 ```lua
 trade.server.decide:listen(function(ctx, d)
@@ -96,6 +96,13 @@ end)
 reason — but the `ctx` you are holding is not yours after the yield: the record is reused per
 player, so in Studio the next read raises and in production it hands you a later request's player.
 The write to `pending` after the yield races every packet that arrived in between.
+
+**What happens now** (`PLAN-M5` phase 7). When a handler or a policy check yields and another packet
+of the same player is dispatched before it resumes, the transport notices — one integer compare
+around the call — and reports it at stage `handler` or `authorize`, in production, with a reason
+that spells the fix. A yield with no packet of that player in between is neither detected nor
+harmed. The report comes *after* the damage, so the rest of this entry still applies; what changed
+is that it is no longer silent.
 
 **The fix.** Read values you already cached, or copy the fields you need and hand the rest to a
 `task.spawn`. If the client needs the answer, it was a `query`: `:handle` is the one handler that
@@ -133,7 +140,7 @@ wrong for the rest of the session with nothing on either side saying so — whic
 
 **The fix.** `table.clone` for a flat value; copy as deep as you write for a nested one.
 
-## 8. Keeping a `ctx` in an upvalue
+## 8. Keeping a `ctx` in an upvalue — reported the same way as 5 when a handler is the reader
 
 ```lua
 local lastCtx
