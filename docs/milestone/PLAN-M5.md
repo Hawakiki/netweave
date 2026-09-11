@@ -191,6 +191,14 @@ continue, keeping the raise for the case where the namespace line is the only di
 or a function where a channel should be). Which of those two an error type arrives as is measured
 first in `spike/declare/`, because the type API's `is` may not name it.
 
+**Measured 2026-09-11, and the view functions are not where this can be done.** With one channel's
+`CommandPayload` carrying an error type, the diagnostic at the namespace line is "Type functions do
+not currently support types of the form 'ServerView<{ …CommandPayload<…*error-type*…> }>'" and the
+views are reported as *not having* keys `a` and `b` at all: the runtime refuses to reduce `ServerView`
+when its argument contains an error type, so the body never runs and there is nothing for it to give
+`unknown` to. The lever is upstream — the argument must not carry an error type — which makes D-8 the
+same work as item 43 in phase 3: a `Policy<T>` whose composition does not produce one.
+
 ## 6. Tasks
 
 Numbered by subject. **Run in this order**, decided at opening (2026-09-11), smallest blast radius
@@ -244,7 +252,13 @@ payload type function at once:
       `and … or` idiom, one side is inferred `Policy<unknown>` and the pair is refused. Hand-written request
       types compose in every shape. The tutorial writes policy request types by hand until this closes, and
       says so in step 3; the alias is the spelling the fix has to make work, because it is the one that
-      cannot drift from the schema
+      cannot drift from the schema. **Third measurement, at opening**: `read __nwCheck` and
+      `read __nwStages` on the record analyse clean across the tree (the earlier 71 were the scratch
+      file's own) and change nothing about composition — `nw.all(unk, onlyB)` and the configured-factory
+      pair still read "expected Policy, got Policy … not exactly", because a `typeof(setmetatable(…))`
+      type is compared exactly through its `__call` return and variance never enters. So 43 is not a
+      field-modifier fix; it is the callable shape, which is phase 1's D-1 (`Base & ((config) -> …)`),
+      and it runs after phase 1 rather than before it. Run order item 6 is therefore behind item 9
 
 ### Phase 4 — optimisation residue
 - [ ] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe
@@ -297,12 +311,15 @@ payload type function at once:
       alone. A name for a table nobody has needed is a name that will be reached for instead of the
       copy, and the copy is one line. The report's reason spells the copy. Reopen if a second field is
       ever kept
-- [ ] the client's `send` on an intent holds the newest value per channel and pushes it at the declared
-      rate through a client-side `Budget` keyed by channel, in `Driver` before `outbound.push`; a held
-      value is superseded, never dropped, never reported; `nw.diagnostics()` gains `paced` per channel
-- [ ] the probe, on `bench/tick`: 60 sends a second against `rate = 30`, `BEFORE` on the parent tree
-      showing 30 `budget` refusals a second and 60 packets on the wire, after showing 0 and at most 30,
-      the handler seeing the newest each tick in both
+- [x] the client's `send` on an intent holds the newest value per channel and pushes it at the declared
+      rate through a client-side `Budget` keyed by channel — `src/transport/Pacer.luau`, lune-loadable, so
+      `transport_runtime` drives it with an injected clock; `Driver.send` routes intents through it and
+      `Driver`'s frame ticks it before the flush; a held value is superseded, never dropped, never
+      reported; `nw.diagnostics()` gains `paced` per channel
+- [x] the probe, ~~on `bench/tick`~~ as `bench/pace.luau`, because the pacer is a client-side object and
+      `bench/tick` prices the server's replication tick: both rungs in one run under an injected clock,
+      BEFORE being the parent tree's behaviour reproduced (every send pushed as it comes) and AFTER the
+      pacer, each feeding a server-side `Budget.admit`; the numbers are in the commit and in §Result
 
 ### Phase 8 — the declaration that cannot work
 - [x] ~~`Namespace.declare` reads `debug.info(2, "s")`~~ `nw.namespace` reads it — level 2 from there is

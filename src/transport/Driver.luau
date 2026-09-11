@@ -27,6 +27,7 @@ local Inbound = require("./Inbound")
 local Link = require("./Link")
 local Namespace = require("../api/Namespace")
 local Outbound = require("./Outbound")
+local Pacer = require("./Pacer")
 local Protocol = require("../api/Protocol")
 local Query = require("./Query")
 local Recipients = require("./Recipients")
@@ -52,6 +53,13 @@ function Driver.install()
 	local roster = Recipients.roblox()
 	local outbound = Outbound.new(link, roster)
 	local budget = Budget.new()
+
+	--[[ A client's intent sends, held to the declared rate (`PLAN-M5` D-6). Built on the server too,
+	     where nothing ever calls `send`, because one code path is cheaper to be right about than
+	     two; an empty pacer's tick is one `#` on an empty array. ]]
+	local pacer = Pacer.new(function(channel: any, value: any)
+		outbound.push(channel, Outbound.SERVER, value)
+	end)
 
 	--[[
 		`task.spawn` is passed in rather than reached for inside `Query`, which keeps that module
@@ -213,6 +221,9 @@ function Driver.install()
 			replicate()
 		end
 
+		--[[ Held intent values whose channel has a token again go out in this frame's batch. ]]
+		pacer.tick()
+
 		outbound.flush()
 	end)
 
@@ -239,7 +250,14 @@ function Driver.install()
 	Transport.install({
 		send = function(channel: any, value: any)
 			ensure()
-			outbound.push(channel, Outbound.SERVER, value)
+
+			--[[ An intent is the newest value at the declared rate, and nothing else is: a signal
+			     or a command sent past its rate is the server's refusal to make. ]]
+			if channel.class == "intent" then
+				pacer.send(channel, value)
+			else
+				outbound.push(channel, Outbound.SERVER, value)
+			end
 		end,
 
 		publish = function(channel: any, subject: any, value: any)

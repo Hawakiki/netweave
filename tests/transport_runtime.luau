@@ -24,6 +24,7 @@ local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
 local Observer = require("../src/api/Observer")
 local Outbound = require("../src/transport/Outbound")
+local Pacer = require("../src/transport/Pacer")
 local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
 local harness = require("./harness")
@@ -1327,6 +1328,95 @@ do
 	other.handler = nil
 	byId[96] = nil
 	byId[97] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		A client's intent sends, paced to the declared rate (`PLAN-M5` D-6, acceptance 9).
+
+		Sixty sends a second against `rate = 30` used to be thirty refusals a second at `budget` on
+		the server, invisible on the client, while the handler saw one value a tick anyway. The pacer
+		holds the newest value per channel and pushes it when the channel's bucket has a token — the
+		same bucket the server runs — so what goes on the wire is what the server would admit, nothing
+		is refused, nothing is reported, and the held value is superseded rather than lost.
+
+		Driven with an injected clock, and the bucket drained first: a fresh bucket admits a full
+		burst before the rate binds, on both sides, so the steady state is the second that follows.
+		Confirmed to fail on the pre-fix tree by absence: `Pacer` did not exist, and `Driver.send`
+		pushed every intent as it came.
+	]]
+	local at = 0
+	local pushed: { { channel: any, value: any } } = {}
+
+	local pacer = Pacer.new(function(channel: any, value: any)
+		table.insert(pushed, { channel = channel, value = value })
+	end, function()
+		return at
+	end)
+
+	local hover = outboundChannel(98, t.struct({ slot = t.u8 }), { class = "intent", rate = 30 })
+	byId[98] = hover
+
+	local reported = 0
+	local stop = Observer.observe(function()
+		reported += 1
+	end)
+
+	--[[ Drain the burst: thirty sends at once take the thirty tokens a fresh bucket holds. ]]
+	for slot = 1, 30 do
+		check("a send inside the burst goes out as it comes", pacer.send(hover, { slot = slot }))
+	end
+
+	equals("the burst went out", #pushed, 30)
+
+	--[[ Sixty sends across the next second, one every sixtieth: the bucket refills thirty tokens
+	     over that second, so every other send has one. ]]
+	local admitted = 0
+
+	for index = 1, 60 do
+		at = index / 60
+
+		if pacer.send(hover, { slot = 100 + index }) then
+			admitted += 1
+		end
+	end
+
+	check(`across a second, about the rate went out: {admitted}`, admitted >= 29 and admitted <= 31)
+	equals("and the rest were held, not refused", reported, 0)
+	equals(
+		"counted as paced, not as anything else",
+		Observer.diagnostics().paced[hover.qualified],
+		60 - admitted
+	)
+	equals("the newest value is the one waiting", (pacer.held(hover) :: any).slot, 160)
+
+	--[[ A tick with no token pushes nothing; a tick after the bucket has a token pushes the held
+	     value, and only it. ]]
+	local before = #pushed
+	pacer.tick()
+	equals("no token, nothing goes", #pushed, before)
+
+	at = 2
+	pacer.tick()
+	equals("with a token, the held value goes", #pushed, before + 1)
+	equals("and it is the newest", pushed[#pushed].value.slot, 160)
+	check("and nothing is held any more", pacer.held(hover) == nil)
+
+	--[[ A newer send while one is held replaces it, so the client never sends stale input behind
+	     fresh input. ]]
+	at = 2.001
+	for slot = 1, 31 do
+		pacer.send(hover, { slot = slot })
+	end
+	check("a value is held again", pacer.held(hover) ~= nil)
+	pacer.send(hover, { slot = 99 })
+	equals("a newer send replaces the held one", (pacer.held(hover) :: any).slot, 99)
+
+	stop()
+	byId[98] = nil
 	Observer.reset()
 end
 
