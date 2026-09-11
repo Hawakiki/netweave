@@ -27,6 +27,11 @@ however many `aim` packets a player sends inside one frame, the handler runs onc
 Stale input has no value, and an attacker filling the rate budget cannot convert that into per-packet
 work on the server.
 
+The budget is counted before the coalescing, per packet, on the server. `rate = 30` with a `send`
+in every `RenderStepped` at 60 frames a second is thirty refusals a second at stage `budget`, and
+the client is not told. Send at the rate you declared — every other frame, or from a `Heartbeat`
+accumulator — and declare the rate you send at.
+
 An `intent` may declare `unreliable = true`, and for movement it usually should: a lost datagram
 costs one frame of input the next frame supersedes anyway, and an unreliable packet is not held
 back behind a reliable one that is still being retransmitted. `signal` accepts the flag on the same
@@ -57,7 +62,7 @@ getLoadout = nw.query({
 	returns = t.struct({ primary = t.u16, secondary = t.u16 }),
 	rate = 2,
 	timeout = 5,
-	authorize = policy.alive,
+	authorize = alive(t.u8),   -- the schema-witness helper from Step 3; args here are a t.u8
 }),
 ```
 
@@ -137,7 +142,26 @@ teamChat = nw.event({
 ```
 
 The function runs per publish, and on a replicated channel per subject per tick, so it is not the
-place for a tree walk; return a list you already keep. Making the recipient set a declaration rather
+place for a tree walk; return a list you already keep.
+
+The subject is whatever the publisher passes, and it is typed `unknown` on the way in: nothing
+checks that the `select` function receives a `Player` rather than a trade id, because the same
+channel may be published for either. So the cast inside is where that agreement lives, and a subject
+the function does not recognise should return an empty list rather than raise. Below, the subject is
+a trade id and the recipients are the two parties, looked up in a table the server keeps:
+
+```lua
+resolved = nw.event({
+	data = t.struct({ tradeId = t.u16, accepted = t.boolean }),
+	audience = nw.audience.select(function(subject)
+		local offer = pending[subject :: number]
+		return if offer then playersOf(offer) else {}
+	end),
+}),
+
+-- and on the server
+trade.server.resolved:publish(tradeId, { tradeId = tradeId, accepted = true })
+``` Making the recipient set a declaration rather
 than a call site turns "who can see this" into a reviewable line, which is how positional data stops
 leaking to wallhacks by accident.
 

@@ -11,7 +11,7 @@ difference, without the game calling netweave.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local nw = require(ReplicatedStorage.netweave.netweave)
-local t = nw.types
+local t = require(ReplicatedStorage.netweave.types)
 
 local world: { [number]: { hp: number, gold: number } } = {}
 
