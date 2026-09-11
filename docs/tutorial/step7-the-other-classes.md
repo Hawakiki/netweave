@@ -27,10 +27,15 @@ however many `aim` packets a player sends inside one frame, the handler runs onc
 Stale input has no value, and an attacker filling the rate budget cannot convert that into per-packet
 work on the server.
 
-The budget is counted before the coalescing, per packet, on the server. `rate = 30` with a `send`
+~~The budget is counted before the coalescing, per packet, on the server. `rate = 30` with a `send`
 in every `RenderStepped` at 60 frames a second is thirty refusals a second at stage `budget`, and
-the client is not told. Send at the rate you declared — every other frame, or from a `Heartbeat`
-accumulator — and declare the rate you send at.
+the client is not told.~~ **Since `PLAN-M5` phase 7 the client view paces an intent itself.**
+`send` keeps the newest value per intent channel and pushes it at the declared rate, through the
+same token bucket the server runs, so a `send` every frame against `rate = 30` puts thirty packets
+a second on the wire, the server refuses none of them, and the handler sees the newest each tick —
+which is what the class always meant. A held value is superseded, never lost, and never reported;
+`nw.diagnostics().paced` counts how many were held per channel, so a client that over-sends can see
+it. `signal` and `command` are not paced, because there every packet is a packet.
 
 An `intent` may declare `unreliable = true`, and for movement it usually should: a lost datagram
 costs one frame of input the next frame supersedes anyway, and an unreliable packet is not held

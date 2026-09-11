@@ -31,7 +31,7 @@ ranked around; in behaviour it now belongs with the immediate failures in §10.
 sides. A policy that is server-only reaches its dependency through a seam (Step 3), and the
 declaration still ships to the client, where the policy never runs.
 
-## 2. Sending an intent every frame
+## 2. Sending an intent every frame — ~~quiet~~ paced by the client since M5
 
 ```lua
 RunService.RenderStepped:Connect(function()
@@ -43,8 +43,14 @@ end)
 refusals a second at stage `budget`, and the client is not told; the feature looks like it "mostly
 works", which is why this one lasts.
 
-**The fix.** Send at the rate you declared — a `Heartbeat` accumulator, as the example does — or
-declare the rate you send at.
+**What happens now** (`PLAN-M5` phase 7). The client view holds the newest value per intent channel
+and pushes it at the declared rate, through the same bucket the server runs: thirty packets a
+second on the wire, none refused, the handler seeing the newest each tick. `nw.diagnostics().paced`
+counts what was held. The `Heartbeat` accumulator in the example is no longer needed and does no
+harm.
+
+**The fix, before that.** Send at the rate you declared — a `Heartbeat` accumulator — or declare
+the rate you send at.
 
 ## 3. Requiring a server module inside a policy factory — ~~by hand~~ the stage, since M5
 

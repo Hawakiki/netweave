@@ -334,6 +334,17 @@ This is the one place where merging is semantically safe. `RESEARCH §3.7-E` arg
 unreliable traffic is a semantic error in general — losing one datagram loses N events — and
 `intent` is the exception that proves it, because losing a superseded input is free.
 
+**And since `PLAN-M5` phase 7 the client side means it too.** Measured writing the tutorial: a
+`send` in every `RenderStepped` against `rate = 30` was forty refusals a second at stage `budget`,
+reported on the server and invisible on the client, while the handler saw one value a tick anyway —
+wasted bytes and a refusal count that reads as an attack. The client view now holds the newest value
+per intent channel and pushes it at the declared rate through the same token bucket the server runs,
+keyed by channel rather than by sender (`src/transport/Pacer.luau`). A held value is superseded,
+never dropped and never reported; `nw.diagnostics().paced` counts what was held. `bench/pace.luau`
+is the number: sixty sends a second for three seconds, before and after. `signal` and `command` are
+not paced, because there every packet is a packet, and the server's budget stays the enforcement
+either way — the pacer is the courtesy that makes it quiet on honest traffic (D-6 of that plan).
+
 ### Internally there are three primitives, not six
 
 ```
