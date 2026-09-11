@@ -1,6 +1,6 @@
 # netweave
 
-*[English](README.md) · [튜토리얼](docs/tutorial/README.md) · [API 설계](docs/DESIGN-API.md) · [와이어 포맷](docs/WIRE-FORMAT.md) · [벤치마크](bench/RESULTS.md)*
+*[English](README.md) · [튜토리얼](docs/tutorial/README.md) · [예제: 거래](docs/tutorial/example-trade.md) · [흔한 실수](docs/tutorial/mistakes.md) · [API 설계](docs/DESIGN-API.md) · [와이어 포맷](docs/WIRE-FORMAT.md) · [벤치마크](bench/RESULTS.md)*
 
 netweave는 선언 파일이 곧 보안 리뷰가 되는 Roblox 네트워킹 라이브러리입니다. 모든 채널은 자신을
 선언하는 그 줄에서 누가 보낼 수 있는지, 얼마나 자주인지, 누구에게 가는지, 그리고 핸들러가 페이로드를
@@ -199,8 +199,10 @@ combat.client.equip:send({ slot = 7 })
 전부 `nw`에 걸려 있습니다. `nw.namespace(name, channels)`는 채널 묶음을 한 번 선언하고 양쪽이
 require합니다. 각 채널의 id가 전체에 의존하므로 모든 네임스페이스는 첫 패킷이 움직이기 전에 선언되어야
 합니다. `nw.types`는 스키마 라이브러리이고 모든 타입이 유한합니다. `t.u8`, `t.u16(0, 1000)`,
-`t.string(0, 32)`, `t.array(t.u8, 0, 8)`, `t.struct`, `t.enum`, `t.optional`, `t.map`,
-`t.quantized`, `t.vector3`, `t.cframe`, `t.instance("BasePart")`, `t.player`.
+`t.string(0, 32)`, `t.array(t.u8, 0, 8)`, `t.struct`, `t.enum({ a = true, b = true })`,
+`t.optional`, `t.map`, `t.union`, `t.quantized`, `t.vector3`, `t.cframe`,
+`t.instance("BasePart")`, `t.player`. 어떤 스키마든 그 페이로드 타입은
+`t.PayloadOf<typeof(schema)>`라서 헬퍼가 스키마에 이미 적힌 타입을 다시 쓸 일이 없습니다.
 `nw.policy(factory)`는 정책을 두 단계로 만듭니다. 팩토리는 한 번, 검사는 요청마다 돌고, 검사는
 `nw.allow(value)`나 `nw.deny(reason)`을 돌려줍니다. `nw.all(...)`은 정책을 합성하고 첫 거부에서
 멈춥니다. `nw.audience`에는 `everyone`, `owner`, `nearby(studs)`, `select(fn)`이 있습니다.

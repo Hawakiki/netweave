@@ -59,7 +59,9 @@ docs/
   WIRE-FORMAT.md              frozen wire format, v1
   tutorial/                   step1-….md to step9-….md, from an empty place to a replicated store and the types to name it;
                               every snippet's declarations and calls are in tests/tutorial_ok.luau,
-                              which analyze has to accept — the prose is hand-kept against DESIGN-API
+                              which analyze has to accept — the prose is hand-kept against DESIGN-API.
+                              example-trade.md is a three-file worked example, its code in tests/trade_ok.luau
+                              the same way; mistakes.md is ten ways it went wrong, each checked against src
   milestone/
     PLAN-M0.md                one file per milestone, English
     PLAN-M1.md … PLAN-M4.md

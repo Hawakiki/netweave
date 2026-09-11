@@ -1,6 +1,6 @@
 # netweave
 
-*[한국어](README.ko.md) · [Tutorial](docs/tutorial/README.md) · [API design](docs/DESIGN-API.md) · [Wire format](docs/WIRE-FORMAT.md) · [Benchmarks](bench/RESULTS.md)*
+*[한국어](README.ko.md) · [Tutorial](docs/tutorial/README.md) · [Worked example](docs/tutorial/example-trade.md) · [Common mistakes](docs/tutorial/mistakes.md) · [API design](docs/DESIGN-API.md) · [Wire format](docs/WIRE-FORMAT.md) · [Benchmarks](bench/RESULTS.md)*
 
 netweave is a networking library for Roblox whose declaration file is the security review. Every
 channel says, on the line that declares it, who may send on it, how often, to whom it goes, and what
@@ -207,9 +207,10 @@ refuses and still counts.
 Everything hangs off `nw`. `nw.namespace(name, channels)` declares a group of channels once, to be
 required by both sides, and every namespace has to be declared before the first packet moves because
 each channel's id depends on all of them. `nw.types` is the schema library, where every type is
-bounded: `t.u8`, `t.u16(0, 1000)`, `t.string(0, 32)`, `t.array(t.u8, 0, 8)`, `t.struct`, `t.enum`,
-`t.optional`, `t.map`, `t.quantized`, `t.vector3`, `t.cframe`, `t.instance("BasePart")` and
-`t.player`. `nw.policy(factory)` builds a policy in two stages, the factory once and the check per
+bounded: `t.u8`, `t.u16(0, 1000)`, `t.string(0, 32)`, `t.array(t.u8, 0, 8)`, `t.struct`,
+`t.enum({ a = true, b = true })`, `t.optional`, `t.map`, `t.union`, `t.quantized`, `t.vector3`,
+`t.cframe`, `t.instance("BasePart")` and `t.player`; the payload type of any schema is
+`t.PayloadOf<typeof(schema)>`, so a helper never writes a type the schema already states. `nw.policy(factory)` builds a policy in two stages, the factory once and the check per
 request, and a check returns `nw.allow(value)` or `nw.deny(reason)`; `nw.all(...)` composes policies
 and stops at the first denial. `nw.audience` offers `everyone`, `owner`, `nearby(studs)` and
 `select(fn)`. `nw.store.of(table)`, `nw.store.charm(getter)` and `nw.store.replica(replicas)` are

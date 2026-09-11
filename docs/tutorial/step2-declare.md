@@ -15,9 +15,10 @@ A namespace is declared once and required by the server and the client alike. Pu
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local nw = require(ReplicatedStorage.netweave.netweave)
-local t = nw.types
+local t = require(ReplicatedStorage.netweave.types)
 
 local Equip = t.struct({ slot = t.u8(0, 9) })
+type Equip = { slot: number }   -- by hand here, and Step 3 says why; elsewhere t.PayloadOf derives it
 
 --[[ A policy that allows everything, until Step 3 writes a real one. ]]
 local allow = nw.policy(function()
@@ -73,7 +74,17 @@ t.instance("BasePart"), t.player
 ```
 
 The payload type is inferred from the schema: `Equip` above is `Type<{ slot: number }>`, and every
-handler and every `send` on that channel is typed from it. You never write the payload type by hand.
+handler and every `send` on that channel is typed from it. Where your own code needs to name that
+type — a helper that builds one, a union to switch on — `t.PayloadOf<typeof(Equip)>` derives it
+from the schema so the two cannot drift (Steps 8 and 9). The one place to write it by hand is a
+policy's request parameter, which is why this file does: Step 3 has the measurement. The value and
+the type may share a name, as above; Luau keeps them in separate namespaces.
+
+Two spellings in the list are shaped the way they are for a reason. `t.enum` takes a table of keys,
+`{ primary = true, secondary = true }`, not an array: an array literal is widened to `{ string }` and
+the variant names would be lost to the type, whereas keys survive as `"primary" | "secondary"`.
+And a range is a second call, `t.u16(0, 1000)`, not a field, so that a bare `t.u16` stays a plain
+value a helper can pass around.
 
 ## What does not type-check
 
@@ -88,10 +99,17 @@ These are guarantees G1, G2 and G3 in `docs/DESIGN-API.md` §2, and `tests/api_r
 every one of them: a rejection file that stops erroring is how a guarantee silently stops being
 enforced.
 
-## Declare everything before the first packet
+## Declare everything before the first packet, and on both sides
 
-Every channel's wire id is derived from the sorted names of *every* channel in the program, so a
-namespace declared after the first packet has moved would renumber the ids the other peer already
+Every channel's wire id is derived from the sorted names of *every* channel in the program, and so
+is the protocol hash both peers compare on the first batch. That has a consequence worth its own
+sentence: **a namespace declared in a server-only script refuses every client.** The server's hash
+includes it, the client's cannot, and each client is refused at stage `protocol` from its first
+batch onward, with "nothing works" as the symptom and one console line as the cause. Admin commands
+are declared in a shared module like everything else; what is server-only is the policy's
+dependency, reached through a seam (Step 3), not the declaration.
+
+A namespace declared after the first packet has moved would renumber the ids the other peer already
 agreed to. netweave refuses that: declaring after the protocol is sealed raises. On a client "the
 first packet" is one that *arrives*, so require every namespace before anything yields — a
 `WaitForChild` between requiring netweave and requiring this module is enough to lose the race
