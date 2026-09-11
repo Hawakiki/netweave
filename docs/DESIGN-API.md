@@ -799,6 +799,18 @@ end)
 A generation counter bumped when the handler returns makes expired access an error in Studio.
 The guard compiles out in production, so the cost is zero where it matters.
 
+**And since `PLAN-M5` phase 7, the worst case is reported in production too.** The case the guard
+exists for is a handler or a policy check that yields while another packet of the same player is
+dispatched: the record is refreshed under it, and every read it makes after resuming is that later
+request's. The same generation counter answers that with one integer compare around the call — read
+before, compared after — and a moved value is reported at stage `handler` or `authorize` with a
+constant reason that spells the fix: copy the fields you need before yielding, or declare a `query`,
+whose handler runs on a thread and a context of its own. The report comes after the damage, and a
+yield with no packet of that player in between is neither detected nor harmed; what changed is that
+"nothing on the receive path is silent" (`CLAUDE.md` §9) now holds for this path as well.
+`nw.keep(ctx)` was considered and not added: nothing in the suite or the trade example keeps more
+than `ctx.player` past a yield, and that is one line.
+
 ## 9. Rejections
 
 Nothing is thrown. Every rejection is a value delivered to an observer, which is also what

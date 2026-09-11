@@ -117,6 +117,13 @@ local function traceback(message: any): string
 	return `{tostring(message)}\n{debug.traceback("", 2)}`
 end
 
+--[[ One string for every report of its kind, because a flood of yielding handlers is a flood, and
+     a reason built per packet is a reason that differs per packet (`CLAUDE.md` §9, "count it"). ]]
+local YIELDED_ACROSS_PACKET = "the handler yielded, and another packet of this player was dispatched "
+	.. "before it resumed, so the ctx it held was refreshed under it and every read after the yield "
+	.. "was that later request's. Copy the fields you need before yielding — local player = "
+	.. "ctx.player — or declare the channel a query, whose handler may yield on a thread of its own"
+
 --[[
 	What a `replicate` handler is given **is** this endpoint's baseline, and until M4 phase 8 it
 	could be written to.
@@ -342,7 +349,15 @@ function Inbound.new(config: Config): Inbound
 
 			`xpcall` with the module-level `traceback` handler allocates no closure per call.
 		]]
+		local generation = Context.generation(who)
 		local ran, verdict = xpcall(authorize, traceback, ctx, value)
+
+		--[[ A check that yielded across another packet of this player read a refreshed record after
+		     the yield; the policy's own docstring forbids the yield, and this is where breaking that
+		     stops being silent. One integer compare, one constant reason (`PLAN-M5` D-5). ]]
+		if Context.generation(who) ~= generation then
+			report(channel, who, "authorize", YIELDED_ACROSS_PACKET, bytes)
+		end
 
 		if not ran then
 			report(channel, who, "authorize", `the policy raised: {tostring(verdict)}`, bytes)
@@ -490,10 +505,23 @@ function Inbound.new(config: Config): Inbound
 			value = narrowed
 		end
 
+		local generation = Context.generation(who)
 		local ok, failure = xpcall(handler, traceback, ctx, value)
 
 		if not ok then
 			report(channel, who, "handler", tostring(failure), bytes)
+		end
+
+		--[[
+			The handler yielded, and while it was parked another packet of the same player was
+			dispatched: `acquire` refreshed the shared record and `release` moved its generation, so
+			every `ctx` read the handler made after resuming was that later request's. The batch
+			survives — reading and dispatching are separate passes for this reason — and until now
+			the corruption did too, silently, everywhere the Studio guard is not. Reported with a
+			constant reason so a flood of them allocates nothing (`CLAUDE.md` §9, "count it").
+		]]
+		if Context.generation(who) ~= generation then
+			report(channel, who, "handler", YIELDED_ACROSS_PACKET, bytes)
 		end
 
 		Context.release(who)

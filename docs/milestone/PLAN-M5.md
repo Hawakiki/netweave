@@ -276,18 +276,19 @@ payload type function at once:
 - [ ] `Policy.luau`'s docstring stops saying "resolve services" in the factory — that sentence is
       `mistakes.md` 3 written as advice — and shows the stage instead; step 3's seam becomes the stage,
       with the seam kept on the page as the spelling for a library older than this milestone
-- [ ] `Context.generation(player)` exposed to the transport; `Inbound` reads it before
+- [x] `Context.generation(player)` exposed to the transport; `Inbound` reads it before
       `xpcall(handler)` and `xpcall(authorize)` and compares after, and a moved generation reports at
-      `handler` / `authorize` with a reason naming `nw.keep` and `query`. One compare per call; the
-      flood probe's distinct-reason count is the proof it allocates nothing (`CLAUDE.md` §9, "count it")
-- [ ] the report is confirmed to fail against the pre-fix tree: a `task.wait` handler and a second packet
-      of the same player in `transport_runtime`, guard off. The Studio guard's own message names
-      `nw.keep` too
-- [ ] `nw.keep(ctx)`: one table with `player`, `channel`, `now`, `character`, `humanoid` read at the
-      call, typed `nw.Ctx`, written in `api_ok`. The alternative — that the field copy in the tutorial is
-      enough and no name is warranted — is decided by counting how many places in `tests/trade_ok.luau`
-      and the suite keep more than one field past a yield, and the count and the decision are written
-      here either way
+      `handler` / `authorize` with a reason naming ~~`nw.keep`~~ the field copy and `query`. One compare
+      per call and one constant string; `hostile_runtime`'s flood probe is unchanged at 214 assertions
+- [x] the report is confirmed to fail against the pre-fix tree: a `coroutine.yield` handler (lune has no
+      `task.wait` in a module) and a second packet of the same player in `transport_runtime`, guard off —
+      with the two compares replaced by `false` the section reads "expected 1, got 0"; with them it also
+      shows the corruption itself, the resumed handler's `ctx.channel` being the *later* packet's channel
+- [x] ~~`nw.keep(ctx)`~~ **not added.** The count: zero places in `tests/trade_ok.luau`, `tests/tutorial_ok.luau`
+      or the suite keep more than one field of a `ctx` past a yield; every one copies `ctx.player`
+      alone. A name for a table nobody has needed is a name that will be reached for instead of the
+      copy, and the copy is one line. The report's reason spells the copy. Reopen if a second field is
+      ever kept
 - [ ] the client's `send` on an intent holds the newest value per channel and pushes it at the declared
       rate through a client-side `Budget` keyed by channel, in `Driver` before `outbound.push`; a held
       value is superseded, never dropped, never reported; `nw.diagnostics()` gains `paced` per channel
