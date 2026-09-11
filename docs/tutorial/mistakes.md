@@ -21,9 +21,11 @@ peer is on protocol 0x… and this peer is on 0x…`, or an observer.
 
 **What happens now.** `nw.namespace` reads the declaring module's name and refuses one under
 `ServerScriptService` or `ServerStorage` at that line, before anything else, with the message
-naming the module and the fix. This entry stays at the top because it is the one the list was
-ranked around; it now belongs with the immediate failures in §10, and moves there when the digest
-in phase 8 lands beside it.
+naming the module and the fix. And for the disagreements that are a matter of degree — a stale
+client, a half-deployed build — every hello now travels with a per-namespace digest, and the
+refusing peer's reason names the namespace one side lacks or the one a channel differs in, on both
+consoles, instead of two hashes. This entry stays at the top because it is the one the list was
+ranked around; in behaviour it now belongs with the immediate failures in §10.
 
 **The fix.** Every namespace lives in a shared module under `ReplicatedStorage`, required by both
 sides. A policy that is server-only reaches its dependency through a seam (Step 3), and the

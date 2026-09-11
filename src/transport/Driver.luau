@@ -80,7 +80,13 @@ function Driver.install()
 		end,
 
 		announce = function(who: any?)
-			outbound.hello(if who == nil then Outbound.SERVER else who, Namespace.protocol().hash)
+			local protocol = Namespace.protocol()
+			outbound.hello(if who == nil then Outbound.SERVER else who, protocol.hash, protocol.namespaces)
+		end,
+
+		--[[ Read late like `hash`, and for the same reason. ]]
+		namespaces = function()
+			return Namespace.protocol().namespaces
 		end,
 
 		isServer = isServer,
@@ -160,7 +166,8 @@ function Driver.install()
 			to. It answers on a mismatch instead (`src/api/Protocol.luau`).
 		]]
 		if not isServer then
-			outbound.hello(Outbound.SERVER, Namespace.protocol().hash)
+			local protocol = Namespace.protocol()
+			outbound.hello(Outbound.SERVER, protocol.hash, protocol.namespaces)
 		end
 	end
 

@@ -1510,6 +1510,79 @@ do
 	check("while saying so", reportedAt("protocol") > 0)
 end
 
+do
+	--[[
+		A digest flood (PLAN-M5 D-7). The per-namespace digest is the one control packet whose body
+		is a list, so decoding it allocates a table per namespace — and a peer can send as many as it
+		likes before `admit` sees anything. The bound: a digest is decoded only for a peer that is
+		refused and not yet named, so the first one from a refused peer costs a decode and one named
+		report, and the next three hundred cost a table read each. Counted in reports, because a
+		decode that happened would have reported something, at `parse` or at `protocol`.
+	]]
+	reset()
+
+	local refused = Protocol.new({
+		hash = function(): number
+			return protocol.hash + 1
+		end,
+
+		announce = function() end,
+
+		namespaces = function()
+			return protocol.namespaces
+		end,
+
+		isServer = true,
+	})
+
+	local held = Baseline.new(true)
+
+	local guarded = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+		agreement = refused,
+	})
+
+	--[[ A digest that differs from ours by one namespace's hash, so the first one names it. ]]
+	local theirs: { Protocol.NamespaceDigest } = {}
+	for index, entry in protocol.namespaces do
+		theirs[index] = { name = entry.name, hash = if index == 1 then entry.hash + 1 else entry.hash }
+	end
+
+	Batch.writeHello(protocol.hash)
+	local greeted = pcall(guarded.receive, (Buffer.take()), nil, mallory)
+	check("the mismatched hello does not raise", greeted)
+	local before = reportedAt("protocol")
+
+	for _ = 1, 300 do
+		Batch.writeDigest(theirs)
+	end
+
+	local flooded = pcall(guarded.receive, (Buffer.take()), nil, mallory)
+	check("three hundred digests do not raise", flooded)
+	equals("the first names the namespace and is reported once", reportedAt("protocol") - before, 1)
+	equals("and none of them is malformed", reportedAt("parse"), 0)
+	check(
+		"the verdict names the namespace",
+		string.find(refused.verdict(mallory) or "", `"{protocol.namespaces[1].name}"`, 1, true) ~= nil
+	)
+
+	--[[ A peer that agrees sends the same three hundred and pays nothing at all. ]]
+	refused.greet(mallory, protocol.hash + 1)
+	local agreedBefore = #reports
+
+	for _ = 1, 300 do
+		Batch.writeDigest(theirs)
+	end
+
+	pcall(guarded.receive, (Buffer.take()), nil, mallory)
+	equals("from an agreeing peer they are stepped over without a word", #reports - agreedBefore, 0)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- One valid packet, so the rig is proved to be capable of delivering anything at all
 -- ---------------------------------------------------------------------------------------------

@@ -117,6 +117,11 @@ local function traceback(message: any): string
 	return `{tostring(message)}\n{debug.traceback("", 2)}`
 end
 
+--[[ A digest whose body does not parse inside its declared length, or claims more than a
+     declaration can hold. One string, for the same reason as the next one. ]]
+local MALFORMED_DIGEST = "a digest's body ends before the namespaces it counts do, or claims more "
+	.. "namespaces or a longer name than any declaration can hold"
+
 --[[ One string for every report of its kind, because a flood of yielding handlers is a flood, and
      a reason built per packet is a reason that differs per packet (`CLAUDE.md` §9, "count it"). ]]
 local YIELDED_ACROSS_PACKET = "the handler yielded, and another packet of this player was dispatched "
@@ -930,6 +935,40 @@ function Inbound.new(config: Config): Inbound
 				report(nil, sender, "protocol", disagreement, bytes)
 			end
 		end,
+
+		--[[
+			A peer's per-namespace digest, beside its hello.
+
+			Decoded only when it changes something: the peer is refused and its reason does not yet
+			name a namespace. Every other digest — from a peer that agrees, from one already named,
+			from a peer that never said hello — is stepped over at the cost of one table read, which
+			is what bounds a flood of them (`PLAN-M5` D-7). The one that is decoded rewrites the
+			reason and is reported once more at `protocol`, so the console that printed two hashes
+			now prints the namespace.
+		]]
+		--[[ Absent, not silent, on an endpoint with no agreement: `Batch` then reports the kind as one
+		     this build does not read, which is what it is here, rather than stepping over it without
+		     a word — the fuzzer's client rig has no agreement and found the silence. ]]
+		digest = if agreement == nil
+			then nil
+			else function(bytes: number)
+				if not agreement.wants(sender) then
+					return
+				end
+
+				local entries = Batch.readDigest()
+
+				if not entries then
+					report(nil, sender, "parse", MALFORMED_DIGEST, bytes)
+					return
+				end
+
+				local named = agreement.digest(sender, entries)
+
+				if named then
+					report(nil, sender, "protocol", named, bytes)
+				end
+			end,
 
 		--[[
 			A peer asking for a replicated channel in full.

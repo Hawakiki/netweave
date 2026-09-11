@@ -647,6 +647,166 @@ do
 	--[[ A rejoin on a fixed build. The refusal is per peer and is cleared, not sticky. ]]
 	agreement.greet(bob, mine)
 	check("agreeing later clears the refusal", agreement.verdict(bob) == nil)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- Naming the namespace a mismatch is in (PLAN-M5 D-7)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Two hashes say that two builds disagree. The per-namespace digest beside the hello says where,
+	which is what the person at the console can act on. Confirmed to fail on the pre-fix tree by
+	absence: `Protocol.difference`, `namespaces` on the protocol and `digest` on the agreement did not
+	exist, and the reason named two hashes and nothing else.
+]]
+
+do
+	--[[ The protocol's own digest: one entry per namespace, in name order, and a change inside one
+	     namespace moves that entry alone. ]]
+	local function digestOf(declaration: { [string]: { [string]: any } }): Protocol.Protocol
+		local names: { string } = {}
+		local byName: { [string]: any } = {}
+
+		for space, channels in declaration do
+			for key, channel in channels do
+				local qualified = `{space}.{key}`
+				table.insert(names, qualified)
+				byName[qualified] = channel
+			end
+		end
+
+		table.sort(names)
+		return Protocol.digest(names, byName)
+	end
+
+	local base = digestOf({
+		combat = { fire = nw.signal({ data = t.u8, rate = 1 }), aim = nw.signal({ data = t.u16, rate = 1 }) },
+		vault = { open = nw.signal({ data = t.u8, rate = 1 }) },
+	})
+
+	equals("one digest entry per namespace", #base.namespaces, 2)
+	equals("in name order", base.namespaces[1].name, "combat")
+	equals("and the second", base.namespaces[2].name, "vault")
+
+	local widened = digestOf({
+		combat = { fire = nw.signal({ data = t.u8, rate = 1 }), aim = nw.signal({ data = t.u32, rate = 1 }) },
+		vault = { open = nw.signal({ data = t.u8, rate = 1 }) },
+	})
+
+	check("the whole hash moves when a channel widens", widened.hash ~= base.hash)
+	check("and so does its namespace's", widened.namespaces[1].hash ~= base.namespaces[1].hash)
+	equals("while the other namespace's does not", widened.namespaces[2].hash, base.namespaces[2].hash)
+
+	--[[ The three shapes a difference takes, each said from this peer's side. ]]
+	local missing = digestOf({
+		combat = { fire = nw.signal({ data = t.u8, rate = 1 }), aim = nw.signal({ data = t.u16, rate = 1 }) },
+	})
+
+	local fromBase = Protocol.difference(base.namespaces, missing.namespaces) or ""
+	check("a namespace only this peer declares is named", string.find(fromBase, '"vault"', 1, true) ~= nil)
+	check("as this peer's", string.find(fromBase, "this peer declares", 1, true) ~= nil)
+
+	local fromMissing = Protocol.difference(missing.namespaces, base.namespaces) or ""
+	check("and from the other side it is the peer's", string.find(fromMissing, '"vault"', 1, true) ~= nil)
+	check("said so", string.find(fromMissing, "the peer declares", 1, true) ~= nil)
+
+	local inside = Protocol.difference(base.namespaces, widened.namespaces) or ""
+	check(
+		"a channel differing inside a shared namespace names the namespace",
+		string.find(inside, '"combat"', 1, true) ~= nil
+	)
+	check("and says it is inside", string.find(inside, "inside the namespace", 1, true) ~= nil)
+
+	check(
+		"two identical digests differ nowhere",
+		Protocol.difference(base.namespaces, base.namespaces) == nil
+	)
+
+	--[[ Through the agreement: a refused peer's reason is rewritten once, the second and the three
+	     hundredth digest are not decoded, and agreeing later clears the name with the refusal. ]]
+	local bob = { name = "bob" }
+	local announced = 0
+
+	local agreement = Protocol.new({
+		hash = function(): number
+			return base.hash
+		end,
+
+		announce = function()
+			announced += 1
+		end,
+
+		namespaces = function()
+			return base.namespaces
+		end,
+
+		isServer = true,
+	})
+
+	check("a peer that has not said hello is not wanted", not agreement.wants(bob))
+	check("and its digest changes nothing", agreement.digest(bob, missing.namespaces) == nil)
+
+	agreement.greet(bob, missing.hash)
+	check("a refused peer's digest is wanted", agreement.wants(bob))
+	check("until it arrives", string.find(agreement.verdict(bob) or "", '"vault"', 1, true) == nil)
+
+	local named = agreement.digest(bob, missing.namespaces)
+	check(
+		"the first digest names the namespace",
+		named ~= nil and string.find(named, '"vault"', 1, true) ~= nil
+	)
+	check("and the verdict is that reason from now on", agreement.verdict(bob) == named)
+	check("and no further digest is wanted", not agreement.wants(bob))
+
+	for _ = 1, 300 do
+		check("nor changes anything", agreement.digest(bob, widened.namespaces) == nil)
+	end
+
+	check(
+		"the reason still names the first one",
+		string.find(agreement.verdict(bob) or "", '"vault"', 1, true) ~= nil
+	)
+	equals("and the answer was one hello, not three hundred", announced, 1)
+
+	agreement.greet(bob, base.hash)
+	check(
+		"agreeing clears the name with the refusal",
+		agreement.verdict(bob) == nil and not agreement.wants(bob)
+	)
+
+	--[[ On the wire: a digest beside a hello round-trips, the packet behind it decodes, and a body
+	     claiming more namespaces than a declaration can hold is refused rather than allocated. ]]
+	local record: { Record } = {}
+	local decoded: { Protocol.NamespaceDigest }? = nil
+	local sink = sinkOf(record)
+
+	sink.digest = function()
+		decoded = Batch.readDigest()
+	end
+
+	Buffer.load(nil)
+	Batch.writeHello(base.hash)
+	Batch.writeDigest(base.namespaces)
+	Batch.writePacket(Ping, { seq = 9 })
+
+	Batch.read(Buffer.take(), nil, sink)
+
+	check("the digest decodes", decoded ~= nil)
+	equals("with both namespaces", if decoded then #decoded else 0, 2)
+	equals("their names", if decoded then decoded[2].name else "", "vault")
+	equals("and their hashes", if decoded then decoded[1].hash else 0, base.namespaces[1].hash)
+	equals("and the packet behind it decoded", record[#record].value, 9)
+
+	local many: { Protocol.NamespaceDigest } = {}
+	for index = 1, 1025 do
+		many[index] = { name = `n{index}`, hash = index }
+	end
+
+	decoded = nil
+	Buffer.load(nil)
+	Batch.writeDigest(many)
+	Batch.read(Buffer.take(), nil, sink)
+	check("a digest past the namespace bound is refused, not decoded", decoded == nil)
 
 	agreement.greet(bob, 0x99999999)
 	agreement.forget(bob)

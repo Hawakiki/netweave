@@ -46,6 +46,7 @@ local attemptPacket: (...any) -> ...any = Batch.writePacket
 local attemptRequest: (...any) -> ...any = Batch.writeRequest
 local attemptReply: (...any) -> ...any = Batch.writeReply
 local attemptHello: (...any) -> ...any = Batch.writeHello
+local attemptDigest: (...any) -> ...any = Batch.writeDigest
 local attemptChange: (...any) -> ...any = Batch.writeChange
 local attemptResync: (...any) -> ...any = Batch.writeResync
 
@@ -104,7 +105,7 @@ export type Outbound = {
 	broadcast: (channel: any, value: any) -> (),
 	request: (channel: any, call: number, value: any) -> (),
 	reply: (channel: any, destination: any, call: number, status: number, value: any?) -> (),
-	hello: (destination: any, hash: number) -> (),
+	hello: (destination: any, hash: number, namespaces: { Batch.NamespaceDigest }?) -> (),
 	flush: () -> (),
 	forget: (destination: any) -> (),
 }
@@ -435,9 +436,16 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 			batch carry the hash, and what lets the packets behind it in that same batch be refused
 			if the hash does not match.
 		]]
-		hello = function(destination: any, hash: number)
+		hello = function(destination: any, hash: number, namespaces: { Batch.NamespaceDigest }?)
 			switchTo(destination)
 			guarded(attemptHello, hash)
+
+			--[[ Beside the hello, never alone: the digest is what lets the peer name a mismatch, and
+			     a mismatch is decided by the hello. Optional so a rig that hands in no namespaces
+			     keeps its hello the size it was. ]]
+			if namespaces then
+				guarded(attemptDigest, namespaces)
+			end
 		end,
 
 		--[[ Once a frame. Everything accumulated goes out as one call per destination, which is the
