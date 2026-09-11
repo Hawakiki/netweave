@@ -1244,6 +1244,12 @@ do
 		next packet and releases; the first resumes and returns. Confirmed to fail on the pre-fix
 		tree: no report, and the resumed handler reading the second packet's channel.
 	]]
+	--[[ Guard off, as acceptance 8 says: this section is about what production does. With the
+	     Studio guard on the resumed handler's read raises instead, which is the guard doing its job
+	     and a second report beside this one — measured in the first Studio pass of the section. ]]
+	local guardWas = Context.guarded()
+	Context.setGuarded(false)
+
 	local channel = outboundChannel(96, t.struct({ a = t.u8 }), { class = "signal" })
 	byId[96] = channel
 
@@ -1315,6 +1321,7 @@ do
 	coroutine.resume(alone)
 	equals("a yield with no packet in between is not a report", #reported, 1)
 
+	Context.setGuarded(guardWas)
 	stop()
 	channel.handler = nil
 	other.handler = nil
