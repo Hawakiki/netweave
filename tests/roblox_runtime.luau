@@ -864,15 +864,30 @@ if ready then
 
 	Namespace.reset()
 
+	--[[ A policy with a server stage (PLAN-M5 D-5): the real driver runs it at the seal its first
+	     send triggers, before that packet is written, and once for the two channels it is on. ]]
+	local staged = 0
+	local stagedPolicy = nw.policy(function()
+		return function()
+			return nw.allow()
+		end, function()
+			staged += 1
+		end
+	end)
+
 	local studio = nw.namespace("studio", {
 		hello = nw.event({ data = t.u8, audience = nw.audience.owner }),
 		wide = nw.event({ data = t.array(t.u8), audience = nw.audience.owner, unreliable = true }),
+		buy = nw.command({ data = t.u8, rate = 1, authorize = stagedPolicy }),
+		sell = nw.command({ data = t.u8, rate = 1, authorize = stagedPolicy }),
 	})
 
 	puppet:FireClient(client, "arm")
 	heard(PUPPET_TIMEOUT, "armed")
 
+	equals("a server stage has not run before the first send", staged, 0)
 	studio.server.hello:publish(player, 7)
+	equals("the first send sealed and ran it, once for two channels", staged, 1)
 	frames(2)
 
 	local batch = heard(2, "netweave")

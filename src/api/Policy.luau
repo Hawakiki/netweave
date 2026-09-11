@@ -86,13 +86,26 @@ export type Verdict = {
 export type Check<T> = (ctx: Context.Ctx, payload: T) -> Verdict
 
 --[=[
-	@type Factory<T> (config: any) -> Check<T>
+	@type Stage () -> ()
+	@within Policy
+
+	The server-only half a factory may return second. Runs once, on the server, when the protocol
+	is sealed — before any packet decodes, and never on a client — so it is where a policy reaches
+	the module that exists on one side only (`PLAN-M5` D-5).
+]=]
+export type Stage = () -> ()
+
+--[=[
+	@type Factory<T> (config: any) -> (Check<T>, Stage?)
 	@within Policy
 
 	The load-time half. Receives whatever the policy was configured with, or an empty table when
-	it was used bare.
+	it was used bare, and returns the per-request check — and, optionally, the server stage.
 ]=]
-export type Factory<T> = (config: any) -> Check<T>
+--[[ A variadic tail rather than `(Check<T>, Stage?)`: a return pack of one value is not a subtype
+     of a pack of two, so the fixed spelling refused every factory that returns the check alone —
+     measured as 35 diagnostics across `api_ok` and `api_reject` the moment it was written. ]]
+export type Factory<T> = (config: any) -> (Check<T>, ...Stage?)
 
 --[=[
 	@type Policy<T> Check<T>
@@ -108,7 +121,7 @@ export type Factory<T> = (config: any) -> Check<T>
 	Bare, it already is the per-request check. Called, it produces a differently configured one.
 ]=]
 export type Policy<T> = typeof(setmetatable(
-	{} :: { __nwCheck: (ctx: Context.Ctx, payload: T) -> Verdict },
+	{} :: { __nwCheck: (ctx: Context.Ctx, payload: T) -> Verdict, __nwStages: { Stage } },
 	{} :: { __call: (self: any, config: any) -> Policy<T> }
 ))
 
@@ -173,8 +186,36 @@ function Policy.deny(reason: string): Verdict
 	return VERDICT
 end
 
-local function callable<T>(check: Check<T>, factory: Factory<T>?): Policy<T>
-	local self = { __nwCheck = check }
+--[[
+	Runs a factory and checks the shape of what came back. Shared by the bare form and the
+	configured one, so the two cannot drift on what a second return means.
+]]
+local function build<T>(factory: Factory<T>, config: any): (Check<T>, { Stage })
+	local check, stage = factory(config)
+
+	if type(check) ~= "function" then
+		error(
+			`a policy factory returns the per-request function, and this one returned {typeof(check)}. `
+				.. `The two stages are the point: nw.policy(function(config) --[[ once ]] return `
+				.. `function(ctx, value) --[[ per request ]] return nw.allow() end end).`,
+			3
+		)
+	end
+
+	if stage ~= nil and type(stage) ~= "function" then
+		error(
+			`a policy factory's second return is its server stage, a function run once on the server `
+				.. `when the protocol is sealed, and this one returned {typeof(stage)}. Write it as `
+				.. `return check, function() --[[ server only, once ]] end — or return the check alone.`,
+			3
+		)
+	end
+
+	return check, if stage then { stage } else {}
+end
+
+local function callable<T>(check: Check<T>, factory: Factory<T>?, stages: { Stage }): Policy<T>
+	local self = { __nwCheck = check, __nwStages = stages }
 
 	return (
 		setmetatable(self, {
@@ -199,7 +240,8 @@ local function callable<T>(check: Check<T>, factory: Factory<T>?): Policy<T>
 					)
 				end
 
-				return callable(factory(config or {}), factory)
+				local configured, built = build(factory, config or {})
+				return callable(configured, factory, built)
 			end,
 
 			__metatable = "netweave.Policy",
@@ -224,12 +266,35 @@ end
 	end)
 	```
 
-	Do the expensive part in the outer function: read configuration, resolve services, build lookup
-	tables. Whatever the inner function closes over is paid for once.
+	Do the expensive part in the outer function: read configuration, build lookup tables. Whatever
+	the inner function closes over is paid for once.
+
+	**The outer function runs on both sides**, because the declaration file is required by both, so
+	it is not where a server-only module is reached. That is the third piece, the **server stage**:
+	a second function the factory may return, run once on the server when the protocol is sealed,
+	before any packet decodes, and discarded on the client.
+
+	```lua
+	policy.canAfford = nw.policy(function()
+		local wallet: Wallet? = nil                               -- filled by the stage, server only
+
+		return function(ctx, offer)                               -- per request, server only
+			local held = (wallet :: Wallet).goldOf(ctx.player)
+			return held >= offer.gold and nw.allow() or nw.deny(`holds {held}`)
+		end, function()                                            -- once, at seal, server only
+			wallet = require(game:GetService("ServerStorage").Wallet)
+		end
+	end)
+	```
+
+	A policy attached to two channels runs its stage once. A stage that raises or yields fails the
+	seal with the policy's channel in the message — a startup error, loud — because a check that runs
+	before its stage did would be a policy deciding on nothing.
 
 	:::caution
 	The inner function must not yield. It runs inside the receive loop, holding a `ctx` that is
-	recycled the moment it returns.
+	recycled the moment it returns; since `PLAN-M5` a yield across another packet of the same player
+	is reported at `authorize`.
 	:::
 ]=]
 function Policy.policy<T>(factory: Factory<T>): Policy<T>
@@ -243,18 +308,9 @@ function Policy.policy<T>(factory: Factory<T>): Policy<T>
 		)
 	end
 
-	local check = factory({})
+	local check, stages = build(factory, {})
 
-	if type(check) ~= "function" then
-		error(
-			`a policy factory returns the per-request function, and this one returned {typeof(check)}. `
-				.. `The two stages are the point: nw.policy(function(config) --[[ once ]] return `
-				.. `function(ctx, value) --[[ per request ]] return nw.allow() end end).`,
-			2
-		)
-	end
-
-	return callable(check, factory)
+	return callable(check, factory, stages)
 end
 
 --[=[
@@ -296,6 +352,10 @@ function Policy.all<T>(...: Policy<T>): Policy<T>
 	     way to pre-size this rather than growing it element by element. ]]
 	local checks: { Check<T> } = (table.create(count) :: any) :: { Check<T> }
 
+	--[[ Every member's stages, in member order, so a composed policy's stages are the members'
+	     and `Namespace.runStages` sees the same function for a member attached elsewhere too. ]]
+	local stages: { Stage } = {}
+
 	for index = 1, count do
 		local member = select(index, ...) :: any
 
@@ -309,6 +369,10 @@ function Policy.all<T>(...: Policy<T>): Policy<T>
 		end
 
 		checks[index] = member.__nwCheck
+
+		for _, stage in member.__nwStages do
+			table.insert(stages, stage)
+		end
 	end
 
 	local function composed(ctx: Context.Ctx, payload: T): Verdict
@@ -330,7 +394,21 @@ function Policy.all<T>(...: Policy<T>): Policy<T>
 		return Policy.allow(current)
 	end
 
-	return callable(composed, nil)
+	return callable(composed, nil, stages)
+end
+
+--[=[
+	@within Policy
+	@function stagesOf
+	@param policy Policy<T>
+	@return { Stage }
+	@private
+
+	The server stages a policy carries — its own, or for a composed one its members'. Read by the
+	channel at declaration and run by `Namespace.runStages`, once per distinct function.
+]=]
+function Policy.stagesOf<T>(policy: Policy<T>): { Stage }
+	return (policy :: any).__nwStages
 end
 
 --[=[

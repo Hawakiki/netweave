@@ -147,11 +147,23 @@ function Driver.install()
 		(`PLAN-M4-BUG` phase 6).
 	]]
 	local function ensure()
+		--[[ After the seal, and on the server only: every policy's server stage, once. Asked on
+		     every send and receive because `Namespace.protocol()` seals too, from a game that
+		     prints its hash before its first packet, and a seal that ran there must not leave the
+		     stages unrun; the second and every later call is one boolean (`PLAN-M5` D-5). ]]
 		if Namespace.sealed() then
+			if isServer then
+				Namespace.runStages()
+			end
+
 			return
 		end
 
 		Namespace.seal()
+
+		if isServer then
+			Namespace.runStages()
+		end
 
 		--[[
 			The client's hello goes out here, the moment the protocol is real and before anything
