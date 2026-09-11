@@ -21,7 +21,7 @@ That choice narrows the audience, and pretending otherwise would set the wrong e
 | | Fit |
 |---|---|
 | Writes `--!strict`, has used ByteNet/Blink/Zap | **the target.** The declaration is no longer than ByteNet's, and the rate limits and authorization checks they already scatter by hand move into one reviewable place. |
-| Does not use `--!strict`, does not know the solver setting | **not the target.** Half the guarantees are type errors; without the new solver they are nothing, and the user sees analysis errors inside code they did not write (§7). |
+| Does not use `--!strict`, does not know the solver setting | **not the target.** Half the guarantees are type errors; without the new solver they are nothing, and the user sees analysis errors inside code they did not write (§7) — measured 2026-09-11 with luau-lsp 1.69.0 and `--flag:LuauSolverV2=false`: **390 errors inside `src/`**, `This syntax is not supported` on every `type function` and `read keyword is illegal here` on every read-only field, while `tests/api_reject.luau` yields 76 errors and none of its 24 declared ones. |
 
 Blink and Zap serve anyone who can run a CLI. netweave asks for a typed codebase first. That is
 a smaller slice of the ecosystem, chosen on purpose.

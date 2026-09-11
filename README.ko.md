@@ -33,9 +33,11 @@ netweave는 `--!strict`를 쓰고 ByteNet, Blink, Zap을 써 본 사람을 위�
 
 새 Luau 타입 솔버가 필요합니다. 보장의 절반이 `type function` 오류이고, 옛 솔버는 그 문법 자체를
 거부합니다. 솔버 정식 릴리스 기준으로 `--!strict` 프로젝트는 기본으로 옛 솔버에 남으며, 프로젝트마다
-**Workspace Properties → Scripting**에서 켭니다. 켜지 않아도 선언 표면은 동작하지만, 아래 보장 중
-타입 오류로 강제되는 것들은 검사되지 않습니다. 왜 우회하지 않고 이렇게 결정했는지는
-`docs/DESIGN-API.md` §0과 §7에 있습니다.
+**Workspace Properties → Scripting**에서 켭니다. 켜지 않아도 VM은 타입 검사를 하지 않으니 라이브러리는
+돌아가지만, 에디터는 netweave 자신의 파일 안에서 수백 개의 오류를 냅니다. 모든 `type function`에
+`This syntax is not supported`, 모든 읽기 전용 필드에 `read keyword is illegal here`. 보장 진단은 하나도
+안 나옵니다. 라이브러리 폴더가 빨갛다면 제일 먼저 볼 것이 솔버 설정입니다. 왜 우회하지 않고 이렇게
+결정했는지는 `docs/DESIGN-API.md` §0과 §7에 있습니다.
 
 ## 무엇을 보장하는가
 

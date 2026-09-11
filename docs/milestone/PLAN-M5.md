@@ -319,8 +319,11 @@ payload type function at once:
       sentence that a reviewer greps for it; `tests/tutorial_ok.luau` carries it
 - [ ] `docs/DESIGN-API.md` §8 records the stage, `nw.keep` and the yield report beside the shared-record
       decision they are the cost of
-- [ ] step 1's sentence about the solver being off — "every declaration still runs, but the lines marked
-      'does not type-check' will type-check" — is wrong in direction, measured 2026-09-11 with luau-lsp
+- [x] **Done first, at opening** (step 1, both READMEs, `DESIGN-API.md` §0; re-measured with the exact
+      flags `analyze` passes: 390 errors in `src/` alone, 435 with `tests/*_ok.luau`, 13 in `tutorial_ok`,
+      76 in `api_reject`, the two messages as below). Step 1's sentence about the solver being off — "every
+      declaration still runs, but the lines marked 'does not type-check' will type-check" — is wrong in
+      direction, measured 2026-09-11 with luau-lsp
       1.69.0 and `--flag:LuauSolverV2=false` over `src/` and `tests/*_ok.luau`: the old solver does not
       parse `type function` or `read` properties, and the library folder reports **573** errors (`read
       keyword is illegal here`, `This syntax is not supported`; 182 in `types/init.luau`, 130 in
