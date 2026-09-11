@@ -21,6 +21,10 @@ library without the build saying so.
 8. [Types, bytes, and what the decoder refuses](step8-types-and-bytes.md)
 9. [Naming the types in your own code](step9-naming-the-types.md)
 
+Then two pages from a reader who built something after the nine steps: [a worked example,
+trading](example-trade.md) — three files the analyzer accepts, through `tests/trade_ok.luau` —
+and [ten mistakes ranked by how quietly they fail](mistakes.md), each checked against the source.
+
 ## The vocabulary on one card
 
 Seven classes, and which method each side has. The first time through you will look this up;

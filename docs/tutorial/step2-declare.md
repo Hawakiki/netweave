@@ -99,10 +99,17 @@ These are guarantees G1, G2 and G3 in `docs/DESIGN-API.md` §2, and `tests/api_r
 every one of them: a rejection file that stops erroring is how a guarantee silently stops being
 enforced.
 
-## Declare everything before the first packet
+## Declare everything before the first packet, and on both sides
 
-Every channel's wire id is derived from the sorted names of *every* channel in the program, so a
-namespace declared after the first packet has moved would renumber the ids the other peer already
+Every channel's wire id is derived from the sorted names of *every* channel in the program, and so
+is the protocol hash both peers compare on the first batch. That has a consequence worth its own
+sentence: **a namespace declared in a server-only script refuses every client.** The server's hash
+includes it, the client's cannot, and each client is refused at stage `protocol` from its first
+batch onward, with "nothing works" as the symptom and one console line as the cause. Admin commands
+are declared in a shared module like everything else; what is server-only is the policy's
+dependency, reached through a seam (Step 3), not the declaration.
+
+A namespace declared after the first packet has moved would renumber the ids the other peer already
 agreed to. netweave refuses that: declaring after the protocol is sealed raises. On a client "the
 first packet" is one that *arrives*, so require every namespace before anything yields — a
 `WaitForChild` between requiring netweave and requiring this module is enough to lose the race

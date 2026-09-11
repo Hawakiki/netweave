@@ -1,6 +1,6 @@
 # netweave
 
-*[한국어](README.ko.md) · [Tutorial](docs/tutorial/README.md) · [API design](docs/DESIGN-API.md) · [Wire format](docs/WIRE-FORMAT.md) · [Benchmarks](bench/RESULTS.md)*
+*[한국어](README.ko.md) · [Tutorial](docs/tutorial/README.md) · [Worked example](docs/tutorial/example-trade.md) · [Common mistakes](docs/tutorial/mistakes.md) · [API design](docs/DESIGN-API.md) · [Wire format](docs/WIRE-FORMAT.md) · [Benchmarks](bench/RESULTS.md)*
 
 netweave is a networking library for Roblox whose declaration file is the security review. Every
 channel says, on the line that declares it, who may send on it, how often, to whom it goes, and what

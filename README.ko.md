@@ -1,6 +1,6 @@
 # netweave
 
-*[English](README.md) · [튜토리얼](docs/tutorial/README.md) · [API 설계](docs/DESIGN-API.md) · [와이어 포맷](docs/WIRE-FORMAT.md) · [벤치마크](bench/RESULTS.md)*
+*[English](README.md) · [튜토리얼](docs/tutorial/README.md) · [예제: 거래](docs/tutorial/example-trade.md) · [흔한 실수](docs/tutorial/mistakes.md) · [API 설계](docs/DESIGN-API.md) · [와이어 포맷](docs/WIRE-FORMAT.md) · [벤치마크](bench/RESULTS.md)*
 
 netweave는 선언 파일이 곧 보안 리뷰가 되는 Roblox 네트워킹 라이브러리입니다. 모든 채널은 자신을
 선언하는 그 줄에서 누가 보낼 수 있는지, 얼마나 자주인지, 누구에게 가는지, 그리고 핸들러가 페이로드를
