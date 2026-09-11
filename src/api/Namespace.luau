@@ -122,11 +122,43 @@ end
 	and the numbering needs every declaration. See `docs/WIRE-FORMAT.md` §3.
 	:::
 ]=]
-function Namespace.declare(name: string, channels: { [string]: any }): Namespace
+function Namespace.declare(name: string, channels: { [string]: any }, source: string?): Namespace
 	checkName(name)
 
 	if type(channels) ~= "table" then
 		error(`nw.namespace needs a table of channels, got {typeof(channels)}`, 2)
+	end
+
+	--[[
+		The declaration that cannot work, refused where it is written (`PLAN-M5` D-7).
+
+		A namespace the client cannot require can never agree: the protocol hash covers every
+		declaration on each side, so one declared under `ServerScriptService` or `ServerStorage` puts
+		a channel in the server's hash that no client's can contain, and every client is refused at
+		`protocol` from its first batch — "nothing works", with the cause one word in a console line.
+		The first mistake on `docs/tutorial/mistakes.md`, and not a matter of degree.
+
+		`source` is what `nw.namespace` read off `debug.info(2, "s")`: on Roblox the declaring
+		module's full name, under lune a path, so the two prefixes match only where they mean
+		something and a source of any other shape does nothing. Two prefixes and no more: a bundler or
+		a `loadstring` wrapper gives a source that matches neither, and the worst case is today's
+		behaviour.
+	]]
+	if
+		source ~= nil
+		and (
+			string.find(source, "ServerScriptService.", 1, true) == 1
+			or string.find(source, "ServerStorage.", 1, true) == 1
+		)
+	then
+		error(
+			`the namespace {name} is declared in {source}, which the client cannot require, so no client `
+				.. `could ever agree on the protocol and every one would be refused at "protocol" from its `
+				.. `first batch. Declare it in a module under ReplicatedStorage, required by both sides; `
+				.. `what is server-only is a policy's dependency, reached from inside the check, not the `
+				.. `declaration (docs/tutorial/step3-policies.md).`,
+			3
+		)
 	end
 
 	if sealed then

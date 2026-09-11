@@ -288,7 +288,11 @@ nw.config = Config
 	not a runtime check — guarantee G6.
 ]=]
 function nw.namespace<D>(name: string, channels: D): View.Views<D>
-	return (Namespace.declare(name, channels :: any) :: any) :: View.Views<D>
+	--[[ Level 2 is the module calling `nw.namespace`: its full name on Roblox, a path under lune.
+	     `Namespace.declare` refuses the two prefixes a client can never require (`PLAN-M5` D-7). ]]
+	local source = debug.info(2, "s")
+
+	return (Namespace.declare(name, channels :: any, source) :: any) :: View.Views<D>
 end
 
 --[=[

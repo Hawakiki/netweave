@@ -58,6 +58,10 @@
     "ServerScriptService": {
       "Server": {
         "$path": "src/server"
+      },
+
+      "netweaveServerOnly": {
+        "$path": "../tests/serveronly"
       }
     }
   }

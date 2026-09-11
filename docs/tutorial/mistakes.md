@@ -4,7 +4,7 @@ Collected from a reader who built [the trade example](example-trade.md) after th
 and checked against the source. The order is frequency times silence: the ones at the top are the
 ones you make often and find late.
 
-## 1. Declaring a namespace in a server-only script
+## 1. Declaring a namespace in a server-only script — ~~quiet~~ refused at its line since M5
 
 ```lua
 -- ServerScriptService/Admin.server.luau   ← the client never sees this file
@@ -13,11 +13,17 @@ local admin = nw.namespace("admin", {
 })
 ```
 
-**What happens.** The protocol hash is computed over *every* declaration on each side. The server's
-hash includes `admin`; the client's does not; every client that connects is refused at stage
-`protocol` on its first batch, and every batch after it. The whole game stops moving, and the only
-place that says why is the console line `refused at protocol from <player>: the peer is on protocol
-0x… and this peer is on 0x…`, or an observer.
+**What happened, until `PLAN-M5` phase 8.** The protocol hash is computed over *every* declaration
+on each side. The server's hash includes `admin`; the client's does not; every client that connects
+is refused at stage `protocol` on its first batch, and every batch after it. The whole game stops
+moving, and the only place that says why is the console line `refused at protocol from <player>: the
+peer is on protocol 0x… and this peer is on 0x…`, or an observer.
+
+**What happens now.** `nw.namespace` reads the declaring module's name and refuses one under
+`ServerScriptService` or `ServerStorage` at that line, before anything else, with the message
+naming the module and the fix. This entry stays at the top because it is the one the list was
+ranked around; it now belongs with the immediate failures in §10, and moves there when the digest
+in phase 8 lands beside it.
 
 **The fix.** Every namespace lives in a shared module under `ReplicatedStorage`, required by both
 sides. A policy that is server-only reaches its dependency through a seam (Step 3), and the

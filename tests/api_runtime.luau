@@ -566,6 +566,50 @@ do
 end
 
 do
+	--[[
+		The declaration that cannot work, refused where it is written (`PLAN-M5` D-7). `source` is what
+		`nw.namespace` reads off `debug.info(2, "s")` — a module's full name on Roblox, a path under
+		lune — so under lune it is handed in, and `tests/roblox_runtime.luau` is where the real value is
+		measured to have this shape. Confirmed to fail on the pre-fix tree: `declare` took no source.
+	]]
+	Namespace.reset()
+
+	refuses("a namespace declared under ServerScriptService", function()
+		Namespace.declare(
+			"admin",
+			{ kick = nw.signal({ data = t.u8, rate = 1 }) },
+			"ServerScriptService.Admin"
+		)
+	end, "ReplicatedStorage")
+
+	refuses("or under ServerStorage", function()
+		Namespace.declare("admin", { kick = nw.signal({ data = t.u8, rate = 1 }) }, "ServerStorage.Net.Admin")
+	end, "ReplicatedStorage")
+
+	--[[ Named after its source, so the reader knows which file. ]]
+	refuses("naming the module", function()
+		Namespace.declare(
+			"admin",
+			{ kick = nw.signal({ data = t.u8, rate = 1 }) },
+			"ServerScriptService.Admin"
+		)
+	end, "ServerScriptService.Admin")
+
+	check("and nothing was declared by the refusals", Namespace.get("admin") == nil)
+
+	Namespace.declare("admin", { kick = nw.signal({ data = t.u8, rate = 1 }) }, "ReplicatedStorage.Net.Admin")
+	check("one under ReplicatedStorage is declared", Namespace.get("admin") ~= nil)
+
+	Namespace.reset()
+
+	--[[ Through the public entry, where the source is a lune path, which matches neither prefix. ]]
+	local declared = nw.namespace("lunePath", { ping = nw.signal({ data = t.u8, rate = 1 }) })
+	check("a lune path does nothing", declared ~= nil and Namespace.get("lunePath") ~= nil)
+
+	Namespace.reset()
+end
+
+do
 	Namespace.reset()
 
 	refuses("a namespace with a dot in its name", function()
