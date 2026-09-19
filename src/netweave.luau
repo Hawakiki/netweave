@@ -372,6 +372,95 @@ export type Views<D> = View.Views<D>
 export type Severity = Config.Severity
 export type Settings = Config.Settings
 
+--[[
+	A public value gets a public type (`PLAN-M5` D-3). Until this milestone `nw.policy`'s return,
+	`nw.audience.nearby`'s return, `nw.configure`'s snapshot and `nw.store.of`'s result had no name a
+	game could write through `nw` — M4-1 found the first three, and `tools/exports` now demands one
+	per value family so the list cannot regrow. Every alias below is a name for something a game
+	already holds, and none of them widens what it can do with it.
+]]
+
+--[=[
+	@type Policy<T> Policy<T>
+	@within netweave
+
+	What `nw.policy` and `nw.all` return, and what `authorize` takes: a policy over a payload `T`.
+]=]
+export type Policy<T> = Policy.Policy<T>
+
+--[=[
+	@type Check<T> (ctx: Ctx, payload: T) -> Verdict
+	@within netweave
+
+	The per-request half of a policy, for a game that keeps checks as values before wrapping them.
+]=]
+export type Check<T> = Policy.Check<T>
+
+--[=[
+	@type Factory<T> (config: any) -> (Check<T>, ...(() -> ())?)
+	@within netweave
+
+	What `nw.policy` takes: the load-time half, returning the check and optionally the server stage.
+]=]
+export type Factory<T> = Policy.Factory<T>
+
+--[=[
+	@type Audience<S> Audience<S>
+	@within netweave
+
+	What `nw.audience.*` are and what `audience` takes. `S` is `"everyone"` or `"subset"`, and it is
+	what gives a channel `broadcast` or withholds it.
+]=]
+export type Audience<S> = Audience.Audience<S>
+
+--[=[
+	@type Store Store
+	@within netweave
+
+	What `nw.store.of`, `nw.store.charm` and `nw.store.replica` return, and what `replicate` takes.
+]=]
+export type Store = Store.Store
+
+--[=[
+	@type Observer (rejection: Rejection) -> ()
+	@within netweave
+
+	What `nw.observe` takes.
+]=]
+export type Observer = Observer.Observer
+
+--[=[
+	@type Snapshot Snapshot
+	@within netweave
+
+	What `nw.configure` and `nw.config.snapshot()` return: the settings in force, frozen.
+]=]
+export type Snapshot = Config.Snapshot
+
+--[=[
+	@type Described Described
+	@within netweave
+
+	One row of `nw.config.describe()`.
+]=]
+export type Described = Config.Described
+
+--[=[
+	@type Rules Rules
+	@within netweave
+
+	The `rules` section of a settings table: a severity per rule.
+]=]
+export type Rules = Config.Rules
+
+--[=[
+	@type Limits Limits
+	@within netweave
+
+	The `limits` section of a settings table: a number per limit.
+]=]
+export type Limits = Config.Limits
+
 --[=[
 	@prop internal table
 	@within netweave
