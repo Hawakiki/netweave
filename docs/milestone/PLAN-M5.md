@@ -268,9 +268,10 @@ payload type function at once:
       and it runs after phase 1 rather than before it. Run order item 6 is therefore behind item 9
 
 ### Phase 4 — optimisation residue
-- [ ] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe. The
+- [x] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe. The
       probes are rungs of `bench/residue`, which prints every rung and then refuses to pass while any
       still shows what its finding described, so it is a check-script step from the first rung on.
+      Seven commits, `d98e91d` … `251b1c5`, each BEFORE measured on its parent.
   - [x] 73 — `commit` hoisted out of `Delta.write`, `flagsAt` an upvalue. BEFORE on `bea4631`:
         112 B a call on both paths [67–112, n = 45 of 64 windows]; AFTER: 0 in all 64.
   - [x] 74 — the oversize-claim reason no longer quotes the claim; one string per ceiling, built
