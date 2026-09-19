@@ -268,7 +268,11 @@ payload type function at once:
       and it runs after phase 1 rather than before it. Run order item 6 is therefore behind item 9
 
 ### Phase 4 — optimisation residue
-- [ ] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe
+- [ ] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe. The
+      probes are rungs of `bench/residue`, which prints every rung and then refuses to pass while any
+      still shows what its finding described, so it is a check-script step from the first rung on.
+  - [x] 73 — `commit` hoisted out of `Delta.write`, `flagsAt` an upvalue. BEFORE on `bea4631`:
+        112 B a call on both paths [67–112, n = 45 of 64 windows]; AFTER: 0 in all 64.
 - [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
       match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to

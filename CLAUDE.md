@@ -278,6 +278,8 @@ lune run tools/messages       # every error( in src/api names the fix, not the r
 lune run tools/exports        # every public type is written in an _ok file, or listed as a gap
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
+lune run bench/pace           # the client pacer, against the server's bucket: 0 refusals
+lune run bench/residue        # the optimisation residue M4 found, one rung per finding, each gone
 stylua --check src tests analyze.luau bench spike
 selene src tests
 ```
