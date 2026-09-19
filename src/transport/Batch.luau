@@ -62,6 +62,28 @@ local TWO_BYTE_MAX = 16383
 --[[ Constant, because a peer chooses how often it is said. ]]
 local UNCONSUMED = "the payload does not end where its declared length says it does"
 
+--[[
+	One reason per ceiling, built on the first refusal and kept. The claim is the peer's to choose,
+	so a reason that quoted it was a distinct string per packet — past the observer's repeat
+	suppression, which keys on the reason, and onto the heap at a rate the peer controls, on the
+	one refusal that is supposed to cost the server nothing (SECURITY-REPORT-M4 74; `bench/residue`
+	rung 74). Keyed by the number rather than the channel because a query has two ceilings, and
+	channels with the same ceiling can share the sentence; the table is bounded by the number of
+	distinct ceilings a declaration has, not by anything a peer sends.
+]]
+local overCeiling: { [number]: string } = {}
+
+local function overCeilingReason(ceiling: number): string
+	local reason = overCeiling[ceiling]
+
+	if not reason then
+		reason = `payload claims a length over the {ceiling} bytes this channel can hold`
+		overCeiling[ceiling] = reason
+	end
+
+	return reason
+end
+
 --[=[
 	@interface Sink
 	@within Batch
@@ -871,7 +893,7 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 				floods.
 			]]
 			if not denial and ceiling and payloadLength > ceiling then
-				denial = `payload claims {payloadLength} bytes, over the {ceiling} this channel can hold`
+				denial = overCeilingReason(ceiling)
 			end
 
 			if denial then

@@ -753,7 +753,11 @@ trust, and one of them turns out to be wrong.
       already promised and `Inbound` did not keep.** Four reasons were built per packet: the
       queue-full one (`dropped {n} so far`), the two pending-ceiling ones, and — new in this
       milestone, so it was mine — the `direction` refusal, which is the cheapest one a hostile peer
-      can provoke. All four are constants or per-configuration now.
+      can provoke. All four are constants or per-configuration now. ~~And that was the whole
+      list.~~ It was not: the oversize-claim reason in `Batch.read` quoted the claim, so a peer
+      choosing a length per packet got a string per packet — 500 claims over 50 lengths, 50
+      distinct reasons (SECURITY-REPORT-M4 74). Per ceiling since `PLAN-M5` phase 4, and
+      `bench/residue` rung 74 counts it.
 
       Pinned by **counting distinct strings rather than weighing the heap**, because a collector
       reading is not a number until it survives re-running (§9) and this property does not need
