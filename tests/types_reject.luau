@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 11
+-- netweave:expect 12
 
 --[[
 	Every assignment here must be rejected. `lune run analyze` fails if the count on line 1 stops
@@ -74,5 +74,9 @@ type _notASchema = t.PayloadOf<number> -- netweave:reject PayloadOf takes a netw
 ]]
 local _action = t.union({ move = t.struct({ x = t.u8 }), wait = t.u8 })
 local _crossed: t.PayloadOf<typeof(_action)> = { tag = "wait", value = { x = 1 } } -- netweave:reject but got '"move" | "wait"'
+
+--[[ 12. A `charset` is a string. Annotated for the same reason `types_ok` annotates its options:
+     an unannotated literal is any table, and a wrong field in one is not a diagnostic. ]]
+local _badSet: t.TextOptions = { charset = 5 } -- netweave:reject Expected this to be 'string?', but got 'number'
 
 return nil

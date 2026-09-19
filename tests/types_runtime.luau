@@ -323,6 +323,45 @@ check("and `?` is bounded", (pcall(function()
 	t.string(0, 65535, { pattern = "a?b?c?d?e?f?" })
 end)))
 
+--[[
+	The set. `charset` is the option that cannot be refused for cost: it is stored as the pattern
+	`[set]*`, one class and one repetition, which the rule above admits at any length — and it is
+	stored as that pattern so a peer that wrote the pattern by hand agrees with one that wrote the
+	set (`PLAN-M5` phase 5).
+]]
+local word = t.string(1, 65535, { charset = "%w_" })
+check("a charset is stored as its pattern", word.pattern == "[%w_]*")
+check("and admits any length, being one unbounded item", word.max == 65535)
+check("a negated set is a set", t.string(0, 8, { charset = "^%c" }).pattern == "[^%c]*")
+check("a range is a set", t.string(0, 8, { charset = "a-z0-9" }).pattern == "[a-z0-9]*")
+check(
+	"a bracket first in the set is literal, as Lua reads it",
+	t.string(0, 8, { charset = "]%w" }).pattern == "[]%w]*"
+)
+check("and an escaped one anywhere", t.string(0, 8, { charset = "%w%]" }).pattern == "[%w%]]*")
+
+rejects("a charset that is not a string", function()
+	t.string(0, 8, { charset = 5 } :: any)
+end)
+
+rejects("an empty charset", function()
+	t.string(0, 8, { charset = "" })
+end)
+
+rejects("a charset beside a pattern", function()
+	t.string(0, 8, { charset = "%w", pattern = "%w+" })
+end)
+
+--[[ `"%w]"` between brackets scans as the well-formed set `[%w]` and then a literal bracket, so
+     the pattern walk alone would accept a set the author did not write. ]]
+rejects("a charset that closes its own brackets", function()
+	t.string(0, 8, { charset = "%w]" })
+end)
+
+rejects("a charset ending in a lone %", function()
+	t.string(0, 8, { charset = "%w%" })
+end)
+
 --[[ And the third argument nothing else takes. `t.u8(0, 10, { utf8 = true })` used to be accepted
      and ignored, which looks exactly like an option that worked. ]]
 rejects("a third argument on a number", function()

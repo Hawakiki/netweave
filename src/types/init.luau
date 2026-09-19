@@ -457,12 +457,19 @@ export type Ranged<T> = typeof(setmetatable(
 	@within Types
 	.utf8 boolean? -- the bytes must decode as UTF-8
 	.pattern string? -- a Lua pattern the whole value must match, anchored by netweave
+	.charset string? -- a Lua character class every byte must belong to, written without the brackets
 
 	What [Types.string] accepts after its length bounds.
+
+	`charset` and `pattern` say the same kind of thing and cannot both be given. `charset = "%w_"`
+	is stored as the pattern `[%w_]*`, so two peers declaring it either way agree; it exists
+	because a class with one repetition is the one shape of pattern whose cost is linear in the
+	value whatever the length, and a peer chooses the length.
 ]=]
 export type TextOptions = {
 	utf8: boolean?,
 	pattern: string?,
+	charset: string?,
 }
 
 --[=[
@@ -474,8 +481,15 @@ export type TextOptions = {
 	```lua
 	t.string(1, 20)                                 -- a length, as before
 	t.string(1, 20, { utf8 = true })                -- and valid UTF-8
-	t.string(1, 20, { pattern = "[%w_]+" })         -- and word characters, whole-string
+	t.string(1, 20, { charset = "%w_" })            -- and only word characters, at any length
+	t.string(1, 20, { pattern = "%a+%d?" })         -- or a shape, when a set is not enough
 	```
+
+	:::note
+	A `pattern` with more than one unbounded item (`*`, `+`, `-`) is refused past a length the
+	matcher can afford, because the matcher backtracks and a peer chooses the bytes. A `charset` is
+	one class and one repetition, so it is never refused for cost.
+	:::
 ]=]
 export type Text = typeof(setmetatable(
 	{} :: Type<string>,
@@ -624,7 +638,7 @@ end
 	whole difference between "the name is word characters" and "the name contains a word character
 	somewhere", and the unanchored reading is the one that lets anything through.
 ]]
-local TEXT_OPTIONS: { [string]: boolean } = { utf8 = true, pattern = true }
+local TEXT_OPTIONS: { [string]: boolean } = { utf8 = true, pattern = true, charset = true }
 table.freeze(TEXT_OPTIONS)
 
 --[[
@@ -753,6 +767,36 @@ local function scanPattern(pattern: string): (string?, number)
 	return nil, unbounded
 end
 
+--[[ The body of a set, as Lua reads one: a leading `^` negates, a `]` first is literal, `%`
+     escapes the next byte, and the first other `]` closes the set. The caller supplies the
+     brackets, so a close inside the body is the one thing this has to find. ]]
+local function classProblem(charset: string): string?
+	local length = #charset
+	local at = if string.sub(charset, 1, 1) == "^" then 2 else 1
+
+	if string.sub(charset, at, at) == "]" then
+		at += 1
+	end
+
+	while at <= length do
+		local char = string.sub(charset, at, at)
+
+		if char == "%" then
+			if at == length then
+				return "it ends with a lone %, which escapes nothing"
+			end
+
+			at += 2
+		elseif char == "]" then
+			return "a ] inside it closes the set early, and what follows would sit outside the brackets"
+		else
+			at += 1
+		end
+	end
+
+	return nil
+end
+
 local function refineText(constrained: any, options: any)
 	if options == nil then
 		return
@@ -766,8 +810,8 @@ local function refineText(constrained: any, options: any)
 	for key in options do
 		check(
 			TEXT_OPTIONS[key] == true,
-			`t.string has no option \`{tostring(key)}\`. The two are utf8 and pattern — check the `
-				.. `spelling, because an option that is ignored looks exactly like one that passed`
+			`t.string has no option \`{tostring(key)}\`. The three are utf8, pattern and charset — `
+				.. `check the spelling, because an option that is ignored looks exactly like one that passed`
 		)
 	end
 
@@ -782,6 +826,43 @@ local function refineText(constrained: any, options: any)
 	end
 
 	local pattern = options.pattern
+	local charset = options.charset
+
+	--[[
+		A set is a pattern with one class and one repetition, stored as that pattern: the reader,
+		the writer and the protocol signature then have one attribute to carry, and a peer that
+		spelled the same set as a pattern agrees with one that spelled it as a set. What the option
+		adds is the guarantee — a class with `*` is one unbounded item, which the rule below admits
+		at any length, so a set can never be refused for cost the way a pattern can (M4-1, the
+		matcher-cost finding; `PLAN-M5` phase 5).
+	]]
+	if charset ~= nil then
+		check(type(charset) == "string", `t.string's \`charset\` takes a string, got {typeof(charset)}`)
+		check(
+			pattern == nil,
+			"t.string takes `charset` or `pattern`, not both: a charset is the pattern [charset]*, so "
+				.. "write the set into the pattern if the pattern needs more than a set"
+		)
+		check(
+			charset ~= "",
+			"t.string's `charset` is empty, which admits no byte at all. Use a length of 0..0 if that is what you meant"
+		)
+
+		--[[ Two walks: the class walk, for a `]` that would close the set early and leave the rest
+		     outside it (`"%w]"` between brackets scans as the well-formed set `[%w]` followed by a
+		     literal bracket, not the set the author wrote), then the pattern walk over the whole
+		     thing for everything else the grammar refuses. ]]
+		local problem = classProblem(charset) or scanPattern(`[{charset}]`)
+
+		check(
+			problem == nil,
+			`t.string's \`charset\` "{charset}" is not a Lua character class: {problem or ""}. Write `
+				.. `what goes between the brackets — %w_ for word characters, a-z for a range, ^%c for `
+				.. `anything but a control character, %] for a bracket`
+		)
+
+		pattern = `[{charset}]*`
+	end
 
 	if pattern ~= nil then
 		check(type(pattern) == "string", `t.string's \`pattern\` takes a string, got {typeof(pattern)}`)

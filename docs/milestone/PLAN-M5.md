@@ -302,7 +302,10 @@ payload type function at once:
       find which of its four readings is the outlier (`bench/RESULTS.md`, "The Down cell")
 
 ### Phase 5 — additions
-- [ ] `t.string` `{ charset = … }`, linear by construction
+- [x] `t.string` `{ charset = … }`, linear by construction: stored as the pattern `[set]*`, so the
+      reader, the writer and the signature carry one attribute and a peer that wrote the pattern agrees;
+      refused beside `pattern`, when empty, when a `]` closes it early, or when it ends in a lone `%`.
+      `types_ok`/`types_reject` (12), `types_runtime`, `serdes_runtime`, tutorial step 8.
 - [ ] recipient-set caching per tick, measured on `bench/tick`'s `select-all` and a `nearby` rung. The
       first number from real remotes (`live/`, 2026-09-19, two players): 200 subjects published twice a
       frame under `nearby(50)` cost 0.39 ms a frame with no players and 1.80–1.95 ms with two, at ~230

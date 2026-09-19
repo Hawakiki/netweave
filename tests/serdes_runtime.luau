@@ -1619,6 +1619,13 @@ do
 	     after the escape rather than fuse with it. ]]
 	trip("a pattern ending in an escaped dollar", t.string(1, 8, { pattern = "%d+%$" }), "12$", 4)
 	refuses("and it still requires the dollar", t.string(1, 8, { pattern = "%d+%$" }), "12")
+
+	--[[ A set is the same check by another spelling, so the reader is the same reader. ]]
+	trip("a charset round trips", t.string(1, 20, { charset = "%w_" }), "player_1", 9)
+	refuses("and refuses a byte outside the set", t.string(1, 20, { charset = "%w_" }), "player 1")
+	refuses("wherever it is", t.string(1, 20, { charset = "%w_" }), "player_1!")
+	trip("a negated set admits what it does not name", t.string(1, 20, { charset = "^%c" }), "a b!", 5)
+	refuses("and refuses what it names", t.string(1, 20, { charset = "^%c" }), "a	b")
 end
 
 -- ---------------------------------------------------------------------------------------------
