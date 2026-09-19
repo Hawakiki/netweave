@@ -24,6 +24,7 @@ local Budget = require("../src/transport/Budget")
 local Buffer = require("../src/codec/Buffer")
 local Channel = require("../src/api/Channel")
 local Delta = require("../src/replication/Delta")
+local Inbound = require("../src/transport/Inbound")
 local Ir = require("../src/codec/Ir")
 local Link = require("../src/transport/Link")
 local Namespace = require("../src/api/Namespace")
@@ -675,6 +676,85 @@ local function rungInstance()
 end
 
 rungInstance()
+
+-- -------------------------------------------------------------------------------------------
+-- The pending free list
+-- -------------------------------------------------------------------------------------------
+
+--[[
+	M4-1, the third minor: `Inbound` walks each batch's pending list from a free list, and a walk
+	that yields inside a handler holds its list while the next batch claims another — so the pool
+	grows to the most walks ever in flight at once and stays there, each list seven arrays sized by
+	the largest batch it carried. Not something a peer can drive alone: it takes a handler that
+	yields, and that is game code. Counted rather than weighed, because lune cannot force a
+	collection and what the pool retains is otherwise invisible: `pooled()` exists for this rung.
+
+	BEFORE (2766856, with the accessor): 64 walks parked at once, 0 pooled while parked, 64 after.
+]]
+local function rungPool()
+	print("M4-1    the pending free list after a burst of parked walks")
+
+	local WALKS = 64
+
+	Namespace.reset()
+
+	local declared = Namespace.declare("residue", {
+		slow = Channel.signal({ data = t.struct({ n = t.u8 }), rate = 1000 }),
+	})
+	Namespace.seal()
+
+	local slow = declared.channels.slow
+	slow.handler = function()
+		coroutine.yield()
+	end
+
+	local inbound = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+	})
+
+	Buffer.load(nil)
+	Batch.writePacket(slow, { n = 1 })
+	local packed = Buffer.take()
+
+	local parked: { thread } = {}
+
+	--[[ A sender per walk: the same player's packet dispatched across another's yield is the
+	     report `PLAN-M5` D-5 added, and this rung is about the pool, not the detector. ]]
+	for index = 1, WALKS do
+		local sender = { name = `player{index}` }
+		local thread = coroutine.create(function()
+			inbound.receive(packed, nil, sender)
+		end)
+		coroutine.resume(thread)
+		parked[index] = thread
+	end
+
+	local inFlight = inbound.pooled()
+
+	for _, thread in parked do
+		coroutine.resume(thread)
+	end
+
+	local after = inbound.pooled()
+
+	print(
+		string.format(
+			"        %-44s %d pooled while parked, %d pooled after they finished",
+			`{WALKS} walks parked inside their handler`,
+			inFlight,
+			after
+		)
+	)
+
+	slow.handler = nil
+	Namespace.reset()
+end
+
+rungPool()
 
 if #failures > 0 then
 	print("")
