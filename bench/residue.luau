@@ -689,7 +689,8 @@ rungInstance()
 	yields, and that is game code. Counted rather than weighed, because lune cannot force a
 	collection and what the pool retains is otherwise invisible: `pooled()` exists for this rung.
 
-	BEFORE (2766856, with the accessor): 64 walks parked at once, 0 pooled while parked, 64 after.
+	BEFORE (5214fd1, with the accessor): 64 walks parked at once, 0 pooled while parked, 64 after.
+	AFTER: 0 while parked, 8 after — the cap.
 ]]
 local function rungPool()
 	print("M4-1    the pending free list after a burst of parked walks")
@@ -749,6 +750,8 @@ local function rungPool()
 			after
 		)
 	)
+
+	expect(after <= 8, `free list: expected at most 8 lists pooled after the burst, got {after}`)
 
 	slow.handler = nil
 	Namespace.reset()

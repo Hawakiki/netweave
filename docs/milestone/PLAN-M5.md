@@ -292,6 +292,9 @@ payload type function at once:
         the first refusal; the instance reader's two are built with the closure. Time only, since
         Luau interns short strings: BEFORE on `78689c7` a refusal at 2.8x an admission (186 against
         67 ns) and 1.4x (159 against 111); AFTER 1.3x (84) and 1.1x (125), n = 21 × 100,000.
+  - [x] M4-1 minor, the free list — `Inbound.pooled()` counts it, since lune cannot force a
+        collection; the pool keeps at most 8 lists on the way back in. BEFORE on `5214fd1`: 64
+        walks parked inside a yielding handler, 64 lists pooled after; AFTER: 8.
 - [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
       match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to
