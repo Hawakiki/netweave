@@ -203,6 +203,11 @@ local _heading: number = heading(_aim)
 local _options: t.TextOptions = { utf8 = true, pattern = "[%w_]+" }
 local _named: t.Type<string> = t.string(1, 20, _options)
 
+--[[ And the set, which is the option a length-unbounded field should reach for: one class, one
+     repetition, linear whatever the peer sends (`PLAN-M5` phase 5). ]]
+local _setOptions: t.TextOptions = { charset = "%w_" }
+local _word: t.Type<string> = t.string(1, 65535, _setOptions)
+
 --[[ And the callable itself, which is the type that carries that parameter: `Ranged<string>` does
      not, so annotating it that way would compile and then refuse the options at the call site. ]]
 local _text: t.Text = t.string
