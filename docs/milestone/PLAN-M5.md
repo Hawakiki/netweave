@@ -306,13 +306,21 @@ payload type function at once:
       reader, the writer and the signature carry one attribute and a peer that wrote the pattern agrees;
       refused beside `pattern`, when empty, when a `]` closes it early, or when it ends in a lone `%`.
       `types_ok`/`types_reject` (12), `types_runtime`, `serdes_runtime`, tutorial step 8.
-- [ ] recipient-set caching per tick, measured on `bench/tick`'s `select-all` and a `nearby` rung. The
+- [x] recipient-set caching per tick, measured on `bench/tick`'s `select-all` and a `nearby` rung. The
       first number from real remotes (`live/`, 2026-09-19, two players): 200 subjects published twice a
       frame under `nearby(50)` cost 0.39 ms a frame with no players and 1.80–1.95 ms with two, at ~230
       server frames a second uncapped. That is 4.5 µs a publish with two distance checks and one or two
       encodes in it; `nearby` walks every player per subject, so the distance half grows with players ×
-      subjects and the encode half with recipients. Two points do not give a slope, and the `BEFORE` for
-      this task is a live run at 4 and 8 players before the cache lands
+      subjects and the encode half with recipients. Two points do not give a slope, ~~and the `BEFORE` for
+      this task is a live run at 4 and 8 players before the cache lands~~. The owner declined the 4- and
+      8-player runs (2026-09-19), so the `BEFORE` is two probes instead, both on `d982242`: `bench/tick`
+      under lune with the rig answering `has` (`select-all` 3.43–3.47 ms, the new `nearby-all` 2.37–2.38),
+      and `roblox_runtime` in Studio with one player, timing `within` and a roster-returning `select` over
+      the frame's list (693 and 355 ns a subject). What landed: `Recipients.of` answers membership from a
+      set built once per distinct list, and the Roblox roster reads every player's position once per list
+      rather than once per subject. AFTER: lune 3.16–3.24 and 2.17–2.25 (−7%, the function call per pair);
+      Studio 364 and 140 ns a subject (−47% and −61%, the engine calls per pair). Per player: the tick
+      pays P position reads a frame instead of S × P × 3, and S × P lookups instead of S × P `has`.
 - [ ] the delta crossover `PLAN-M4` acceptance 8 asked for and never measured: a replication mode in the
       matrix, and the subject size below which a diff loses to a resend written into `bench/RESULTS.md`
 - [ ] the nice-to-have types, each with an `_ok`/`_reject` pair

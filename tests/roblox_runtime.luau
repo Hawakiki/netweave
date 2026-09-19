@@ -543,7 +543,16 @@ do
 		     the roster for the frame (SECURITY-REPORT-M4 77; `PLAN-M5` phase 4). Handed the frame's
 		     list it finds the player; handed an empty one it finds nobody — which is what shows the
 		     list is the one being read. Needs a character to measure from; said when there is none. ]]
+		--[[ The character spawns a moment after the player, and the suite reaches here first —
+		     measured: a skip on every run without the wait. ]]
 		local character = player.Character
+		local characterDeadline = os.clock() + 10
+
+		while (character == nil or character.PrimaryPart == nil) and os.clock() < characterDeadline do
+			task.wait(0.1)
+			character = player.Character
+		end
+
 		local root = character and character.PrimaryPart
 
 		if root then
@@ -555,6 +564,43 @@ do
 			)
 			equals("and names them", out[1], player)
 			equals("and finds nobody in an empty list", roster.within(root, 1e6, out, {}), 0)
+
+			--[[
+				What one player costs per subject, against the real engine (`PLAN-M5` phase 5).
+				`within` reads a player's position once per list rather than once per subject, and
+				`Recipients.of` answers membership from the list rather than asking `has` — three
+				engine calls — per recipient. Both are timed over the same list the tick would hand
+				every subject of a frame. A number, not an assertion: the lune half is `bench/tick`'s
+				`nearby-all` and `select-all` rungs, and this is the half a stub cannot show.
+			]]
+			local CALLS = 20000
+			local list = roster.all()
+			local chosen = {
+				kind = "select",
+				select = function()
+					return list
+				end,
+			}
+
+			local started = os.clock()
+			for _ = 1, CALLS do
+				roster.within(root, 1e6, out, list)
+			end
+			local withinNs = (os.clock() - started) * 1e9 / CALLS
+
+			started = os.clock()
+			for _ = 1, CALLS do
+				Recipients.of(chosen, root, roster, out, nil, list)
+			end
+			local selectNs = (os.clock() - started) * 1e9 / CALLS
+
+			print(
+				`        measured: with {#list} player(s) and the frame's list, within {string.format(
+					"%.0f",
+					withinNs
+				)} ns a subject, `
+					.. `a select returning the roster {string.format("%.0f", selectNs)} ns a subject ({CALLS} calls each)`
+			)
 		else
 			print("        skip: the player has no character yet, so within was not asserted")
 		end
