@@ -273,6 +273,9 @@ payload type function at once:
       still shows what its finding described, so it is a check-script step from the first rung on.
   - [x] 73 — `commit` hoisted out of `Delta.write`, `flagsAt` an upvalue. BEFORE on `bea4631`:
         112 B a call on both paths [67–112, n = 45 of 64 windows]; AFTER: 0 in all 64.
+  - [x] 74 — the oversize-claim reason no longer quotes the claim; one string per ceiling, built
+        on first refusal. BEFORE on `d98e91d`: 500 claims over 50 lengths → 50 distinct reasons;
+        AFTER: 1. `PLAN-M3` phase 9's "all four" corrected in place.
 - [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
       match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to

@@ -17,9 +17,12 @@
 	because a number is not a number until it survives being re-run.
 ]]
 
+local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
+local Channel = require("../src/api/Channel")
 local Delta = require("../src/replication/Delta")
 local Ir = require("../src/codec/Ir")
+local Namespace = require("../src/api/Namespace")
 local t = require("../src/types")
 
 --[[ `gcinfo` is the heap in whole kilobytes — the analyzer deprecates `collectgarbage("count")`
@@ -140,6 +143,94 @@ local function rung73()
 end
 
 rung73()
+
+-- -------------------------------------------------------------------------------------------
+-- 74 — Batch.read's oversize-claim reason
+-- -------------------------------------------------------------------------------------------
+
+--[[
+	M4 finding 74: a payload claiming more than its channel's ceiling was refused with a reason that
+	quoted the claim, so a peer choosing a fresh length per packet got a fresh string per packet —
+	past the observer's repeat suppression, which keys on the reason, and onto the heap on a stage
+	whose rate the peer chooses. The ceiling is fixed per channel, so the reason can be too. M4-1
+	measured 500 claims across 50 distinct lengths as 50 distinct strings; this rung sends the same.
+
+	BEFORE (d98e91d): 50 distinct reasons for 500 claims. AFTER: 1.
+]]
+local function rung74()
+	print("74      Batch.read, distinct reasons for oversize claims")
+
+	local CLAIMS = 500
+	local LENGTHS = 50
+
+	Namespace.reset()
+
+	local declared = Namespace.declare("residue", {
+		listed = Channel.signal({ data = t.array(t.u8), rate = 1000, maxBytes = 32 }),
+	})
+	local protocol = Namespace.seal()
+	local listed = declared.channels.listed
+
+	Buffer.load(nil)
+	Batch.begin()
+
+	for claim = 1, CLAIMS do
+		local length = listed.maxBytes + 1 + (claim % LENGTHS)
+		Buffer.writeVarint(listed.id)
+		Buffer.writeVarint(length)
+
+		for _ = 1, length do
+			Buffer.writeU8(0)
+		end
+	end
+
+	local packed = Buffer.take()
+	local reasons: { [string]: true } = {}
+	local refused = 0
+	local delivered = 0
+
+	Batch.read(packed, nil, {
+		resolve = Namespace.channelById,
+		answers = true,
+		admit = function()
+			return nil, nil
+		end,
+		deliver = function()
+			delivered += 1
+		end,
+		change = function() end,
+		reply = function() end,
+		hello = function() end,
+		resync = function() end,
+		refuse = function(_channel, _stage, reason: string)
+			refused += 1
+			reasons[reason] = true
+		end,
+	})
+
+	local distinct = 0
+	for _ in reasons do
+		distinct += 1
+	end
+
+	print(
+		string.format(
+			"        %-44s %6d refused  %6d delivered  %6d distinct reasons  (%d channels)",
+			`{CLAIMS} claims over {LENGTHS} lengths`,
+			refused,
+			delivered,
+			distinct,
+			protocol.count
+		)
+	)
+
+	expect(refused == CLAIMS and delivered == 0, "74: every oversize claim is refused, none delivered")
+	expect(distinct == 1, `74: expected 1 distinct reason for {CLAIMS} claims, got {distinct}`)
+
+	Namespace.reset()
+end
+
+rung74()
 
 if #failures > 0 then
 	print("")
