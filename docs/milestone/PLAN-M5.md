@@ -233,9 +233,16 @@ payload type function at once:
       the spelling into `api_ok` or the reason it cannot be into §8
 
 ### Phase 2 — a type for every public value
-- [ ] re-export `Policy<T>`, `Check<T>`, `Snapshot`, `Described`, `Rules`, `Limits`, `Audience<S>`, `Observer`
-- [ ] `tools/exports` demands a type per public value family
-- [ ] `api_ok` writes each
+- [x] re-export `Policy<T>`, `Check<T>`, `Snapshot`, `Described`, `Rules`, `Limits`, `Audience<S>`, `Observer`
+      — and `Factory<T>` and `Store`, because `nw.policy` takes the one and every `nw.store.*` returns the
+      other, and both were value families with no name
+- [x] `tools/exports` demands a type per public value family: a `FAMILIES` table maps each top-level value
+      on `nw` to the type that names it, an `UNTYPED` table names the rest with the reason (modules, two
+      strings, the private seam, and the seven channel constructors — a record's type is five internal
+      parameters and the name a game writes is `nw.Views<typeof(ns.channels)>`), and both are tested
+      against `src/netweave.luau` in both directions. Confirmed to bite three ways: a value in neither
+      list, a family naming a type not exported, an entry naming a value that is gone
+- [x] `api_ok` writes each, in an annotation position: 39 public types covered, 0 gaps, 8 families
 
 ### Phase 3 — the M4 report's type-layer residue
 - [ ] items 5, 6, 7, 42, 43, 45, 46, 47, 48, 50 of `docs/SECURITY-REPORT-M4.md`, each its own commit

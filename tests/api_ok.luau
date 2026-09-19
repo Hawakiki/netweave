@@ -361,4 +361,73 @@ for _, byStage in diagnostics.channels do
 	end
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- A public value gets a public type (PLAN-M5 phase 2, D-3)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Every alias `nw` gained in M5, each in an annotation position that checks — a local holding the
+	value the family produces, or a parameter the family consumes. `tools/exports` demands one per
+	value family and reads this file for the coverage.
+]]
+
+type Kit = { primary: number }
+
+--[[ `nw.Policy<T>`: the return of `nw.policy` and of `nw.all`, and the type of `authorize`. ]]
+local canEquip: nw.Policy<Kit> = nw.policy(function()
+	return function(_ctx: nw.Ctx, request: Kit)
+		return if request.primary > 0 then nw.allow(request) else nw.deny("nothing equipped")
+	end
+end)
+
+local _both: nw.Policy<Kit> = nw.all(canEquip, canEquip)
+
+--[[ `nw.Check<T>` and `nw.Factory<T>`: the two halves before `nw.policy` wraps them, for a game that
+     keeps them as values — a factory in one module, the wrapping in the declaration file. ]]
+local checkEquip: nw.Check<Kit> = function(_ctx: nw.Ctx, request: Kit)
+	return nw.allow(request)
+end
+
+local makeEquip: nw.Factory<Kit> = function(_config: any)
+	return checkEquip
+end
+
+local _fromFactory: nw.Policy<Kit> = nw.policy(makeEquip)
+
+--[[ `nw.Audience<S>`: what `nw.audience.*` are. The scope parameter is what gives or withholds
+     `broadcast`, and both spellings have to name it. ]]
+local _all: nw.Audience<"everyone"> = nw.audience.everyone
+local _mine: nw.Audience<"subset"> = nw.audience.owner
+local _close: nw.Audience<"subset"> = nw.audience.nearby(64)
+
+--[[ `nw.Store`: what every `nw.store.*` constructor returns and `replicate` takes. ]]
+local _plain: nw.Store = nw.store.of(held)
+local _fromAtom: nw.Store = nw.store.charm(function()
+	return held
+end)
+
+--[[ `nw.Observer`: the function `nw.observe` takes, for a game that builds one elsewhere. ]]
+local logRefusals: nw.Observer = function(rejection: nw.Rejection)
+	local _where: nw.Stage = rejection.stage
+end
+
+local _detach: () -> () = nw.observe(logRefusals)
+
+--[[ `nw.Snapshot`, `nw.Rules`, `nw.Limits`, `nw.Described`: the settings both ways. A game that
+     maps its own log level onto netweave's builds a `Rules` and hands it over; one with a
+     diagnostics screen reads the snapshot and the descriptions back. ]]
+local quiet: nw.Rules = { budget = "off", queue = "warn" }
+local roomy: nw.Limits = { queueCapacity = 1024 }
+local applied: nw.Snapshot = nw.configure({ rules = quiet, limits = roomy })
+local _inForce: nw.Severity = applied.rules.budget
+local _capacity: number = applied.limits.queueCapacity
+
+local snapshot: nw.Snapshot = nw.config.snapshot()
+local _again: nw.Severity = snapshot.rules.queue
+
+for _, row: nw.Described in nw.config.describe() do
+	local _rule: string = row.rule
+	local _now: nw.Severity = row.severity
+end
+
 return nil
