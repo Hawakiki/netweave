@@ -616,6 +616,91 @@ rejects("array longer than the length prefix allows", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- The three additions of PLAN-M5 phase 5
+-- ---------------------------------------------------------------------------------------------
+
+--[[ A literal is the one value, recorded as declared; the wire half is `serdes_runtime`. ]]
+check("a string literal records its value", t.literal("v3").literal == "v3")
+check("and a boolean one", t.literal(false).literal == false)
+check("and a number one", t.literal(7).literal == 7)
+
+rejects("a table literal", function()
+	(t.literal :: any)({})
+end)
+
+rejects("a NaN literal", function()
+	t.literal(0 / 0)
+end)
+
+rejects("an infinite literal", function()
+	t.literal(math.huge)
+end)
+
+--[[ A set is a map whose value is the literal `true`, and that shape is what the codec and the
+     protocol see, so it is asserted rather than trusted. ]]
+local unlocked = t.set(t.string(1, 8))
+check("a set is a map", unlocked.kind == "map")
+check("of the element", (unlocked.key :: any).max == 8)
+check(
+	"to the literal true",
+	(unlocked.value :: any).kind == "literal" and (unlocked.value :: any).literal == true
+)
+
+rejects("a set of a kind a map cannot key by", function()
+	t.set(t.struct({ x = t.u8 }))
+end)
+
+rejects("a set of an optional", function()
+	t.set(t.optional(t.u8))
+end)
+
+rejects("a set of a non-type", function()
+	(t.set :: any)(5)
+end)
+
+--[[ A default is recorded, and checked against the bounds the descriptor carries — at the
+     declaration, which is the line that is wrong. ]]
+local speed = t.optional(t.u8, 16)
+check("a default is recorded", speed.default == 16)
+check("and an optional without one records nothing", t.optional(t.u8).default == nil)
+check("a string default", t.optional(t.string(0, 8), "anon").default == "anon")
+check("an enum default", t.optional(t.enum({ red = true, blue = true }), "red").default == "red")
+check("a boolean default", t.optional(t.boolean, false).default == false)
+check("a float default", t.optional(t.f32(0, 1), 0.5).default == 0.5)
+
+rejects("a default outside the range", function()
+	t.optional(t.u8, 300)
+end)
+
+rejects("a fractional default on an integer", function()
+	t.optional(t.u8, 1.5)
+end)
+
+rejects("a default of the wrong kind", function()
+	(t.optional :: any)(t.u8, "fast")
+end)
+
+rejects("a default that is not finite", function()
+	t.optional(t.f32, 0 / 0)
+end)
+
+rejects("a string default outside the length", function()
+	t.optional(t.string(1, 3), "toolong")
+end)
+
+rejects("a default that is not a variant", function()
+	(t.optional :: any)(t.enum({ red = true }), "blue")
+end)
+
+rejects("a default on a struct", function()
+	(t.optional :: any)(t.struct({ x = t.u8 }), 1)
+end)
+
+rejects("a default on an array", function()
+	(t.optional :: any)(t.array(t.u8), 1)
+end)
+
+-- ---------------------------------------------------------------------------------------------
 
 if failures > 0 then
 	error(`{failures} runtime type assertions failed`)

@@ -375,6 +375,10 @@ do
 		pattern = "%d+",
 		--[[ `t.u53` against `t.f64(0, 2^53)`: same storage, one refuses a fraction (M4-1). ]]
 		whole = true,
+		--[[ A literal is nothing on the wire, so the signature is the only place the two peers'
+		     values meet (`PLAN-M5` phase 5). ]]
+		literal = "v3",
+		default = 16,
 	}
 
 	local function channelWith(mutate: ((Ir.Node) -> ())?): any

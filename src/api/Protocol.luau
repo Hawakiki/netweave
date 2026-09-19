@@ -126,6 +126,18 @@ local function describe(node: Ir.Node, out: { string })
 		end
 	end
 
+	--[[ With its type, because `tostring` folds `1` and `"1"` together and a peer declaring the
+	     string where this one declares the number is a peer that disagrees. ]]
+	if node.literal ~= nil then
+		table.insert(out, `literal={typeof(node.literal)}:{tostring(node.literal)};`)
+	end
+
+	--[[ Same again: a default is read on one side and never sent, so the two declarations meet
+	     only here. ]]
+	if node.default ~= nil then
+		table.insert(out, `default={typeof(node.default)}:{tostring(node.default)};`)
+	end
+
 	--[[ Variant order is the wire's tag order (`WIRE-FORMAT.md` §5), so it is written in the order
 	     the lowering fixed rather than re-sorted here. ]]
 	if node.variants then

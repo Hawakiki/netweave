@@ -106,7 +106,25 @@ local _entityFixed: Type<{ Entity }> = t.array(entity, 100)
 
 local _mapPayload: t.MapPayload<typeof(t.u16), typeof(entity)> =
 	{ [1] = { id = 1, x = 0, y = 0, z = 0, orientation = 0, animation = 0 } }
-local _optionalPayload: t.OptionalPayload<typeof(entity)> = nil
+local _optionalPayload: t.OptionalPayload<typeof(entity), nil> = nil
+
+--[[
+	The three additions of `PLAN-M5` phase 5, each carrying the payload its docstring promises.
+
+	A literal keeps a string or boolean singleton, and a number widens to `number` because Luau has
+	no number singletons; a set is `{ [E]: true }`; an optional with a default drops the nil. The
+	negative controls are in `types_reject`.
+]]
+local _version: Type<"v3"> = t.literal("v3")
+local _ready: Type<true> = t.literal(true)
+local _seven: Type<number> = t.literal(7)
+local _unlocked: Type<{ [string]: true }> = t.set(t.string(1, 32))
+local _byId: Type<{ [number]: true }> = t.set(t.u16)
+local _speed: Type<number> = t.optional(t.u8, 16)
+local _team: Type<"red" | "blue"> = t.optional(t.enum({ red = true, blue = true }), "red")
+local _nick: Type<string> = t.optional(t.string(0, 16), "anon")
+local _muted: Type<boolean> = t.optional(t.boolean, false)
+local _defaulted: t.OptionalPayload<typeof(t.u8), number> = 3
 local _arrayPayload: t.ArrayPayload<typeof(weapon)> = { "primary", "melee" }
 
 --[[ Nesting: a struct inside an array inside a struct. ]]
