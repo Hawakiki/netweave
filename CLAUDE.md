@@ -280,6 +280,7 @@ lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
 lune run bench/pace           # the client pacer, against the server's bucket: 0 refusals
 lune run bench/residue        # the optimisation residue M4 found, one rung per finding, each gone
+lune run bench/crossover      # where a diff loses to a resend, in bytes, on the real writer
 stylua --check src tests analyze.luau bench spike
 selene src tests
 ```

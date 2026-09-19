@@ -321,8 +321,13 @@ payload type function at once:
       rather than once per subject. AFTER: lune 3.16–3.24 and 2.17–2.25 (−7%, the function call per pair);
       Studio 364 and 140 ns a subject (−47% and −61%, the engine calls per pair). Per player: the tick
       pays P position reads a frame instead of S × P × 3, and S × P lookups instead of S × P `has`.
-- [ ] the delta crossover `PLAN-M4` acceptance 8 asked for and never measured: a replication mode in the
-      matrix, and the subject size below which a diff loses to a resend written into `bench/RESULTS.md`
+- [x] the delta crossover `PLAN-M4` acceptance 8 asked for and never measured: ~~a replication mode in the
+      matrix, and~~ the subject size below which a diff loses to a resend written into `bench/RESULTS.md`.
+      Not a matrix mode: the question is bytes and both sides are netweave, so `bench/crossover` writes
+      both shapes with `Batch` itself under lune, exactly and without a spread, and asserts the shape of the
+      answer. The diff loses for a one-field subject (by two bytes) and when every field moved (by its
+      flags and length prefix, two to six bytes); level at two fields; wins from three; zero bytes when
+      nothing moved, which the resend cannot say. `bench/RESULTS.md`, "The delta crossover, in bytes"
 - [ ] the nice-to-have types, each with an `_ok`/`_reject` pair
 
 ### Phase 6 — the tooling
