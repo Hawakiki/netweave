@@ -1,0 +1,59 @@
+{
+  "name": "netweave-live",
+  "emitLegacyScripts": true,
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "netweave": {
+        "$className": "Folder",
+
+        "src": {
+          "$path": "src"
+        }
+      },
+
+      "LiveNet": {
+        "$path": "live/Net.luau"
+      }
+    },
+
+    "ServerScriptService": {
+      "LiveServer": {
+        "$path": "live/Server.server.luau"
+      }
+    },
+
+    "Workspace": {
+      "$properties": { "FilteringEnabled": true },
+
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Anchored": true,
+          "Size": [512, 4, 512],
+          "Position": [0, -2, 0],
+          "Color": [0.4, 0.4, 0.4]
+        }
+      },
+
+      "SpawnLocation": {
+        "$className": "SpawnLocation",
+        "$properties": {
+          "Anchored": true,
+          "Size": [12, 1, 12],
+          "Position": [0, 0.5, 0],
+          "Duration": 0
+        }
+      }
+    },
+
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "LiveClient": {
+          "$path": "live/Client.client.luau"
+        }
+      }
+    }
+  }
+}

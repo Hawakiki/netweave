@@ -68,6 +68,10 @@ docs/
     PLAN-M4-BUG.md            a sub-milestone that gates M4's close
     PLAN-M5.md
   SECURITY-REPORT*.md         external audits, one per milestone; the tracker for each is PLAN-M4 §9
+live/                         the multi-client probe: a place for Studio's "Clients and Servers" test mode,
+                              built by live.project.json. One channel of every class, the console as the
+                              measurement; the only thing that has ever run netweave on real remotes with
+                              two clients. Not under analyze (instance requires); checked by hand
 bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
