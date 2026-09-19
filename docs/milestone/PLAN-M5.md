@@ -269,7 +269,13 @@ payload type function at once:
 
 ### Phase 5 — additions
 - [ ] `t.string` `{ charset = … }`, linear by construction
-- [ ] recipient-set caching per tick, measured on `bench/tick`'s `select-all` and a `nearby` rung
+- [ ] recipient-set caching per tick, measured on `bench/tick`'s `select-all` and a `nearby` rung. The
+      first number from real remotes (`live/`, 2026-09-19, two players): 200 subjects published twice a
+      frame under `nearby(50)` cost 0.39 ms a frame with no players and 1.80–1.95 ms with two, at ~230
+      server frames a second uncapped. That is 4.5 µs a publish with two distance checks and one or two
+      encodes in it; `nearby` walks every player per subject, so the distance half grows with players ×
+      subjects and the encode half with recipients. Two points do not give a slope, and the `BEFORE` for
+      this task is a live run at 4 and 8 players before the cache lands
 - [ ] the delta crossover `PLAN-M4` acceptance 8 asked for and never measured: a replication mode in the
       matrix, and the subject size below which a diff loses to a resend written into `bench/RESULTS.md`
 - [ ] the nice-to-have types, each with an `_ok`/`_reject` pair
