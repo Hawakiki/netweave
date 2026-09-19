@@ -2211,6 +2211,14 @@ function buildReader(node: Node): Reader
 		local class = node.class
 		local root = node.descendantOf
 
+		--[[ Both sentences once, here, rather than concatenated on each refusal: they are constants
+		     per schema, and the refusal is the path a peer takes by naming an instance of the
+		     wrong class, which costs it nothing (SECURITY-REPORT-M4-1; `bench/residue`). The
+		     root's name is read now, so a container renamed after the declaration is named here as
+		     it was declared. ]]
+		local notClass = if class then "instance is not a " .. class else nil
+		local notInside = if root then "instance is not inside " .. root.Name else nil
+
 		return function(_flags: Flags): any
 			local value = readInstance()
 
@@ -2239,8 +2247,8 @@ function buildReader(node: Node): Reader
 				return nil
 			end
 
-			if class and not value:IsA(class) then
-				reject("instance is not a " .. class)
+			if notClass and not value:IsA(class :: string) then
+				reject(notClass)
 				return nil
 			end
 
@@ -2255,8 +2263,8 @@ function buildReader(node: Node): Reader
 				mean the same thing and hold different objects, and a hash that moved for it would
 				force a client redeploy for a server-side edit.
 			]]
-			if root and not value:IsDescendantOf(root) then
-				reject("instance is not inside " .. root.Name)
+			if notInside and not value:IsDescendantOf(root :: Instance) then
+				reject(notInside)
 				return nil
 			end
 

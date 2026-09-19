@@ -20,6 +20,7 @@
 local Audience = require("../src/api/Audience")
 local Baseline = require("../src/replication/Baseline")
 local Batch = require("../src/transport/Batch")
+local Budget = require("../src/transport/Budget")
 local Buffer = require("../src/codec/Buffer")
 local Channel = require("../src/api/Channel")
 local Delta = require("../src/replication/Delta")
@@ -28,6 +29,7 @@ local Link = require("../src/transport/Link")
 local Namespace = require("../src/api/Namespace")
 local Outbound = require("../src/transport/Outbound")
 local Recipients = require("../src/transport/Recipients")
+local Serdes = require("../src/codec/Serdes")
 local Store = require("../src/replication/Store")
 local Tick = require("../src/replication/Tick")
 local t = require("../src/types")
@@ -508,6 +510,171 @@ local function rung77()
 end
 
 rung77()
+
+-- -------------------------------------------------------------------------------------------
+-- Budget.admit's refusal string
+-- -------------------------------------------------------------------------------------------
+
+--[[
+	M4-1, the first of three minor optimisation findings: `Budget.admit` built its refusal as an
+	interpolated string, so a refusal cost 2.4x an admission — 191 ns against 80 — for a sentence
+	whose one variable, the rate, is fixed per channel. Not an allocation: Luau interns short
+	strings, so the same sentence built again is the same object and M4-1 measured +0 KB over 10⁶
+	refusals. Time only, which is why this rung has to weigh. Each column is the median over
+	repeats of a run of calls under an injected clock, with the spread; the clock never moves, so
+	the admitted column drains the bucket once and the refused column is every call after.
+
+	BEFORE (78689c7): admitted 67 ns [66–73], refused 186 ns [183–193], ratio 2.8.
+	AFTER: admitted 67 ns [65–71], refused 84 ns [81–94], ratio 1.3.
+]]
+local function rungBudget()
+	print("M4-1    Budget.admit, admitted against refused")
+
+	local REPEATS = 21
+	local CALLS = 100000
+
+	--[[ A bucket as deep as one run, at an ordinary rate: the admitted column is the burst being
+	     drained, and the refused column is what comes after with the clock stopped. ]]
+	local channel = Channel.signal({ data = t.struct({ n = t.u8 }), rate = 30, burst = CALLS })
+	channel.qualified = "residue.signal"
+	local sender = { name = "sender" }
+
+	local function time(refusing: boolean): (number, number, number)
+		local samples: { number } = {}
+
+		for _ = 1, REPEATS do
+			local budget = Budget.new(function()
+				return 0
+			end)
+			local admit = budget.admit
+
+			if refusing then
+				--[[ Drain the bucket first, so every timed call is a refusal. ]]
+				for _ = 1, CALLS do
+					admit(channel, sender, 1)
+				end
+			end
+
+			local started = os.clock()
+			for _ = 1, CALLS do
+				admit(channel, sender, 1)
+			end
+			table.insert(samples, (os.clock() - started) * 1e9 / CALLS)
+		end
+
+		table.sort(samples)
+		return samples[math.ceil(REPEATS / 2)], samples[1], samples[REPEATS]
+	end
+
+	local admitted, admittedLow, admittedHigh = time(false)
+	local refused, refusedLow, refusedHigh = time(true)
+	local ratio = refused / admitted
+
+	print(
+		string.format(
+			"        %-44s admitted %4.0f ns [%3.0f–%3.0f]  refused %4.0f ns [%3.0f–%3.0f]  ratio %.1f  n = %d x %d",
+			"one sender, one channel, the clock stopped",
+			admitted,
+			admittedLow,
+			admittedHigh,
+			refused,
+			refusedLow,
+			refusedHigh,
+			ratio,
+			REPEATS,
+			CALLS
+		)
+	)
+	expect(
+		ratio < 1.5,
+		`Budget.admit: expected a refusal under 1.5x an admission, got {string.format("%.1f", ratio)}x`
+	)
+end
+
+rungBudget()
+
+-- -------------------------------------------------------------------------------------------
+-- The instance reader's refusal strings
+-- -------------------------------------------------------------------------------------------
+
+--[[
+	M4-1, the second minor: the instance reader built `"instance is not a " .. class` and
+	`"instance is not inside " .. root.Name` on every refusal, for two sentences that are constants
+	per schema. Interned, so time only, like the rung above — and the refusal is the path a peer
+	takes by handing the sidecar an instance of the wrong class, which costs it nothing. The two
+	columns read the same sidecar slot through the same reader: one holds an instance of the
+	declared class, the other one of another class.
+
+	BEFORE (78689c7): admitted 111 ns [109–125], refused 159 ns [158–174], ratio 1.4.
+	AFTER: admitted 112 ns [109–118], refused 125 ns [124–141], ratio 1.1.
+]]
+local function rungInstance()
+	print("M4-1    the instance reader, admitted against refused")
+
+	local REPEATS = 21
+	local CALLS = 100000
+
+	--[[ The lune stand-in the codec suite uses: a table answering `IsA`, which is what the reader
+	     asks. In Studio it is a real Instance (`tests/roblox_runtime.luau`). ]]
+	local function standIn(className: string): any
+		return {
+			ClassName = className,
+			IsA = function(_self: any, class: string): boolean
+				return class == className
+			end,
+		}
+	end
+
+	local codec = Serdes.fromSchema(t.instance("Sound"))
+	local read = codec.read
+	local empty = buffer.create(0)
+
+	local function time(value: any): (number, number, number)
+		local samples: { number } = {}
+		local sidecar = { value }
+
+		for _ = 1, REPEATS do
+			Buffer.beginRead(empty, sidecar)
+
+			local started = os.clock()
+			for _ = 1, CALLS do
+				Buffer.seekInstances(0)
+				Buffer.clearRejection()
+				read()
+			end
+			table.insert(samples, (os.clock() - started) * 1e9 / CALLS)
+		end
+
+		table.sort(samples)
+		return samples[math.ceil(REPEATS / 2)], samples[1], samples[REPEATS]
+	end
+
+	local admitted, admittedLow, admittedHigh = time(standIn("Sound"))
+	local refused, refusedLow, refusedHigh = time(standIn("Part"))
+	local ratio = refused / admitted
+
+	print(
+		string.format(
+			"        %-44s admitted %4.0f ns [%3.0f–%3.0f]  refused %4.0f ns [%3.0f–%3.0f]  ratio %.1f  n = %d x %d",
+			't.instance("Sound") handed a Sound, then a Part',
+			admitted,
+			admittedLow,
+			admittedHigh,
+			refused,
+			refusedLow,
+			refusedHigh,
+			ratio,
+			REPEATS,
+			CALLS
+		)
+	)
+	expect(
+		ratio < 1.25,
+		`instance reader: expected a refusal under 1.25x an admission, got {string.format("%.1f", ratio)}x`
+	)
+end
+
+rungInstance()
 
 if #failures > 0 then
 	print("")

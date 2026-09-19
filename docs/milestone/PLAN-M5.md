@@ -288,6 +288,10 @@ payload type function at once:
         instead of copying it per subject. BEFORE on `f15828a`: two asks two tables, `within`
         handed no list, 50 entries left after an audience of 1; AFTER: one table, handed to all
         100, 1 left. `roblox_runtime` asserts `within` reads the list it is given, not the engine.
+  - [x] M4-1 minors, the two refusal strings — `Budget.admit`'s sentence is one per rate, built on
+        the first refusal; the instance reader's two are built with the closure. Time only, since
+        Luau interns short strings: BEFORE on `78689c7` a refusal at 2.8x an admission (186 against
+        67 ns) and 1.4x (159 against 111); AFTER 1.3x (84) and 1.1x (125), n = 21 × 100,000.
 - [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
       match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to
