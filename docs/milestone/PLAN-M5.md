@@ -288,8 +288,18 @@ payload type function at once:
 - [ ] the nice-to-have types, each with an `_ok`/`_reject` pair
 
 ### Phase 6 — the tooling
-- [ ] selene block allows replace the global list in `netweave.toml`
-- [ ] `bench/` top-level scripts and `tools/` under `analyze`
+- [x] selene block allows replace the global list in `netweave.toml`: `-- selene: allow(undefined_variable)`
+      on the line before each of the thirty `type function`s, measured at the pinned 0.29.0 to cover that
+      body and nothing else — an undefined global outside it in the same file is still an error, and
+      dropping one allow puts six `types` errors back. `netweave.toml` is empty but for the base, and says why
+- [x] `bench/` top-level scripts, `tools/*.luau` and `analyze.luau` itself under `analyze`: 68 files clean,
+      up from 57. The 22 real diagnostics were ten `table.create` arrays, `Buffer.take()`'s second return
+      reaching `buffer.len`, `luau.compile` through `pcall`, an `os.date` overload on an `any`, a
+      `string.find` pair not narrowed together, and `bench/tick`'s per-rung audience reaching `OutboundScope`
+      as `any` (the constructor is cast now, since the view is never used there). The `@lune/*` requires
+      resolve through the alias `lune setup` writes into `.luaurc`, committed and documented in
+      `tools/README.md`; `analyze.luau` had to stop spelling its own markers out in a comment, because it
+      reads itself now
 
 ### Phase 7 — the lifecycle, folded
 - [x] `Factory<T>` may return a second function; `callable` keeps it as ~~`__nwServer`~~ `__nwStages`, a

@@ -98,7 +98,7 @@ local tree = maybe(run, "tree")
 local commit = if tree and tree.commit then tree.commit else "unknown"
 local dirty = if tree and tree.dirty then " (dirty)" else ""
 
-push(`Run: {os.date("!%Y-%m-%d", must(run, "the run", "generatedAt"))}, tree {commit}{dirty}`)
+push(`Run: {os.date("!%Y-%m-%d", must(run, "the run", "generatedAt") :: number)}, tree {commit}{dirty}`)
 push(
 	`Load: {must(run, "config", "config", "packetsPerFrame")} packets/frame, `
 		.. `{must(run, "config", "config", "runSeconds")} s window`

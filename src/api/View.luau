@@ -62,6 +62,7 @@ local View = {}
 	parameter (M4 report). Each table component is branded and the union rebuilt, which keeps the
 	brand across the `if r then` a game has to write anyway.
 ]]
+-- selene: allow(undefined_variable)
 type function brandedAs(payload, name)
 	local value = types.copy(payload)
 
@@ -98,6 +99,7 @@ type function brandedAs(payload, name)
 	return value
 end
 
+-- selene: allow(undefined_variable)
 type function channelView(channel, side)
 	if not channel:is("table") then
 		error(
@@ -248,6 +250,7 @@ end
 
 	Maps a declaration table to what the server may do with each channel.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ServerView(declaration)
 	local result = types.newtable()
 
@@ -275,6 +278,7 @@ end
 
 	Maps a declaration table to what the client may do with each channel.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ClientView(declaration)
 	local result = types.newtable()
 

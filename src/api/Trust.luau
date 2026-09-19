@@ -110,6 +110,7 @@ local Trust = {}
 	`if r then authoritative(r) end` narrows to the branded table, so the brand survives the `if`
 	the payload's optionality forces a game to write.
 ]]
+-- selene: allow(undefined_variable)
 type function branded(payload, name)
 	local value = types.copy(payload)
 
@@ -149,6 +150,7 @@ type function branded(payload, name)
 	return value
 end
 
+-- selene: allow(undefined_variable)
 export type function Trusted(payload)
 	return branded(payload, "__nwTrusted")
 end
@@ -167,6 +169,7 @@ end
 	Table payloads only, for the reason given on [Trust.Trusted].
 	:::
 ]=]
+-- selene: allow(undefined_variable)
 export type function Untrusted(payload)
 	return branded(payload, "__nwUntrusted")
 end
@@ -195,6 +198,7 @@ type _instantiateUntrusted = Untrusted<{ probe: boolean }>
 	back as `unknown?`. Inferring the schema type and projecting the payload out of it is the shape
 	`src/types/init.luau` already had to use for `t.struct`, for the same reason.
 ]]
+-- selene: allow(undefined_variable)
 export type function TrustedPayload(schema)
 	local descriptor = types.copy(schema)
 

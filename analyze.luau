@@ -22,7 +22,25 @@ local process = require("@lune/process")
 local stdio = require("@lune/stdio")
 
 local DEFINITIONS = "tools/globalTypes.d.luau"
-local ROOTS = { "src", "tests" }
+
+--[[
+	`src` and `tests` recursively; `bench` and `tools` one level deep, and this file.
+
+	The two shallow roots are the lune-side scripts (`PLAN-M5` phase 6): what is under them — the
+	benchmark's place scripts, its vendored competitors, its schemas — requires Roblox instances or
+	sets globals on purpose, and is checked by `bench/check` for syntax and by running instead. The
+	`.d.luau` under `tools/` is the definitions file the analyzer is *given*, not a module for it to
+	check. The `@lune/*` requires resolve through the alias `lune setup` writes into `.luaurc`; see
+	`tools/README.md` if they do not.
+]]
+local ROOTS: { { dir: string, shallow: boolean } } = {
+	{ dir = "src", shallow = false },
+	{ dir = "tests", shallow = false },
+	{ dir = "bench", shallow = true },
+	{ dir = "tools", shallow = true },
+}
+
+local FILES = { "analyze.luau" }
 
 local function color(name: stdio.Color, text: string): string
 	return `{stdio.color(name)}{text}{stdio.color("reset")}`
@@ -45,7 +63,7 @@ local function findLuauLsp(): string
 	return `{storage}/{versions[#versions]}/luau-lsp.exe`
 end
 
-local function collect(dir: string, out: { string }): { string }
+local function collect(dir: string, out: { string }, shallow: boolean): { string }
 	if not fs.isDir(dir) then
 		return out
 	end
@@ -53,8 +71,10 @@ local function collect(dir: string, out: { string }): { string }
 	for _, entry in fs.readDir(dir) do
 		local path = `{dir}/{entry}`
 		if fs.isDir(path) then
-			collect(path, out)
-		elseif string.match(path, "%.luau$") then
+			if not shallow then
+				collect(path, out, shallow)
+			end
+		elseif string.match(path, "%.luau$") and not string.match(path, "%.d%.luau$") then
 			table.insert(out, path)
 		end
 	end
@@ -81,11 +101,11 @@ local function strictHeader(path: string): boolean
 end
 
 --[[
-	A rejection file declares how many diagnostics it expects, anywhere in its header:
-		-- netweave:expect 3
-
-	and marks each line it expects one on with a fragment the diagnostic has to contain:
-		local _wrong: Type<number> = t.optional(t.u16) -- netweave:reject 'Type<number>'
+	A rejection file declares how many diagnostics it expects, anywhere in its header, with the
+	marker `netweave:expect N` written as a line comment, and marks each line it expects one on
+	with `netweave:reject <fragment>` — a fragment the diagnostic has to contain — as a trailing
+	comment. (Neither is spelled out in full here, because this file checks itself since `PLAN-M5`
+	phase 6 and a literal example would make it a rejection file in its own eyes.)
 
 	Deliberately not a `--!` directive: Luau lints unknown ones, so the marker would count itself.
 
@@ -154,10 +174,10 @@ local function analyze(files: { string }): (string, number, { [number]: { string
 		local at, message = string.match(line, "^%S+%((%d+),%d+%): (.*)$")
 		if at then
 			diagnostics += 1
-			local number = tonumber(at) :: number
+			local number = tonumber(at :: string) :: number
 			local list = byLine[number] or {}
 			byLine[number] = list
-			table.insert(list, message)
+			table.insert(list, message :: string)
 			last = list
 		elseif last then
 			last[#last] ..= " " .. line
@@ -218,8 +238,18 @@ local ok: { string } = {}
 local rejects: { { path: string, expected: Expectation } } = {}
 local failed = false
 
+local paths: { string } = {}
+
 for _, root in ROOTS do
-	for _, path in collect(root, {}) do
+	collect(root.dir, paths, root.shallow)
+end
+
+for _, file in FILES do
+	table.insert(paths, file)
+end
+
+do
+	for _, path in paths do
 		if not strictHeader(path) then
 			failed = true
 			print(

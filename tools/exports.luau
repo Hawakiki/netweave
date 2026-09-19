@@ -186,7 +186,7 @@ end
 	in PLAN-M4-BUG.
 ]]
 local function stripCommentsAndStrings(source: string): string
-	local out = {}
+	local out: { string } = {}
 	local at = 1
 	local length = #source
 
@@ -253,7 +253,7 @@ local function mentions(haystack: string, needle: string): boolean
 	while true do
 		local start, finish = string.find(haystack, needle, at, true)
 
-		if not start then
+		if not start or not finish then
 			return false
 		end
 

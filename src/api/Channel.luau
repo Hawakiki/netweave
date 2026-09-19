@@ -138,6 +138,7 @@ export type Channel<C, A, T, R, U> = {
 	A type function body sees only the `types` library — not this module's locals — so the reasons
 	live inside `forbid` rather than in a constant table beside it.
 ]]
+-- selene: allow(undefined_variable)
 type function payloadOf(descriptor, field)
 	local schema = types.copy(descriptor)
 	local name = field:value()
@@ -168,6 +169,7 @@ type function payloadOf(descriptor, field)
 	return payload
 end
 
+-- selene: allow(undefined_variable)
 type function propertyOf(spec, field)
 	local declaration = types.copy(spec)
 
@@ -182,6 +184,7 @@ type function propertyOf(spec, field)
 	return declaration:readproperty(types.singleton(field:value()))
 end
 
+-- selene: allow(undefined_variable)
 type function requireRate(spec, class)
 	local rate = propertyOf(spec, types.singleton("rate"))
 
@@ -203,6 +206,7 @@ type function requireRate(spec, class)
 	return rate
 end
 
+-- selene: allow(undefined_variable)
 type function forbid(spec, class, field)
 	local name = field:value()
 
@@ -238,6 +242,7 @@ type function forbid(spec, class, field)
 	error(`nw.{class:value()} forbids \`{name}\`. {reason[name]}`)
 end
 
+-- selene: allow(undefined_variable)
 type function requireData(spec, class, field, purpose)
 	local declared = propertyOf(spec, field)
 
@@ -254,6 +259,7 @@ end
 
 	Checks a `command` declaration and projects the payload out of its `data`.
 ]=]
+-- selene: allow(undefined_variable)
 export type function CommandPayload(spec)
 	local command = types.singleton("command")
 
@@ -280,6 +286,7 @@ end
 	@type IntentPayload<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function IntentPayload(spec)
 	local intent = types.singleton("intent")
 
@@ -297,6 +304,7 @@ end
 	@type SignalPayload<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function SignalPayload(spec)
 	local signal = types.singleton("signal")
 
@@ -314,6 +322,7 @@ end
 	@type QueryArgs<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function QueryArgs(spec)
 	local query = types.singleton("query")
 
@@ -341,6 +350,7 @@ end
 	@type QueryReturns<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function QueryReturns(spec)
 	return requireData(
 		spec,
@@ -356,6 +366,7 @@ end
 
 	Shared by `state` and `event`: both are server-to-client, so both forbid a budget and a policy.
 ]=]
+-- selene: allow(undefined_variable)
 export type function OutboundPayload(spec, class)
 	forbid(spec, class, types.singleton("rate"))
 	forbid(spec, class, types.singleton("burst"))
@@ -381,6 +392,7 @@ end
 	read from, and a `subject` type, because replication is the only class where the wire has to say
 	*which* value this is.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ReplicatePayload(spec)
 	local class = types.singleton("replicate")
 
@@ -425,6 +437,7 @@ end
 	the id an `any` nobody can check. That is the only reason the type exists: without it the
 	listener would take one argument at analysis and two at runtime, which is worse than either.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ReplicateSubject(spec)
 	local declared = propertyOf(spec, types.singleton("subject"))
 
@@ -445,6 +458,7 @@ end
 	Projects the declared audience's scope, which is what decides whether `broadcast` exists on the
 	server view. Guarantee G3 is this type function and the branch it feeds in `src/api/View.luau`.
 ]=]
+-- selene: allow(undefined_variable)
 export type function OutboundScope(spec)
 	local audience = propertyOf(spec, types.singleton("audience"))
 

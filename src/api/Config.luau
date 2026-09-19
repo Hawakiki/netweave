@@ -216,6 +216,7 @@ export type Described = {
 	type function body cannot see this module's own type aliases and a hand-built copy would drift
 	from `Snapshot` the first time either changed.
 ]]
+-- selene: allow(undefined_variable)
 export type function CheckedSettings(spec, snapshot)
 	local settings = types.copy(spec)
 
