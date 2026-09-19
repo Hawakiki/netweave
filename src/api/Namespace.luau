@@ -261,6 +261,11 @@ local protocol: Protocol? = nil
      once per packet, so it is a flat array-like table rather than a search. ]]
 local byId: { [number]: any } = {}
 
+--[[ The `replicate` channels in id order, frozen at seal; before it, and after a reset, an empty
+     frozen list rather than nil, so the tick never has to ask. ]]
+local NONE: { any } = table.freeze({} :: { any })
+local replicated: { any } = NONE
+
 --[=[
 	@within Namespace
 	@function seal
@@ -297,11 +302,22 @@ function Namespace.seal(): Protocol
 
 	table.clear(byId)
 
+	--[[ Built here and kept, rather than on each ask: the tick asked once a frame and got a fresh
+	     array each time, for a list that cannot change once the ids are assigned
+	     (SECURITY-REPORT-M4 77; `bench/residue` rung 77). ]]
+	local mirrored: { any } = {}
+
 	for id, qualified in names do
 		local channel = byName[qualified]
 		channel.id = id
 		byId[id] = channel
+
+		if channel.class == "replicate" then
+			table.insert(mirrored, channel)
+		end
 	end
+
+	replicated = table.freeze(mirrored)
 
 	--[[ After the ids are assigned, not before: the signature is taken in id order, and a channel
 	     without an id has nothing to be in order by. ]]
@@ -349,28 +365,15 @@ end
 	@private
 
 	Every declared `replicate` channel, in id order, sealing the protocol if that has not happened
-	yet.
-
-	The replication tick needs the list once a frame and nothing else needs it at all, so it is
-	built on demand rather than kept — and it is short, because a game declares a handful of
-	replicated channels and thousands of subjects on them.
+	yet. The same frozen list every time: nothing can be declared after the seal, so it is built
+	there once.
 ]=]
 function Namespace.replicated(): { any }
 	if not protocol then
 		Namespace.seal()
 	end
 
-	local out = {}
-
-	for id = 1, #byId do
-		local channel = byId[id]
-
-		if channel and channel.class == "replicate" then
-			table.insert(out, channel)
-		end
-	end
-
-	return out
+	return replicated
 end
 
 function Namespace.channelById(id: number): any?
@@ -515,6 +518,7 @@ function Namespace.reset()
 	table.clear(namespaces)
 	table.clear(order)
 	table.clear(byId)
+	replicated = NONE
 	protocol = nil
 	sealed = false
 	stagesRan = false

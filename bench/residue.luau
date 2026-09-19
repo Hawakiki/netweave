@@ -18,15 +18,25 @@
 ]]
 
 local Audience = require("../src/api/Audience")
+local Baseline = require("../src/replication/Baseline")
 local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
 local Channel = require("../src/api/Channel")
 local Delta = require("../src/replication/Delta")
 local Ir = require("../src/codec/Ir")
+local Link = require("../src/transport/Link")
 local Namespace = require("../src/api/Namespace")
 local Outbound = require("../src/transport/Outbound")
 local Recipients = require("../src/transport/Recipients")
+local Store = require("../src/replication/Store")
+local Tick = require("../src/replication/Tick")
 local t = require("../src/types")
+
+local SILENT: Link.Link = {
+	send = function() end,
+	sendAll = function() end,
+	receive = function() end,
+}
 
 --[[ `gcinfo` is the heap in whole kilobytes — the analyzer deprecates `collectgarbage("count")`
      in its favour — so a window has to allocate enough for one call's share of a kilobyte to be
@@ -326,11 +336,6 @@ local function rung76()
 	     copy and the sidecar table — the copy is the floor again. ]]
 	local UNRELIABLE = 200
 
-	local link = {
-		send = function() end,
-		sendAll = function() end,
-		receive = function() end,
-	}
 	local roster: Recipients.Roster = {
 		all = function(): { any }
 			return {}
@@ -342,7 +347,7 @@ local function rung76()
 			return 0
 		end,
 	}
-	local out = Outbound.new(link, roster)
+	local out = Outbound.new(SILENT, roster)
 	local marker = Channel.event({
 		data = t.struct({ tag = t.u8, body = t.buffer(0, 255) }),
 		audience = Audience.everyone,
@@ -365,6 +370,144 @@ local function rung76()
 end
 
 rung76()
+
+-- -------------------------------------------------------------------------------------------
+-- 77 — what the tick allocates per subject
+-- -------------------------------------------------------------------------------------------
+
+--[[
+	M4 finding 77, three parts. `Namespace.replicated` built a fresh array every time it was asked
+	and the tick asked once a frame; the Roblox roster's `within` called `Players:GetPlayers()`
+	itself — a fresh table from the engine — once per subject per publish, when the tick had
+	already taken the roster once for the frame; and the recipient scratch kept whatever a larger
+	audience had left past `count`, so a player who left stayed referenced from it until a larger
+	audience overwrote the slot. Each is a count: whether two asks return one table, how many times
+	a tick of N `nearby` subjects asks the roster for its players and whether `within` is handed
+	that list, and how many entries a one-recipient audience leaves in a scratch a fifty-recipient
+	one filled.
+
+	BEFORE (f15828a): two asks, two tables; 1 ask a tick and `within` handed no list (so the Roblox
+	roster asks the engine per subject); 50 entries left after an audience of 1.
+	AFTER: one table; 1 ask, handed to all 100 `within` calls; 1 entry left.
+]]
+local function rung77()
+	print("77      the tick, per subject")
+
+	local SUBJECTS = 100
+	local PLAYERS = 50
+
+	Namespace.reset()
+
+	local world: { [number]: any } = {}
+
+	for subject = 1, SUBJECTS do
+		world[subject] = { x = subject }
+	end
+
+	local declared = Namespace.declare("residue", {
+		spots = Channel.replicate({
+			subject = t.u16,
+			data = t.struct({ x = t.u16 }),
+			audience = Audience.nearby(64),
+			store = Store.of(world),
+		}),
+	})
+	Namespace.seal()
+
+	local once = Namespace.replicated() == Namespace.replicated()
+	print(
+		string.format(
+			"        %-44s %s",
+			"replicated(), asked twice",
+			if once then "one table" else "two tables"
+		)
+	)
+	expect(once, "77: expected Namespace.replicated to answer with one table")
+
+	local players: { any } = {}
+
+	for index = 1, PLAYERS do
+		players[index] = { name = `player{index}` }
+	end
+
+	local asked = 0
+	local handed = 0
+	local withins = 0
+
+	local roster: Recipients.Roster = {
+		all = function(): { any }
+			asked += 1
+			return players
+		end,
+		owner = function(_subject: any): any?
+			return nil
+		end,
+		within = function(_subject: any, _studs: number, out: { any }, list: { any }?): number
+			withins += 1
+
+			if list == players then
+				handed += 1
+			end
+
+			out[1] = players[1]
+			return 1
+		end,
+	}
+
+	local tick = Tick.new({
+		outbound = Outbound.new(SILENT, roster),
+		baselines = Baseline.new(true),
+		roster = roster,
+		channels = Namespace.replicated,
+	})
+
+	tick()
+
+	print(
+		string.format(
+			"        %-44s asked for its players %d time(s), within ran %d times and was handed the list %d times",
+			`a tick of {SUBJECTS} nearby subjects`,
+			asked,
+			withins,
+			handed
+		)
+	)
+	expect(
+		asked == 1 and withins == SUBJECTS and handed == SUBJECTS,
+		`77: expected the roster asked once and within handed that list {SUBJECTS} times, got {asked} and {handed}`
+	)
+
+	local scratch: { any } = {}
+	local wide = Audience.select(function(): { any }
+		return players
+	end)
+	local narrow = Audience.select(function(): { any }
+		return { players[1] }
+	end)
+
+	local spots = declared.channels.spots
+	Recipients.of(wide, 1, roster, scratch, spots)
+	local filled = Recipients.of(narrow, 1, roster, scratch, spots)
+	local left = 0
+
+	for _ in scratch do
+		left += 1
+	end
+
+	print(
+		string.format(
+			"        %-44s %d filled, %d left in the scratch",
+			`an audience of {PLAYERS} then one of 1`,
+			filled,
+			left
+		)
+	)
+	expect(left == filled, `77: expected the scratch to hold {filled} after the narrow audience, got {left}`)
+
+	Namespace.reset()
+end
+
+rung77()
 
 if #failures > 0 then
 	print("")
