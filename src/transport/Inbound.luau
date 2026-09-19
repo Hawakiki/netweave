@@ -271,7 +271,15 @@ function Inbound.new(config: Config): Inbound
 
 		At one batch a frame — every ordinary frame — this is still the same seven arrays reused
 		forever and still costs nothing.
+
+		Capped on the way back in. The pool used to keep every list it ever needed, so the most walks
+		ever in flight at once — a burst of yielding handlers — set its size for the life of the
+		server, each list seven arrays sized by the largest batch it carried (M4-1; `bench/residue`
+		counts it). Past the cap a returning list is dropped for the collector, and the walk that
+		needs one more than the cap allocates it: game code that yields in a handler pays for the
+		overlap it creates, once per overlap, rather than the server keeping the peak.
 	]]
+	local POOLED = 8
 	local free: { Pending } = { emptyPending() }
 
 	--[[
@@ -637,7 +645,9 @@ function Inbound.new(config: Config): Inbound
 	local function dispatch(list: Pending)
 		local ok, failure = pcall(attempt, list)
 
-		table.insert(free, list)
+		if #free < POOLED then
+			table.insert(free, list)
+		end
 
 		if not ok then
 			report(nil, nil, "handler", `dispatch raised: {tostring(failure)}`, 0)
