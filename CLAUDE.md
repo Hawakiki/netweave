@@ -229,12 +229,12 @@ check the manifest before assuming it is not installed.
 - `lune` — scripts, codegen, report generation, test runners
 - `stylua` — formatting; `stylua.toml` sets `syntax = "Luau"`, without which nested generics fail
   to parse. `.styluaignore` excludes vendored sources.
-- `selene` — linting; `netweave.toml` declares the `types` global that exists only inside a
-  `type function` body. ~~because selene has no scoped lint filters~~ Selene does have
-  `-- selene: allow(undefined_variable)` for the block it precedes (M4-1, measured); moving the
-  hand-kept global list to block allows is `PLAN-M5`. `roblox.yml` beside it is selene's generated
-  Roblox standard library and is load-bearing: renaming it takes `selene src tests` from 0 to 212
-  errors.
+- `selene` — linting. ~~`netweave.toml` declares the `types` global that exists only inside a
+  `type function` body, because selene has no scoped lint filters~~ Selene does have
+  `-- selene: allow(undefined_variable)` for the block it precedes (M4-1, measured), and since
+  `PLAN-M5` phase 6 every `type function` carries one on the line before it; `netweave.toml` is empty
+  but for the base and says why. `roblox.yml` beside it is selene's generated Roblox standard
+  library and is load-bearing: renaming it takes `selene src tests` from 0 to 212 errors.
 - `luau-lsp` — **type checking, which is part of the test suite**, not a convenience
 
 ### Checks
@@ -312,7 +312,9 @@ The runner sits in `ReplicatedStorage` alongside the tests, and runs there **bec
 still mapped through `tests/` — that runs the whole suite twice.
 
 `analyze` requires `LuauSolverV2` and `tools/globalTypes.d.luau`. Both are set up for you; see
-`tools/README.md` if the definitions file is missing.
+`tools/README.md` if the definitions file is missing. It walks `src/` and `tests/` recursively, and
+since `PLAN-M5` phase 6 also `bench/*.luau`, `tools/*.luau` and itself, one level deep — the lune-side
+scripts, whose `@lune/*` requires resolve through the alias `lune setup` writes into `.luaurc`.
 
 ### Test convention
 

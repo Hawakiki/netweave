@@ -177,7 +177,7 @@ for _, entry in SHAPES do
 		end
 
 		if entry.subtree then
-			local inventory: { number } = table.create(SUBTREE_ENTRIES)
+			local inventory: { number } = (table.create(SUBTREE_ENTRIES) :: any) :: { number }
 
 			for index = 1, SUBTREE_ENTRIES do
 				inventory[index] = index
@@ -207,10 +207,13 @@ for _, entry in SHAPES do
 		end)
 		else nw.audience.everyone
 
-	declared[entry.name] = nw.replicate({
+	--[[ Through `any`: the audience differs per rung, three audience types are not one type, and a
+	     union reaches the class type function as something `readproperty` refuses. The channel's view
+	     is never used here — `Tick` drives it directly — so nothing the type function computes is lost. ]]
+	declared[entry.name] = (nw.replicate :: any)({
 		subject = t.u16,
 		data = t.struct(shape),
-		audience = audience :: any,
+		audience = audience,
 		store = nw.store.of(world),
 	})
 
@@ -313,7 +316,7 @@ type Result = {
      that claim can be checked rather than taken (`CLAUDE.md` §9). ]]
 local function measure(rung: Rung): Result
 	local rig = rung.rig
-	local samples: { number } = table.create(REPEATS)
+	local samples: { number } = (table.create(REPEATS) :: any) :: { number }
 
 	--[[ The first tick sends every subject to every client, which is the join and not the steady
 	     state. Warming up is what puts every client's baseline in place, so the timed passes are

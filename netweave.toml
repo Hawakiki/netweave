@@ -1,98 +1,13 @@
 # selene standard library additions, layered on the Roblox one.
 #
-# `types` exists only inside a `type function` body. selene has no way to model that scope — it
-# sees the identifier at file level and reports it undefined — and its lint filters are
-# file-global, so a scoped `allow` is not available either. Declaring the members used here is
-# the narrowest option: a typo in any other global is still caught.
+# Empty since PLAN-M5 phase 6. It used to declare every `types.*` member and every helper type
+# function the bodies call each other with — thirty lines a rename had to be kept in step with —
+# on the belief that selene's lint filters were file-global. They are not: `-- selene:
+# allow(undefined_variable)` on the line before a `type function` covers that function's body and
+# nothing else (M4-1, measured; re-measured at 0.29.0 while removing this list), so each of the
+# thirty type functions carries its own allow and an undefined global anywhere else in the same
+# file is still caught. The file stays so that `std = "roblox+netweave"` in selene.toml keeps a
+# place to put a real addition, and so that the reason the list is gone is beside where it was.
 [selene]
 base = "roblox"
 name = "netweave"
-
-# Argument types are `any` rather than the real ones. A type function passes types around, and
-# `types.singleton(name)` where `name` came from another type is the normal case; constraining
-# these to `string` reported every such call as incorrect while catching nothing.
-["types.singleton"]
-args = [{ type = "any" }]
-
-["types.newtable"]
-args = [
-    { type = "any", required = false },
-    { type = "any", required = false },
-    { type = "any", required = false },
-]
-
-["types.newfunction"]
-args = [
-    { type = "any", required = false },
-    { type = "any", required = false },
-    { type = "any", required = false },
-]
-
-["types.unionof"]
-args = [{ type = "any" }, { type = "any" }]
-
-["types.intersectionof"]
-args = [{ type = "any" }, { type = "any" }]
-
-["types.optional"]
-args = [{ type = "any" }]
-
-# `copy` is what makes a type function callable from another one: a parameter that arrives generic
-# fails to reduce, and copying it first is the fix (`spike/declare/`).
-["types.copy"]
-args = [{ type = "any" }]
-
-["types.unknown"]
-property = true
-
-["types.string"]
-property = true
-
-["types.number"]
-property = true
-
-["types.boolean"]
-property = true
-
-["types.any"]
-property = true
-
-["types.never"]
-property = true
-
-# The type functions in `src/api/` call each other — a shared `forbid` writes one message per
-# forbidden field rather than six copies of it. selene does not bind a `type function` declaration
-# as a name, so each of those calls reads as an undefined global, and its lint filters are
-# file-global rather than scoped, so a per-file `allow` would switch the check off for real code in
-# the same file.
-#
-# Declaring them here is the narrowest option, and nothing is lost: `luau-lsp` reports an unknown
-# global under `--!strict`, and `lune run analyze` is part of the test suite. Renaming one of these
-# helpers means renaming it here too, which is the cost of the compromise.
-["payloadOf"]
-args = [{ type = "any" }, { type = "any" }]
-
-["propertyOf"]
-args = [{ type = "any" }, { type = "any" }]
-
-["requireRate"]
-args = [{ type = "any" }, { type = "any" }]
-
-["requireData"]
-args = [{ type = "any" }, { type = "any" }, { type = "any" }, { type = "any" }]
-
-["forbid"]
-args = [{ type = "any" }, { type = "any" }, { type = "any" }]
-
-["brandedAs"]
-args = [{ type = "any" }, { type = "any" }]
-
-["channelView"]
-args = [{ type = "any" }, { type = "any" }]
-
-# `branded` joined them in M4 phase 6 (`src/api/Trust.luau`) and was not declared here, so
-# `selene src tests` had three errors from the commit that added it until phase 8 noticed. It is the
-# shared half of `Trusted`, `Untrusted` and `TrustedPayload`, written once because a union has to be
-# branded component by component and three copies of that is three chances to get it wrong.
-["branded"]
-args = [{ type = "any" }, { type = "any" }]

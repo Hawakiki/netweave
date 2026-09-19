@@ -166,6 +166,7 @@ export type Type<T> = {
 	type Shot = t.PayloadOf<typeof(ShotType)>
 	```
 ]=]
+-- selene: allow(undefined_variable)
 export type function PayloadOf(ty)
 	--[[ Asked before `readproperty`, which raises its own message on a non-table — `type.readproperty:
 	     expected self to be either a table, but got number instead` — printed verbatim at the call
@@ -229,6 +230,7 @@ type _instantiatePayloadOf = PayloadOf<Type<{ probe: boolean }>>
 --[[ A schema built at runtime reaches these through `any`, and `any` carries no `__payload`. It
      stays `any` on the way out rather than being refused: the analyzer has been bypassed on
      purpose, and the runtime `check()` is the guard on that path. ]]
+-- selene: allow(undefined_variable)
 export type function OptionalPayload(inner)
 	if inner:is("any") then
 		return types.any
@@ -257,6 +259,7 @@ end
 
 	What [Types.array] carries: a list of the element type's payload. Applied for you.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ArrayPayload(element)
 	if element:is("any") then
 		return types.newtable(nil, { index = types.number, readresult = types.any, writeresult = types.any })
@@ -288,6 +291,7 @@ end
 
 	What [Types.map] carries: the key type's payload indexing the value type's. Applied for you.
 ]=]
+-- selene: allow(undefined_variable)
 export type function MapPayload(key, value)
 	local advice = "t.map takes two netweave types, a key and a value, as in t.map(t.u16, Entity). "
 		.. "One of them carries no payload, so it did not come from t.u16, t.string, t.struct or "
@@ -331,6 +335,7 @@ end
 	naive `struct<V>(fields: { [string]: Type<V> })` signature unifies `V` across fields and
 	rejects `{ id = t.u8, name = t.string }` outright (`spike/inference/README.md`, Q1 candidate A).
 ]]
+-- selene: allow(undefined_variable)
 export type function StructPayload(fields)
 	local result = types.newtable()
 
@@ -382,6 +387,7 @@ end
 	branches' fields readable as `nil` — the reader can still write `action.attack` and get no error,
 	which is the whole failure the tag exists to prevent.
 ]]
+-- selene: allow(undefined_variable)
 export type function UnionPayload(branches)
 	local result = nil
 
@@ -412,6 +418,7 @@ export type function UnionPayload(branches)
 	return result
 end
 
+-- selene: allow(undefined_variable)
 export type function EnumPayload(variants)
 	local result = nil
 
