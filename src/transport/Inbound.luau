@@ -104,6 +104,10 @@ export type Inbound = {
 	drain: (channel: any) -> (),
 	tick: () -> (),
 	forget: (sender: any) -> (),
+	--[[ How many pending lists are parked in the free list right now. For `bench/residue`, which
+	     counts the pool rather than weighing it: lune cannot force a collection, so what the pool
+	     retains is not otherwise observable. ]]
+	pooled: () -> number,
 }
 
 --[[ `pcall` of a function whose return pack is empty is typed as returning `boolean` alone, so the
@@ -1481,6 +1485,10 @@ function Inbound.new(config: Config): Inbound
 			end
 
 			Context.forget(who)
+		end,
+
+		pooled = function(): number
+			return #free
 		end,
 	}
 end
