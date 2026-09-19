@@ -146,6 +146,13 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 	     parked records: it is touched once per publish. ]]
 	local scratch: Buffer.Save = Buffer.emptySave()
 
+	--[[ Where an unreliable packet is written, a batch of one. Its own record rather than
+	     `Buffer.load(nil)`, which was a fresh 64-byte buffer per packet and a regrowth for any
+	     packet larger — on the path a `nearby` marker takes thousands of times a second
+	     (`live/`, two clients: 23,000 a second each). Same finding as the parked records
+	     (SECURITY-REPORT-M4 76; `bench/residue` rung 76). ]]
+	local unreliable: Buffer.Save = Buffer.emptySave()
+
 	local function park()
 		if loadedRecord then
 			Buffer.saveInto(loadedRecord)
@@ -221,16 +228,20 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 	]]
 	local function pushUnreliable(channel: any, destination: any, value: any, all: boolean)
 		park()
-		Buffer.load(nil)
+		Buffer.load(unreliable)
 
 		local ok, failure = pcall(attemptPacket, channel, value)
 
 		if not ok then
+			--[[ Taken and saved so the record is empty again, then re-raised for the reason
+			     `guarded` gives. ]]
 			Buffer.take()
+			Buffer.saveInto(unreliable)
 			error(failure, 0)
 		end
 
 		local packed, instances = Buffer.take()
+		Buffer.saveInto(unreliable)
 		local size = buffer.len(packed)
 
 		local ceiling = math.min(Config.limitOf("unreliableBytes") or UNRELIABLE_CEILING, UNRELIABLE_CEILING)
@@ -461,8 +472,8 @@ function Outbound.new(link: Link.Link, roster: Recipients.Roster): Outbound
 					local packed, instances = Buffer.take()
 
 					--[[
-						`take` left a fresh empty buffer behind; the record keeps it so the
-						destination does not have to allocate one again next frame — and it happens
+						`take` left the buffer empty at the size it had grown to; the record keeps
+						it so the destination does not regrow it next frame — and it happens
 						**before** the send, not after.
 
 						After the send it happened only when the send returned. A `link.send` that

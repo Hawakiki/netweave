@@ -17,12 +17,15 @@
 	because a number is not a number until it survives being re-run.
 ]]
 
+local Audience = require("../src/api/Audience")
 local Batch = require("../src/transport/Batch")
 local Buffer = require("../src/codec/Buffer")
 local Channel = require("../src/api/Channel")
 local Delta = require("../src/replication/Delta")
 local Ir = require("../src/codec/Ir")
 local Namespace = require("../src/api/Namespace")
+local Outbound = require("../src/transport/Outbound")
+local Recipients = require("../src/transport/Recipients")
 local t = require("../src/types")
 
 --[[ `gcinfo` is the heap in whole kilobytes — the analyzer deprecates `collectgarbage("count")`
@@ -34,15 +37,16 @@ local WINDOWS = 64
 
 type Weighed = { median: number, low: number, high: number, survived: number }
 
-local function weigh(step: () -> ()): Weighed
+local function weigh(step: () -> (), window: number?): Weighed
 	local perCall: { number } = {}
+	local calls = window or WINDOW
 
 	for _ = 1, WINDOWS do
 		local before = gcinfo()
-		for _ = 1, WINDOW do
+		for _ = 1, calls do
 			step()
 		end
-		local delta = (gcinfo() - before) * 1024 / WINDOW
+		local delta = (gcinfo() - before) * 1024 / calls
 
 		--[[ A window the collector stepped inside reads low or negative, and there is no way to
 		     tell a small step from a small allocation, so a window is kept only when nothing was
@@ -231,6 +235,136 @@ local function rung74()
 end
 
 rung74()
+
+-- -------------------------------------------------------------------------------------------
+-- 76 — Buffer.take and the record it leaves behind
+-- -------------------------------------------------------------------------------------------
+
+--[[
+	M4 finding 76: `take` handed back an exact copy and then loaded a fresh 64-byte buffer, so the
+	parked record `Outbound.flush` saved afterwards started every frame at 64 bytes and regrew
+	through every doubling to reach what it had reached the frame before — five doublings per
+	destination per frame at 1.5 KB, each a `buffer.create` and a copy, while the comment beside
+	the call said the record kept what it had. M4-1 measured the record's size as 64 → 2048 → 64
+	across one write and a take. This rung watches the same record across two frames: its size at
+	each step, whether the second frame writes into the buffer the first one grew, and the bytes a
+	frame costs — where the exact copy `take` returns is the floor, since the remote must not carry
+	the slack.
+
+	BEFORE (0ee4327): sizes 64 → 2048 → 64, the second frame's buffer is a new object,
+	5,696 B/frame [3,008–5,760, n = 56], 768 B per unreliable packet [272–768, n = 57].
+	AFTER: 64 → 2048 → 2048, the same object, 1,600 B/frame [1,536–1,600, n = 61] and 256 B per
+	unreliable packet [208–272, n = 59] — the copy plus the sidecar table, both times.
+]]
+local function rung76()
+	print("76      Buffer.take, the record across a frame")
+
+	local PAYLOAD = 1536
+
+	local record = Buffer.emptySave()
+
+	local function frame(): buffer
+		Buffer.load(record)
+
+		for _ = 1, PAYLOAD do
+			Buffer.writeU8(0)
+		end
+
+		local packed = Buffer.take()
+		Buffer.saveInto(record)
+
+		return packed
+	end
+
+	local sizes: { number } = { record.size }
+
+	Buffer.load(record)
+	for _ = 1, PAYLOAD do
+		Buffer.writeU8(0)
+	end
+	Buffer.saveInto(record)
+	table.insert(sizes, record.size)
+
+	Buffer.load(record)
+	local packed = Buffer.take()
+	Buffer.saveInto(record)
+	table.insert(sizes, record.size)
+
+	local grown = record.buffer
+	frame()
+	local kept = record.buffer == grown
+
+	print(
+		string.format(
+			"        %-44s %s, the next frame %s",
+			`record size across write and take at {buffer.len(packed)} B`,
+			table.concat(sizes, " -> "),
+			if kept then "writes into the buffer it grew" else "grows a new one"
+		)
+	)
+
+	--[[ A frame allocates kilobytes, not bytes, so the window is sixteen frames: enough to read
+	     to the byte, small enough that a collection does not land in every one. ]]
+	local perFrame = weigh(function()
+		frame()
+	end, 16)
+	bytes(`a {PAYLOAD} B frame (the exact copy is the floor)`, perFrame)
+	expect(
+		perFrame.median < 2 * PAYLOAD,
+		`76: expected a frame to cost under twice its {PAYLOAD} B copy, got {perFrame.median}`
+	)
+
+	expect(
+		sizes[3] == sizes[2],
+		`76: expected the record to keep its {sizes[2]} B after a take, got {sizes[3]}`
+	)
+	expect(kept, "76: expected the next frame to write into the buffer the last one grew")
+
+	--[[ The same finding on the unreliable path, through a real `Outbound`: a packet there is a
+	     batch of one, written where nothing else is accumulating, and that used to be a fresh
+	     buffer per packet. The link swallows the send, so what is weighed is the write, the exact
+	     copy and the sidecar table — the copy is the floor again. ]]
+	local UNRELIABLE = 200
+
+	local link = {
+		send = function() end,
+		sendAll = function() end,
+		receive = function() end,
+	}
+	local roster: Recipients.Roster = {
+		all = function(): { any }
+			return {}
+		end,
+		owner = function(_subject: any): any?
+			return nil
+		end,
+		within = function(_subject: any, _studs: number, _out: { any }): number
+			return 0
+		end,
+	}
+	local out = Outbound.new(link, roster)
+	local marker = Channel.event({
+		data = t.struct({ tag = t.u8, body = t.buffer(0, 255) }),
+		audience = Audience.everyone,
+		unreliable = true,
+	})
+	marker.id = 1
+	local value = { tag = 1, body = buffer.create(UNRELIABLE - 3) }
+	local destination = { name = "player" }
+
+	local perPacket = weigh(function()
+		out.push(marker, destination, value)
+	end, 64)
+	bytes(`an unreliable packet of {UNRELIABLE} B (the exact copy is the floor)`, perPacket)
+	expect(
+		perPacket.median < 2 * UNRELIABLE,
+		`76: expected an unreliable packet to cost under twice its {UNRELIABLE} B copy, got {perPacket.median}`
+	)
+
+	Buffer.load(nil)
+end
+
+rung76()
 
 if #failures > 0 then
 	print("")

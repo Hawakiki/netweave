@@ -276,6 +276,12 @@ payload type function at once:
   - [x] 74 — the oversize-claim reason no longer quotes the claim; one string per ceiling, built
         on first refusal. BEFORE on `d98e91d`: 500 claims over 50 lengths → 50 distinct reasons;
         AFTER: 1. `PLAN-M3` phase 9's "all four" corrected in place.
+  - [x] 76 — `Buffer.take` empties the buffer instead of replacing it, so a parked record keeps
+        the size it grew to; unreliable packets get a record of their own instead of `load(nil)`.
+        BEFORE on `0ee4327`: 64 → 2048 → 64 across one 1.5 KB frame, the next frame a new object,
+        5,696 B a frame [3,008–5,760, n = 56], 768 B an unreliable 200 B packet; AFTER: 64 → 2048 →
+        2048, the same object, 1,600 and 256 — the exact copy and the sidecar table. The flush
+        comment that said the record kept its buffer now describes what happens.
 - [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
       match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to

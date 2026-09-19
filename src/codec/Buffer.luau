@@ -778,8 +778,14 @@ end
 	@return buffer -- an exact-size copy
 	@return { Instance }
 
-	Hands over what has been written and resets. The copy is unavoidable: the growable buffer is
-	larger than its contents, and a remote must not carry the slack.
+	Hands over what has been written and empties the buffer. The copy is unavoidable: the growable
+	buffer is larger than its contents, and a remote must not carry the slack.
+
+	:::note
+	The buffer itself stays, at the size it grew to, so a record saved after a `take` starts the
+	next frame with the capacity the last one needed. A destination that once sent a large batch
+	keeps a buffer that size until [Outbound.forget] drops the record.
+	:::
 ]=]
 function Codec.take(): (buffer, { Instance })
 	blockDepth = 0
@@ -792,7 +798,18 @@ function Codec.take(): (buffer, { Instance })
 	local instances = (table.create(outgoingInstanceCount) :: any) :: { Instance }
 	table.move(outgoingInstances, 1, outgoingInstanceCount, 1, instances)
 
-	Codec.load(nil)
+	--[[
+		Emptied, not replaced. This used to be `load(nil)`, which put a fresh 64-byte buffer here,
+		so the record `Outbound.flush` saved afterwards regrew through every doubling each frame to
+		reach the size it had the frame before — five `buffer.create` and copies per destination per
+		frame at 1.5 KB, while the comment at the call site said the record kept what it had
+		(SECURITY-REPORT-M4 76; `bench/residue` rung 76). The sidecar is cleared for the same reason
+		and one more: an `Instance` held past its frame is a reference the game cannot see.
+	]]
+	table.clear(outgoingInstances)
+	outgoingUsed = 0
+	outgoingInstanceCount = 0
+
 	return packed, instances
 end
 
