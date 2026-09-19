@@ -120,14 +120,18 @@ end
 	@within Recipients
 	.all () -> { any } -- every connected player
 	.owner (subject: any) -> any? -- the player the subject belongs to, or nil
-	.within (subject: any, studs: number, out: { any }) -> number -- fills `out`, returns how many
+	.within (subject: any, studs: number, out: { any }, players: { any }) -> number -- fills `out` from `players`, returns how many
 	.has ((who: any) -> boolean)? -- whether this is someone the endpoint can send to right now
 
 	Everything the audience rules need to know about the world.
 
 	`within` fills a caller-owned array rather than returning a fresh one, because it runs per
 	publish and a `state` channel publishes per subject per tick. Returning a table there would
-	allocate once per subject per frame for the life of the server.
+	allocate once per subject per frame for the life of the server. It is handed the players to
+	measure for the same reason: the Roblox roster used to ask the engine for `GetPlayers()`
+	itself, a fresh table per call, once per subject per publish — 60,000 a second for a `nearby`
+	channel of a thousand subjects — when the tick had already taken `all()` once for the frame
+	(SECURITY-REPORT-M4 77; `bench/residue` rung 77).
 
 	`has` is optional, and every rule but `everyone` consults it. ~~The other three rules build their
 	answers out of the roster itself, so what they return is a recipient by construction.~~ `owner`
@@ -138,7 +142,7 @@ end
 export type Roster = {
 	all: () -> { any },
 	owner: (subject: any) -> any?,
-	within: (subject: any, studs: number, out: { any }) -> number,
+	within: (subject: any, studs: number, out: { any }, players: { any }) -> number,
 
 	--[[ Optional so a rig that stands players in with tables need not answer it — under lune the
 	     shape test cannot tell a stand-in from a stray table. ]]
@@ -236,7 +240,7 @@ function Recipients.roblox(): Roster
 			return Players:GetPlayerFromCharacter(instance)
 		end,
 
-		within = function(subject: any, studs: number, out: { any }): number
+		within = function(subject: any, studs: number, out: { any }, players: { any }): number
 			local origin = positionOf(subject)
 
 			if not origin then
@@ -246,7 +250,7 @@ function Recipients.roblox(): Roster
 			local limit = studs * studs
 			local count = 0
 
-			for _, player in Players:GetPlayers() do
+			for _, player in players do
 				local position = positionOf(player)
 
 				if position then
@@ -269,6 +273,18 @@ function Recipients.roblox(): Roster
 	}
 end
 
+--[[ Drops what an earlier, wider audience left in the scratch past `count`. The array is dense
+     from 1, so this stops at the first hole and costs one write per stale entry, once — not a
+     `table.clear` per subject per tick. ]]
+local function trim(out: { any }, count: number)
+	local index = count + 1
+
+	while out[index] ~= nil do
+		out[index] = nil
+		index += 1
+	end
+end
+
 --[=[
 	@within Recipients
 	@function of
@@ -277,6 +293,7 @@ end
 	@param roster Roster
 	@param out { any } -- caller-owned scratch array, filled in place
 	@param channel any? -- named in the report when a `select` returns something that is not a recipient
+	@param players { any }? -- the roster's players, when the caller already holds them for the frame
 	@return number -- how many recipients, or -1 for "everyone"
 
 	Resolves an audience to recipients.
@@ -285,11 +302,23 @@ end
 	whose audience is everyone sends one `FireAllClients` instead of N `FireClient`s, which is the
 	one place ByteNet beats both code generators (`RESEARCH §3.7-E`). Collapsing the two would
 	throw that away silently.
+
+	`out` holds exactly the recipients past the call, and nothing past `count`: the scratch is
+	reused per subject, and what a wider audience left behind kept a departed player referenced
+	until a wider one overwrote the slot (SECURITY-REPORT-M4 77).
 ]=]
-function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }, channel: any?): number
+function Recipients.of(
+	audience: any,
+	subject: any,
+	roster: Roster,
+	out: { any },
+	channel: any?,
+	players: { any }?
+): number
 	local kind = audience.kind
 
 	if kind == "everyone" then
+		trim(out, 0)
 		return -1
 	end
 
@@ -307,17 +336,20 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 		local player = roster.owner(subject)
 
 		if not player or (here and not here(player)) then
+			trim(out, 0)
 			return 0
 		end
 
 		out[1] = player
+		trim(out, 1)
 		return 1
 	end
 
 	if kind == "nearby" then
-		local count = roster.within(subject, audience.radius, out)
+		local count = roster.within(subject, audience.radius, out, players or roster.all())
 
 		if not here then
+			trim(out, count)
 			return count
 		end
 
@@ -334,10 +366,7 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 			end
 		end
 
-		for index = kept + 1, count do
-			out[index] = nil
-		end
-
+		trim(out, kept)
 		return kept
 	end
 
@@ -367,6 +396,7 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 	local chosen = audience.select(subject)
 
 	if type(chosen) ~= "table" then
+		trim(out, 0)
 		return 0
 	end
 
@@ -402,6 +432,7 @@ function Recipients.of(audience: any, subject: any, roster: Roster, out: { any }
 	end
 
 	table.clear(chosenSet)
+	trim(out, count)
 
 	if dropped or duplicated then
 		announce(audience, channel, dropped, duplicated)

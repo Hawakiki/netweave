@@ -282,6 +282,12 @@ payload type function at once:
         5,696 B a frame [3,008–5,760, n = 56], 768 B an unreliable 200 B packet; AFTER: 64 → 2048 →
         2048, the same object, 1,600 and 256 — the exact copy and the sidecar table. The flush
         comment that said the record kept its buffer now describes what happens.
+  - [x] 77 — `Namespace.replicated` is one frozen list built at seal; `within` is handed the
+        frame's players and the Roblox roster no longer calls `GetPlayers()` per subject;
+        `Recipients.of` trims the scratch past `count`; a broadcast reads the roster in place
+        instead of copying it per subject. BEFORE on `f15828a`: two asks two tables, `within`
+        handed no list, 50 entries left after an audience of 1; AFTER: one table, handed to all
+        100, 1 left. `roblox_runtime` asserts `within` reads the list it is given, not the engine.
 - [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
       match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to

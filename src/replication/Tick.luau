@@ -427,18 +427,17 @@ function Tick.new(config: Config): () -> ()
 
 			present[subject] = true
 
-			local count = Recipients.of(channel.audience, subject, roster, recipients, channel)
+			local count = Recipients.of(channel.audience, subject, roster, recipients, channel, everyone)
 			local broadcast = count == -1
+			local audience = recipients
 
 			if broadcast then
-				--[[ Everyone. Copied into the array so the loop below reads both branches the same
-				     way. ]]
-				count = 0
-
-				for _, who in everyone do
-					count += 1
-					recipients[count] = who
-				end
+				--[[ Everyone: the frame's roster, read in place. It used to be copied into the
+				     scratch so the loop below read both branches the same way, which was one
+				     write per player per subject per tick for a list that was already in hand
+				     (SECURITY-REPORT-M4 77). ]]
+				audience = everyone
+				count = population
 			end
 
 			--[[
@@ -477,7 +476,7 @@ function Tick.new(config: Config): () -> ()
 
 			if not jammed then
 				for index = 1, count do
-					local who = recipients[index]
+					local who = audience[index]
 
 					if settled and baselines.of(who, channel, subject) == held then
 						continue

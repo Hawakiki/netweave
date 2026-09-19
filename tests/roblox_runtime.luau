@@ -537,6 +537,27 @@ do
 	if player then
 		equals("a player owns themselves", roster.owner(player), player)
 		check("and the roster lists them", table.find(roster.all(), player) ~= nil)
+
+		--[[ `within` measures the list it is handed, not the engine's: it used to call
+		     `GetPlayers()` itself once per subject per publish when the tick had already taken
+		     the roster for the frame (SECURITY-REPORT-M4 77; `PLAN-M5` phase 4). Handed the frame's
+		     list it finds the player; handed an empty one it finds nobody — which is what shows the
+		     list is the one being read. Needs a character to measure from; said when there is none. ]]
+		local character = player.Character
+		local root = character and character.PrimaryPart
+
+		if root then
+			local out = {}
+			equals(
+				"within finds the player from the frame's list",
+				roster.within(root, 1e6, out, roster.all()),
+				1
+			)
+			equals("and names them", out[1], player)
+			equals("and finds nobody in an empty list", roster.within(root, 1e6, out, {}), 0)
+		else
+			print("        skip: the player has no character yet, so within was not asserted")
+		end
 	end
 
 	part:Destroy()
