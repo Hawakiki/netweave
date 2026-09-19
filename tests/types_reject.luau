@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 12
+-- netweave:expect 17
 
 --[[
 	Every assignment here must be rejected. `lune run analyze` fails if the count on line 1 stops
@@ -78,5 +78,21 @@ local _crossed: t.PayloadOf<typeof(_action)> = { tag = "wait", value = { x = 1 }
 --[[ 12. A `charset` is a string. Annotated for the same reason `types_ok` annotates its options:
      an unannotated literal is any table, and a wrong field in one is not a diagnostic. ]]
 local _badSet: t.TextOptions = { charset = 5 } -- netweave:reject Expected this to be 'string?', but got 'number'
+
+--[[ 13. A literal is a string, a boolean or a number; a table is refused at the call. ]]
+local _tableLiteral = t.literal({}) -- netweave:reject is not a subtype of
+
+--[[ 14. A literal carries its singleton, so another singleton is not the same type. ]]
+local _otherVersion: Type<"v4"> = t.literal("v3") -- netweave:reject Type<"v4">
+
+--[[ 15. A set's entries are `true`, not `boolean`. ]]
+local _looseSet: Type<{ [string]: boolean }> = t.set(t.string(1, 8)) -- netweave:reject Type<{ [string]: boolean }>
+
+--[[ 16. A default has to be a value of the inner type. ]]
+local _wrongDefault = t.optional(t.u8, "fast") -- netweave:reject default of the wrong kind
+
+--[[ 17. And a table field takes no default at all: a table default would be a fresh table on every
+     read and no two of them equal. ]]
+local _tableDefault = t.optional(t.struct({ x = t.u8 }), 5) -- netweave:reject takes a default only for
 
 return nil

@@ -119,6 +119,8 @@ export type Field = {
 	.lengthOffset number?
 	.count number? -- exact length, when the schema fixed one
 	.variants { string }?
+	.literal (string | boolean | number)? -- `literal`: the one value; nothing on the wire
+	.default (string | boolean | number)? -- `optional`: read where the bit is clear, and never written
 	.lookup { [string]: number }? -- variant name to wire index
 	.inner Node?
 	.element Node?
@@ -154,6 +156,8 @@ export type Node = {
 	lengthOffset: number?,
 	count: number?,
 	variants: { string }?,
+	literal: (string | boolean | number)?,
+	default: (string | boolean | number)?,
 	lookup: { [string]: number }?,
 	inner: Node?,
 	element: Node?,
@@ -695,6 +699,10 @@ function lower(descriptor: Descriptor): Node
 			variants = variants,
 			lookup = lookup,
 		}
+	elseif kind == "literal" then
+		--[[ Nothing on the wire: the value is in both peers' declarations, and the signature
+		     carries it so the two agree on which. ]]
+		return { kind = kind, bits = 0, fixedSize = 0, instances = 0, literal = descriptor.literal }
 	elseif kind == "union" then
 		--[[
 			A tag, and then whichever branch it names.
@@ -770,6 +778,7 @@ function lower(descriptor: Descriptor): Node
 			fixedSize = if inner.fixedSize == 0 then 0 else nil,
 			instances = if inner.instances == 0 then 0 else nil,
 			inner = inner,
+			default = descriptor.default,
 		}
 	elseif kind == "array" then
 		return lowerArray(descriptor)

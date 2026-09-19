@@ -1594,6 +1594,67 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- A literal, a set and a default, on the wire (PLAN-M5 phase 5)
+-- ---------------------------------------------------------------------------------------------
+
+do
+	--[[ A literal is nothing on the wire: a struct of a number and two literals is the number's
+	     byte, and a literal alone is zero bytes. The writer still refuses another value, because
+	     sending the wrong constant is a bug worth naming where it happens. ]]
+	local versioned = t.struct({ version = t.literal("v3"), ready = t.literal(true), n = t.u8 })
+
+	trip(
+		"a struct with two literals costs its one number",
+		versioned,
+		{ version = "v3", ready = true, n = 5 },
+		1
+	)
+	trip("a literal alone is zero bytes", t.literal("ping"), "ping", 0)
+	trip("and so is a number literal", t.literal(7), 7, 0)
+	refuses("another string is refused on the way out", versioned, { version = "v2", ready = true, n = 5 })
+	refuses("and so is another boolean", versioned, { version = "v3", ready = false, n = 5 })
+	refuses("and a missing one", versioned, { version = "v3", n = 5 })
+
+	--[[ A set is its count and its entries: two entries of one and two bytes are seven bytes with
+	     the two-byte count, where a map of booleans spends a flag byte per entry on a bit that is
+	     always set. ]]
+	local unlocked = t.set(t.string(1, 8))
+	trip("a set round trips", unlocked, { a = true, bb = true }, 7)
+	trip("and an empty one", unlocked, {}, 2)
+	refuses("false is not an entry", unlocked, { a = false })
+
+	local booleans = Serdes.fromSchema(t.map(t.string(1, 8), t.boolean))
+	local _, mapped = pcall(encode, booleans, { a = true, bb = true })
+	Buffer.load(nil)
+	equals("the map of booleans it replaces is two bytes more", buffer.len(mapped :: buffer), 9)
+
+	--[[ A default is never sent and always read: the value the game left out and the default it
+	     could have written are the same two bytes, and a clear bit reads as the default. ]]
+	local defaulted =
+		t.struct({ speed = t.optional(t.u8, 16), name = t.optional(t.string(0, 8), "anon"), n = t.u8 })
+	local codec = Serdes.fromSchema(defaulted)
+
+	local _, absent = pcall(encode, codec, { n = 1 })
+	Buffer.load(nil)
+	local _, written = pcall(encode, codec, { speed = 16, name = "anon", n = 1 })
+	Buffer.load(nil)
+	local _, set = pcall(encode, codec, { speed = 20, name = "bob", n = 1 })
+	Buffer.load(nil)
+
+	equals("a left-out field costs its bit", buffer.len(absent :: buffer), 2)
+	equals("and writing the default costs the same", buffer.len(written :: buffer), 2)
+	equals("a value that is not the default costs its bytes", buffer.len(set :: buffer), 7)
+
+	local read = decode(codec, absent :: buffer, {})
+	equals("an absent number reads as its default", read.speed, 16)
+	equals("and an absent string as its default", read.name, "anon")
+
+	local kept = decode(codec, set :: buffer, {})
+	equals("a set number reads as itself", kept.speed, 20)
+	equals("and a set string", kept.name, "bob")
+end
+
+-- ---------------------------------------------------------------------------------------------
 -- What a string may contain, on both sides of the wire
 -- ---------------------------------------------------------------------------------------------
 

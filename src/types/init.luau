@@ -46,7 +46,7 @@
 export type Encoding = "u8" | "u16" | "u32" | "u53" | "i8" | "i16" | "i32" | "i53" | "f32" | "f64"
 
 --[=[
-	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "optional" | "array" | "map" | "struct" | "union"
+	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "literal" | "optional" | "array" | "map" | "struct" | "union"
 	@within Types
 
 	What a descriptor describes. The codec dispatches on this.
@@ -62,6 +62,7 @@ export type Kind =
 	| "color3"
 	| "instance"
 	| "enum"
+	| "literal"
 	| "optional"
 	| "array"
 	| "map"
@@ -81,6 +82,8 @@ export type Kind =
 	.class string? -- `instance`: the class an arrival must be, or nil for any
 	.descendantOf Instance? -- `instance`: the container an arrival must be inside
 	.variants { string }? -- `enum`: variant names, sorted. Wire index is the position here
+	.literal (string | boolean | number)? -- `literal`: the one value, which costs nothing on the wire
+	.default (string | boolean | number)? -- `optional`: what an absent value reads as, and what is not sent
 	.unit boolean? -- `vector3`: the magnitude must be 1
 	.inner Descriptor? -- `optional`
 	.element Descriptor? -- `array`
@@ -104,6 +107,8 @@ export type Descriptor = {
 	utf8: boolean?,
 	pattern: string?,
 	variants: { string }?,
+	literal: (string | boolean | number)?,
+	default: (string | boolean | number)?,
 	unit: boolean?,
 	inner: Descriptor?,
 	element: Descriptor?,
@@ -145,6 +150,8 @@ export type Type<T> = {
 	utf8: boolean?,
 	pattern: string?,
 	variants: { string }?,
+	literal: (string | boolean | number)?,
+	default: (string | boolean | number)?,
 	unit: boolean?,
 	inner: Descriptor?,
 	element: Descriptor?,
@@ -222,16 +229,17 @@ type _instantiatePayloadOf = PayloadOf<Type<{ probe: boolean }>>
 ]]
 
 --[=[
-	@type OptionalPayload<I> I?
+	@type OptionalPayload<I, D> I? | I
 	@within Types
 
-	What [Types.optional] carries: the inner type's payload, or nil. Applied for you.
+	What [Types.optional] carries: the inner type's payload, or nil — and with a default, the
+	payload alone, because an absent value reads as the default. Applied for you.
 ]=]
 --[[ A schema built at runtime reaches these through `any`, and `any` carries no `__payload`. It
      stays `any` on the way out rather than being refused: the analyzer has been bypassed on
      purpose, and the runtime `check()` is the guard on that path. ]]
 -- selene: allow(undefined_variable)
-export type function OptionalPayload(inner)
+export type function OptionalPayload(inner, default)
 	if inner:is("any") then
 		return types.any
 	end
@@ -250,7 +258,61 @@ export type function OptionalPayload(inner)
 		error(advice)
 	end
 
-	return types.unionof(payload :: type, types.singleton(nil))
+	--[[ An absent second argument arrives as `unknown` (measured, `spike/additions`), and nil is
+	     the spelling of "no default" a caller could write out. ]]
+	if default:is("unknown") or default:is("nil") then
+		return types.unionof(payload :: type, types.singleton(nil))
+	end
+
+	--[[ The default's tag against the payload's, for the primitives the runtime admits: a string
+	     default on a number field is a diagnostic here rather than a raise at the declaration. A
+	     singleton's tag is "singleton", so its value's kind is read through it. ]]
+	local function primitive(ty: type): string?
+		if ty:is("singleton") then
+			return type(ty:value())
+		end
+
+		if ty:is("number") or ty:is("string") or ty:is("boolean") then
+			return ty.tag
+		end
+
+		if ty:is("union") then
+			local kind: string? = nil
+
+			for _, component in ty:components() do
+				local each = primitive(component)
+
+				if each == nil or (kind ~= nil and each ~= kind) then
+					return nil
+				end
+
+				kind = each
+			end
+
+			return kind
+		end
+
+		return nil
+	end
+
+	local wanted = primitive(payload :: type)
+	local given = primitive(default)
+
+	if wanted == nil then
+		error(
+			"t.optional takes a default only for a number, a string, a boolean or an enum: those are the "
+				.. "values two peers can compare, and a table default would be a fresh table on every read"
+		)
+	end
+
+	if given ~= wanted then
+		error(
+			`t.optional was given a default of the wrong kind: this field carries a {wanted}, and the `
+				.. `default is a {given or default.tag}`
+		)
+	end
+
+	return payload :: type
 end
 
 --[=[
@@ -1465,6 +1527,68 @@ local function isType(value: any): boolean
 	return type(value) == "table" and type(value.kind) == "string"
 end
 
+--[[
+	A default is checked here, at the declaration, by the bounds the descriptor already carries —
+	not by the codec, which this module cannot require. The kinds are the ones whose `==` is value
+	equality, because the writer decides "is this the default" with it, and a string or a number
+	is also what a default *is* to the game: the value the field has when nobody set it.
+]]
+local INTEGER: { [string]: boolean } = {
+	u8 = true,
+	u16 = true,
+	u32 = true,
+	u53 = true,
+	i8 = true,
+	i16 = true,
+	i32 = true,
+	i53 = true,
+}
+
+local function checkDefault(inner: { [string]: any }, default: any)
+	local kind = inner.kind
+	local given = type(default)
+
+	if kind == "number" then
+		check(given == "number", `t.optional's default for a number field is a number, got {given}`)
+		check(
+			default == default and default ~= math.huge and default ~= -math.huge,
+			"t.optional's default is not finite"
+		)
+		check(
+			(inner.min == nil or default >= inner.min) and (inner.max == nil or default <= inner.max),
+			`t.optional's default {default} is outside the field's range {tostring(inner.min)}..{tostring(
+				inner.max
+			)}`
+		)
+		check(
+			not INTEGER[inner.encoding] or default % 1 == 0,
+			`t.optional's default {default} is not whole, and the field is an integer`
+		)
+	elseif kind == "string" then
+		check(given == "string", `t.optional's default for a string field is a string, got {given}`)
+		check(
+			#default >= (inner.min or 0) and #default <= (inner.max or MAX_LENGTH),
+			`t.optional's default is {#default} bytes, outside the field's length {tostring(inner.min)}..{tostring(
+				inner.max
+			)}`
+		)
+	elseif kind == "boolean" then
+		check(given == "boolean", `t.optional's default for a boolean field is a boolean, got {given}`)
+	elseif kind == "enum" then
+		check(
+			given == "string" and table.find(inner.variants, default) ~= nil,
+			`t.optional's default {tostring(default)} is not a variant of the enum`
+		)
+	else
+		error(
+			`[netweave] t.optional takes a default only for a number, a string, a boolean or an enum, `
+				.. `not a {tostring(kind)}: those are the values two peers can compare, and a table `
+				.. `default would be a fresh table on every read`,
+			3
+		)
+	end
+end
+
 --[=[
 	@within Types
 	@function enum
@@ -1507,19 +1631,77 @@ end
 
 --[=[
 	@within Types
+	@function literal
+	@param value V -- a string, a boolean or a number
+	@return Type<V>
+
+	One value, known to both sides, costing nothing on the wire.
+
+	```lua
+	version = t.literal("v3"),   -- payload type "v3"
+	ready = t.literal(true),     -- payload type true
+	```
+
+	The writer refuses any other value, the reader hands the constant back, and a change never
+	moves it. It is for versioning a payload, for a `t.union` branch that carries a name and
+	nothing else, and for [Types.set], whose entries are literal `true`. A number literal's payload
+	is `number`, because Luau has no number singletons; the value is still checked on the way out.
+]=]
+function t.literal<V>(value: V & (string | boolean | number)): Type<V>
+	local kind = type(value)
+
+	check(
+		kind == "string" or kind == "boolean" or kind == "number",
+		`t.literal takes a string, a boolean or a number, got {typeof(value)}`
+	)
+	check(
+		kind ~= "number" or (value == value and value ~= math.huge and value ~= -math.huge),
+		"t.literal takes a finite number; NaN and the infinities are not values two peers can agree on"
+	)
+
+	return descriptor({
+		kind = "literal" :: Kind,
+		literal = value,
+	})
+end
+
+--[=[
+	@within Types
 	@function optional
 	@param inner I -- a netweave type
-	@return Type<OptionalPayload<I>>
+	@param default D? -- what an absent value reads as; a number, a string, a boolean or an enum variant
+	@return Type<OptionalPayload<I, D>>
 
 	A value that may be absent. Presence costs one bit in the enclosing bitfield, not a byte.
+
+	```lua
+	target = t.optional(t.u16),          -- payload number?, nil when absent
+	speed = t.optional(t.u8, 16),        -- payload number, 16 when absent, and 16 is never sent
+	```
+
+	With a default the payload is the inner type alone: the reader hands the default back where
+	the bit is clear, and the writer clears the bit for the default as well as for nil, so the
+	common value costs a bit rather than its bytes. The default is part of the protocol — two peers
+	declaring different ones disagree — and it is a primitive, because a table default would be a
+	fresh table on every read and no two of them equal.
 ]=]
-function t.optional<I>(inner: I): Type<OptionalPayload<I>>
+function t.optional<I, D>(inner: I, default: D?): Type<OptionalPayload<I, D>>
 	check(isType(inner), "optional needs a netweave type")
 	check((inner :: any).kind ~= "optional", "optional cannot wrap an optional")
+
+	if default == nil then
+		return descriptor({
+			kind = "optional" :: Kind,
+			inner = inner,
+		})
+	end
+
+	checkDefault(inner :: any, default)
 
 	return descriptor({
 		kind = "optional" :: Kind,
 		inner = inner,
+		default = default,
 	})
 end
 
@@ -1646,6 +1828,40 @@ function t.map<K, V>(key: K, value: V): Type<MapPayload<K, V>>
 		min = 0,
 		max = MAX_LENGTH,
 	})
+end
+
+--[=[
+	@within Types
+	@function set
+	@param element E -- a netweave type the receiver can look an entry up by; the same kinds [Types.map] takes as a key
+	@return Type<MapPayload<E, Type<true>>>
+
+	A set of values, carried as `{ [E]: true }`.
+
+	```lua
+	unlocked = t.set(t.string(1, 32)),   -- payload type { [string]: true }
+	```
+
+	It is a [Types.map] whose value is [Types.literal] `true`, and that is not sugar: a
+	`t.map(k, t.boolean)` spends a flag byte per entry on a bit that is always set, and a literal
+	costs nothing, so a set is its count and its entries and no more. A change replaces the set
+	whole, as it does a map.
+]=]
+function t.set<E>(element: E): Type<MapPayload<E, Type<true>>>
+	check(isType(element), "set needs a netweave element type")
+
+	local kind = (element :: any).kind
+
+	--[[ The map's own check would refuse the same kinds, in the map's words; a set is what the
+	     author wrote, so the refusal says so. ]]
+	check(
+		MAP_KEYS[kind] == true,
+		`a set of {tostring(kind)} cannot be looked up on the other side: an entry that decodes to `
+			.. `a fresh value is an entry nothing can find again. Use t.u16, t.string(0, 32), an enum `
+			.. `or t.instance, and put the rest of the value in a map keyed by it.`
+	)
+
+	return t.map(element, t.literal(true)) :: any
 end
 
 --[=[

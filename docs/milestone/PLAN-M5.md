@@ -329,6 +329,15 @@ payload type function at once:
       flags and length prefix, two to six bytes); level at two fields; wins from three; zero bytes when
       nothing moved, which the resend cannot say. `bench/RESULTS.md`, "The delta crossover, in bytes"
 - [ ] the nice-to-have types, each with an `_ok`/`_reject` pair
+  - [x] `t.literal(value)` — zero bits, zero bytes, in the hash with its type; a bounded generic
+        (`V & (string | boolean | number)`) keeps the string and boolean singletons where a bare one
+        widened `"v3"` to `string` (`spike/additions`). `t.set(element)` — a map to the literal `true`,
+        seven bytes where the map of booleans is nine. `t.optional(inner, default)` — the payload
+        without its nil, the default read for a clear bit and never written, one value with absent
+        to the differ, in the hash with its type; an absent second argument reaches the type function
+        as `unknown`, measured. `types_ok`, `types_reject` (17), `types_runtime`, `serdes_runtime`,
+        `delta_runtime`, `protocol_runtime`, WIRE-FORMAT §5, tutorial step 8.
+  - [ ] compact `t.cframe`
 
 ### Phase 6 — the tooling
 - [x] selene block allows replace the global list in `netweave.toml`: `-- selene: allow(undefined_variable)`

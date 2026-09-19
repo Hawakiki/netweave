@@ -304,8 +304,8 @@ channel — plus the derived framing and size numbers as a cross-check on the lo
 Of a node, exactly these attributes reach the hash (`Protocol.ATTRIBUTES`, and
 `tests/protocol_runtime.luau` changes each one alone and asserts the hash moves): `bits`,
 `fixedSize`, `instances`, `storage`, `min`, `max`, `utf8`, `pattern`, `step`, `whole`, `unit`, `class`,
-`lengthStorage`, `count`, and the names of a struct's fields, an enum's variants and a union's
-branches through the tree walk. `utf8`, `pattern`, `step`, `whole` and `unit` are hash-visible without
+`lengthStorage`, `count`, a `literal`'s value and an `optional`'s `default` (each with its type), and
+the names of a struct's fields, an enum's variants and a union's branches through the tree walk. `utf8`, `pattern`, `step`, `whole` and `unit` are hash-visible without
 being wire-visible: two peers reading the same bytes and refusing different values are two protocols.
 `descendantOf` is deliberately **not** hashed — it is enforcement one endpoint does over its own tree,
 like a rate limit, and two peers naming their own `workspace` mean the same thing while holding
@@ -425,6 +425,20 @@ The kinds added in M4 phase 8, each measured in `tests/serdes_runtime.luau`:
     from the step.
   * **string constraints** — `utf8` and `pattern` write nothing; they refuse on both sides and
     reach the hash.
+
+The kinds added in `PLAN-M5` phase 5, each measured the same way:
+
+  * **`literal(value)`** — zero bits and zero bytes. The value is in both peers' declarations and
+    reaches the hash with its type (`literal=string:v3`), so a peer declaring `"1"` where this one
+    declares `1` disagrees. The writer refuses any other value; the reader hands the constant back;
+    a change never moves it.
+  * **`set(element)`** — a `map` whose value is the literal `true`: a count, then the entries, and
+    no flag byte per entry, which is what `map(k, boolean)` spends on a bit that is always set.
+  * **`optional(inner, default)`** — the same presence bit as a plain optional, and the same bytes
+    when the bit is set. A clear bit reads as the default, and the writer clears the bit for the
+    default as well as for nil, so the default is never on the wire. It reaches the hash with its
+    type (`default=number:16`); in a patch, absent and the default are one value to the differ, and
+    a change back to it merges as the default rather than as nil.
 
 ### Instances
 

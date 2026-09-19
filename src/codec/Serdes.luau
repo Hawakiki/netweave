@@ -1279,10 +1279,36 @@ function buildWriter(node: Node): Writer
 		end
 	elseif kind == "enum" then
 		return enumWriter(node)
+	elseif kind == "literal" then
+		local literal = node.literal
+
+		--[[ Checked though nothing is written, for the same reason a one-variant enum checks its
+		     name: sending the wrong constant is a bug worth naming where it happens. ]]
+		return function(value: any, _flags: Flags)
+			if value ~= literal then
+				error(
+					`[netweave] {tostring(value)} is not the literal {tostring(literal)} this field declares`
+				)
+			end
+		end
 	elseif kind == "optional" then
 		local chunk = node.chunkIndex :: number
 		local mask = node.mask :: number
 		local writeInner = buildWriter(node.inner :: Node)
+		local default = node.default
+
+		if default ~= nil then
+			--[[ The default is never sent: the reader hands it back for a clear bit, so writing it
+			     would spend the field's bytes on the value the other side already has. ]]
+			return function(value: any, flags: Flags)
+				if value == nil or value == default then
+					return
+				end
+
+				flags[chunk] = bor(flags[chunk], mask)
+				writeInner(value, flags)
+			end
+		end
 
 		return function(value: any, flags: Flags)
 			if value == nil then
@@ -2272,14 +2298,21 @@ function buildReader(node: Node): Reader
 		end
 	elseif kind == "enum" then
 		return enumReader(node)
+	elseif kind == "literal" then
+		local literal = node.literal
+
+		return function(_flags: Flags): any
+			return literal
+		end
 	elseif kind == "optional" then
 		local chunk = node.chunkIndex :: number
 		local mask = node.mask :: number
 		local readInner = buildReader(node.inner :: Node)
+		local default = node.default
 
 		return function(flags: Flags): any
 			if band(flags[chunk], mask) == 0 then
-				return nil
+				return default
 			end
 
 			return readInner(flags)

@@ -328,6 +328,54 @@ do
 end
 
 do
+	--[[
+		An optional with a default: absent and the default are one value to the reader, so they are
+		one value to the differ — a game that leaves the field out and then sets it to the default
+		has not moved it — and a patch back to the default merges as the default, not as nil
+		(`PLAN-M5` phase 5).
+	]]
+	local schema = t.struct({ hp = t.u8, speed = t.optional(t.u8, 16) })
+	local delta = Delta.build(Ir.lower(schema))
+
+	local absent = { hp = 10 }
+	local written = { hp = 10, speed = 16 }
+	local faster = { hp = 10, speed = 20 }
+
+	check("absent to the default is not a change", not roundTrip(delta, absent, written))
+	check("nor the default to absent", not roundTrip(delta, written, absent))
+
+	local wrote, merged = roundTrip(delta, written, faster)
+	check("the default to a value is a change", wrote)
+	equals("and the value arrives", merged.speed, 20)
+
+	local back, restored = roundTrip(delta, faster, absent)
+	check("a value back to absent is a change", back)
+	equals("and it merges as the default, not as nil", restored.speed, 16)
+
+	--[[ A literal never moves, and a set replaces whole like the map it is. ]]
+	local tagged = t.struct({ version = t.literal("v3"), unlocked = t.set(t.u8) })
+	local tags = Delta.build(Ir.lower(tagged))
+
+	check(
+		"a literal is never a change",
+		not roundTrip(
+			tags,
+			{ version = "v3", unlocked = { [1] = true } },
+			{ version = "v3", unlocked = { [1] = true } }
+		)
+	)
+
+	local grew, more = roundTrip(
+		tags,
+		{ version = "v3", unlocked = { [1] = true } },
+		{ version = "v3", unlocked = { [1] = true, [2] = true } }
+	)
+	check("an entry added to a set is a change", grew)
+	check("and the set arrives whole", more.unlocked[1] == true and more.unlocked[2] == true)
+	equals("with the literal beside it", more.version, "v3")
+end
+
+do
 	--[[ A nested struct nothing touched comes back **by reference**. That is not a micro-optimisation
 	     to assert for its own sake: it is what makes a patch cheap on the receive side, and the
 	     alternative — cloning every level on every patch — is the allocation this module exists to

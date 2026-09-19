@@ -123,6 +123,23 @@ local function sameFor(node: Node): (a: any, b: any) -> boolean
 		end
 	elseif kind == "optional" then
 		local sameInner = sameFor(node.inner :: Node)
+		local default = node.default
+
+		if default ~= nil then
+			--[[ Absent and the default are one value to the reader, so they are one value here: a
+			     game that leaves the field out and then sets it to the default has not moved it. ]]
+			return function(a: any, b: any): boolean
+				if a == nil then
+					a = default
+				end
+
+				if b == nil then
+					b = default
+				end
+
+				return a == b
+			end
+		end
 
 		return function(a: any, b: any): boolean
 			if a == nil or b == nil then
