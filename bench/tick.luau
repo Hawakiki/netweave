@@ -84,6 +84,10 @@ local BEFORE: { [string]: number } = {
 	["select-all 50x500"] = 14.32,
 	["extra key 50x500"] = 31.02,
 	["subtree 50x500"] = 1.85,
+	--[[ Measured on `d982242`, the parent of the commit that hands the tick's list down
+	     (`PLAN-M5` phase 5), with the rig's `has` in place — the same session as the values that
+	     commit records beside it. ]]
+	["nearby-all 50x500"] = 2.37,
 }
 
 -- ---------------------------------------------------------------------------------------------
@@ -115,6 +119,11 @@ type Shape = {
 	--[[ A `select` that returns the whole roster: the most common `select` shape — everyone but
 	     spectators, a team — and the one the broadcast skip did not cover (M4-1). ]]
 	selectAll: boolean?,
+	--[[ A `nearby` whose radius holds the whole roster: what `within` fills is then compacted
+	     through the membership check per recipient, the same S × P the `select` shape pays, by the
+	     other rule (`PLAN-M5` phase 5). The distance checks themselves are the Roblox roster's and
+	     are not here. ]]
+	nearbyAll: boolean?,
 	--[[ One key per subject the schema never reads, changing every tick: `lastSeen = os.clock()`,
 	     a `Character` reference. A walk over the whole table calls every subject moved (M4-1). ]]
 	extra: boolean?,
@@ -132,6 +141,7 @@ local SHAPES: { Shape } = {
 	{ name = "50x500", players = 50, subjects = 500, narrow = false },
 	{ name = "narrow", players = 50, subjects = 500, narrow = true },
 	{ name = "select-all", players = 50, subjects = 500, narrow = false, selectAll = true },
+	{ name = "nearby-all", players = 50, subjects = 500, narrow = false, nearbyAll = true },
 	{ name = "extra", players = 50, subjects = 500, narrow = false, extra = true },
 	{ name = "subtree", players = 50, subjects = 500, narrow = false, subtree = true },
 }
@@ -205,6 +215,7 @@ for _, entry in SHAPES do
 		elseif entry.selectAll then nw.audience.select(function(): { any }
 			return players
 		end)
+		elseif entry.nearbyAll then nw.audience.nearby(64)
 		else nw.audience.everyone
 
 	--[[ Through `any`: the audience differs per rung, three audience types are not one type, and a
@@ -248,6 +259,17 @@ for _, entry in SHAPES do
 	local rig = rigs[entry.name]
 	local players = rig.players
 
+	--[[ Every rig's player is here, so `has` answers true — through a set, which is the cheapest
+	     way to answer it under lune and still a function call per recipient per subject, which is
+	     what production paid per pair before `PLAN-M5` phase 5 handed the tick's list down. A rig
+	     without `has` runs the degraded path (`Recipients.isRecipient`), which is not the path a
+	     game is on. ]]
+	local here: { [any]: true } = {}
+
+	for _, player in players do
+		here[player] = true
+	end
+
 	local roster: Recipients.Roster = {
 		all = function(): { any }
 			return players
@@ -257,9 +279,20 @@ for _, entry in SHAPES do
 			return players[1]
 		end,
 
+		--[[ Everyone, for the `nearby` shape; one player for everything else, which no rung
+		     measures through this rule. ]]
 		within = function(_subject: any, _studs: number, out: { any }): number
+			if entry.nearbyAll then
+				table.move(players, 1, #players, 1, out)
+				return #players
+			end
+
 			out[1] = players[1]
 			return 1
+		end,
+
+		has = function(who: any): boolean
+			return here[who] == true
 		end,
 	}
 
@@ -299,6 +332,7 @@ local RUNGS: { Rung } = {
 	{ name = "all 50x500", rig = rigs["50x500"], step = 1 },
 	{ name = "narrow 50x500", rig = rigs["narrow"] },
 	{ name = "select-all 50x500", rig = rigs["select-all"] },
+	{ name = "nearby-all 50x500", rig = rigs["nearby-all"] },
 	{ name = "extra key 50x500", rig = rigs["extra"], churn = true },
 	{ name = "subtree 50x500", rig = rigs["subtree"] },
 }
