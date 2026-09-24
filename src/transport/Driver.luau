@@ -194,7 +194,7 @@ function Driver.install()
 	--[[ Sealing on the way in as well as on the way out. A client that only listens never sends, so
 	     `ensure` would never run and its hello would never leave — and a listen-only client on a
 	     stale build is exactly the one whose mis-decodes are hardest to explain. ]]
-	link.receive(function(packed: buffer, instances: { Instance }, sender: any?)
+	link.receive(function(packed: buffer, instances: { unknown }, sender: any?)
 		ensure()
 		inbound.receive(packed, instances, sender)
 	end)

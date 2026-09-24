@@ -376,7 +376,10 @@ function Trust.validate<S>(schema: S, value: any): (TrustedPayload<S>?, string?)
 		return nil, (string.gsub(reason, "^.-:%d+: ", "", 1))
 	end
 
-	Buffer.beginRead(bytes, instances)
+	--[[ The sidecar this write just produced, read straight back. `{ Instance }` on the way out and
+	     `{ unknown }` on the way in, and Luau arrays are invariant, so the cast is the boundary
+	     rather than a claim (M4 report finding 50). ]]
+	Buffer.beginRead(bytes, instances :: { unknown })
 	local copy, refused = codec.read()
 	Buffer.loadRead(parkedRead)
 

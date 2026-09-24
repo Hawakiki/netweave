@@ -100,7 +100,9 @@ export type Config = {
 }
 
 export type Inbound = {
-	receive: (packed: buffer, instances: { Instance }?, sender: any?) -> (),
+	--[[ `{ unknown }`, because the sidecar is wire data and the read phase is what checks it
+	     (M4 report finding 50). ]]
+	receive: (packed: buffer, instances: { unknown }?, sender: any?) -> (),
 	drain: (channel: any) -> (),
 	tick: () -> (),
 	forget: (sender: any) -> (),
@@ -1270,7 +1272,7 @@ function Inbound.new(config: Config): Inbound
 	}
 
 	return {
-		receive = function(packed: buffer, instances: { Instance }?, from: any?)
+		receive = function(packed: buffer, instances: { unknown }?, from: any?)
 			local list = claim()
 
 			--[[ Both of these belong to the read phase only. Restored rather than cleared, so a

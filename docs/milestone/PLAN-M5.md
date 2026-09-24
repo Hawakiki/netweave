@@ -301,6 +301,17 @@ payload type function at once:
         class keeps that class's reason, anything else is a spelling with the list beside it, and
         `burst`/`maxBytes`/`timeout`/`unreliable` are checked by type. The M4 probe's twenty-two
         declarations produced one diagnostic; they produce fifteen. `forbid` is gone, its reasons moved
+  - [x] 42 — a patch layout is `counted`, whatever its size; the all-flag struct that reported `static`
+        is the case `delta_runtime` pins
+  - [x] 47 — `ENCODING_SIZE`, the three number-writer families, `STORAGE_CODE` and `Row.storage` keyed
+        by `Encoding`, so a ninth encoding missing from one of them is a diagnostic
+  - [x] 48 — one `Stage`, in `Config` where the rules are named, re-exported by `Observer`; `Sink`
+        carries it and `Inbound`'s cast is gone. `config_runtime` asserts every member is a rule and
+        names `rateUnbounded` as the one rule that is not a stage
+  - [x] 50 — the sidecar is `{ unknown }` from `Buffer.beginRead` outward, so `Serdes.isInstance` is
+        the narrowing rather than a contradiction of the signature. Four suites take it back through a
+        `takeAsWire` helper that names the loopback, and the fuzzer's mutators say `{ unknown }` too —
+        which is what they were always building
 - [x] for 43, the measurement from the tutorial (2026-09-11): a payload-agnostic policy cannot be composed
       onto two payloads through `nw.all` in any spelling — `Policy<Equip>` is not `Policy<Offer>`,
       unannotated and `unknown` mismatch the same way, `any` reaches `CommandPayload` as `*error-type*`

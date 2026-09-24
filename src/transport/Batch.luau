@@ -628,7 +628,7 @@ end
 	Nothing here raises. Every failure is a value handed to `sink.refuse`, because the bytes came
 	off the wire and a malicious client must not be able to abort the loop (`DESIGN-API.md` G4).
 ]=]
-function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
+function Batch.read(packed: buffer, instances: { unknown }?, sink: Sink)
 	local size = buffer.len(packed)
 
 	if size == 0 then

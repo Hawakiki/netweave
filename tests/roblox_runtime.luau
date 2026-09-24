@@ -58,21 +58,21 @@ local function encode(codec: Serdes.Codec, value: any): (buffer, { Instance })
 	return Buffer.take()
 end
 
-local function decode(codec: Serdes.Codec, bytes: buffer, instances: { Instance }?): (any, string?)
+local function decode(codec: Serdes.Codec, bytes: buffer, instances: { unknown }?): (any, string?)
 	Buffer.beginRead(bytes, instances)
 	return codec.read()
 end
 
 --[[ Round trips one value and hands the result back, so each datatype can compare it its own way:
      `CFrame` needs a tolerance, `Color3` does not. ]]
-local function roundTrip(descriptor: any, value: any, instances: { Instance }?): (any, string?, number)
+local function roundTrip(descriptor: any, value: any, instances: { unknown }?): (any, string?, number)
 	local codec = Serdes.fromSchema(descriptor)
 	local packed, sidecar = encode(codec, value)
-	local decoded, failure = decode(codec, packed, instances or sidecar)
+	local decoded, failure = decode(codec, packed, instances or sidecar :: { unknown })
 	return decoded, failure, buffer.len(packed)
 end
 
-local function rejects(name: string, descriptor: any, bytes: buffer, instances: { Instance }?)
+local function rejects(name: string, descriptor: any, bytes: buffer, instances: { unknown }?)
 	local codec = Serdes.fromSchema(descriptor)
 	local ok, value, failure = pcall(decode, codec, bytes, instances or {})
 
@@ -854,7 +854,7 @@ do
 			]]
 			local arrived: { { any } } = {}
 
-			again.receive(function(packed: buffer, instances: { Instance }, sender: any?)
+			again.receive(function(packed: buffer, instances: { unknown }, sender: any?)
 				table.insert(arrived, { buffer.len(packed), instances, sender })
 			end)
 
