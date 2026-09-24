@@ -658,24 +658,46 @@ do
 				end,
 			}
 
-			local started = os.clock()
-			for _ = 1, CALLS do
-				roster.within(root, 1e6, out, list)
-			end
-			local withinNs = (os.clock() - started) * 1e9 / CALLS
+			--[[ The fastest pass of seven, not one pass. Across three Studio sessions one pass moved
+			     these two numbers 364 → 650 ns and 142 → 220 — the same instability `bench/residue`'s
+			     rungs were corrected for, and for the same reason: the work is deterministic, so noise
+			     only ever adds (`CLAUDE.md` §9). ]]
+			local PASSES = 7
 
-			started = os.clock()
-			for _ = 1, CALLS do
-				Recipients.of(chosen, root, roster, out, nil, list)
+			local function fastest(body: () -> ()): number
+				local best = math.huge
+
+				for _ = 1, PASSES do
+					local started = os.clock()
+
+					for _ = 1, CALLS do
+						body()
+					end
+
+					local each = (os.clock() - started) * 1e9 / CALLS
+
+					if each < best then
+						best = each
+					end
+				end
+
+				return best
 			end
-			local selectNs = (os.clock() - started) * 1e9 / CALLS
+
+			local withinNs = fastest(function()
+				roster.within(root, 1e6, out, list)
+			end)
+
+			local selectNs = fastest(function()
+				Recipients.of(chosen, root, roster, out, nil, list)
+			end)
 
 			print(
 				`        measured: with {#list} player(s) and the frame's list, within {string.format(
 					"%.0f",
 					withinNs
 				)} ns a subject, `
-					.. `a select returning the roster {string.format("%.0f", selectNs)} ns a subject ({CALLS} calls each)`
+					.. `a select returning the roster {string.format("%.0f", selectNs)} ns a subject (fastest of {PASSES} x {CALLS})`
 			)
 		else
 			print("        skip: the player has no character yet, so within was not asserted")
