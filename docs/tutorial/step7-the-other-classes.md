@@ -74,7 +74,7 @@ getLoadout = nw.query({
 ```lua
 -- server
 combat.server.getLoadout:handle(function(ctx, slot)
-	local player = ctx.player :: Player
+	local player = ctx.player
 	return loadouts[player][slot + 1]   -- may yield: a datastore read, a WaitForChild
 end)
 

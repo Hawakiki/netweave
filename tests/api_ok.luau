@@ -318,6 +318,33 @@ end
      file (`PLAN-M5` phase 1). ]]
 attach(shots)
 
+--[[
+	**A handler's `ctx` is `nw.Ctx`**, which is what `PLAN-M5` phase 1 closed.
+
+	It was a shape the view built with `player`, `character` and `humanoid` left `unknown`, on the
+	grounds that a `type function` body cannot name `Player`, `Model` or `Humanoid`. It cannot name
+	one — but it can be handed one, because a type function's arguments are types, so `Views<D>`
+	instantiates the mappers with `Context.Ctx`. What that buys is below: the fields read at their
+	real types, the whole `ctx` assignable to `nw.Ctx`, and a typo still caught.
+]]
+local function whoFor(_player: Player, _slot: number) end
+
+local function pivotOf(ctx: nw.Ctx): CFrame?
+	local character = ctx.character
+	return character and character:GetPivot()
+end
+
+shots.server.fired:listen(function(ctx, payload)
+	local _id: number = ctx.player.UserId
+	local _name: string = ctx.player.Name
+	local _humanoid: Humanoid? = ctx.humanoid
+	local _channel: string = ctx.channel
+	local _now: number = ctx.now
+
+	whoFor(ctx.player, payload.x)
+	local _pivot: CFrame? = pivotOf(ctx)
+end)
+
 --[[ A cast, and `typeof` — the two spellings for a local. Both keep the views typed; the cast is
      the one to reach for when the type has to be named. ]]
 local byCast = shots :: nw.Views<typeof(shots.channels)>

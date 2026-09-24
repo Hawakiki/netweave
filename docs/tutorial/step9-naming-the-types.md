@@ -17,12 +17,12 @@ local function equipFor(player: Player, chosen: nw.Trusted<Equip>)
 end
 
 combat.server.equip:listen(function(ctx, chosen)
-	equipFor(ctx.player :: Player, chosen)      -- fine: a command handler's payload is Trusted
+	equipFor(ctx.player, chosen)                -- fine: a command handler's payload is Trusted
 end)
 
 combat.server.openedMenu:listen(function(ctx, opened)
 	log(`menu {opened.screen}`)                 -- fine: Untrusted<T> is a subtype of T
-	-- equipFor(ctx.player :: Player, opened)   -- type error: a signal's payload is Untrusted
+	-- equipFor(ctx.player, opened)             -- type error: a signal's payload is Untrusted
 end)
 ```
 

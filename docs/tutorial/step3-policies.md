@@ -63,9 +63,8 @@ model is not the client's to learn.
 `ctx` is the context for this request. It carries `player`, the sender; `channel`, the qualified
 name; `now`, the clock at receipt; and `character` and `humanoid`, looked up from the player the
 first time something reads them and not before, so a channel whose policies never ask pays nothing.
-Inside a handler `ctx.player` is typed `unknown`, because the type that builds the handler's
-signature cannot name `Player`; it passes anywhere `unknown` is accepted, `publish` included, and
-where you need the real type you write `ctx.player :: Player` (`docs/DESIGN-API.md` §8).
+A handler's `ctx` is the same `nw.Ctx` a check gets, so `ctx.player` is a `Player` on both sides of
+the wire and needs no cast.
 It is valid only for the synchronous duration of the handler that received it. The record is reused
 per player, so a `ctx` kept in an upvalue and read during a later packet's handler would quietly
 hand over *that* request's data; in Studio every acquisition is wrapped in a guard that raises on

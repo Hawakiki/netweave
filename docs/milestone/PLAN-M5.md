@@ -250,10 +250,18 @@ payload type function at once:
       have to declare a count that moves with the solver rather than with netweave. The guard is the cast,
       recorded in `DESIGN-API` §7 beside the other `Views` caution, and `api_ok`'s own bare call now says
       it is safe only because that namespace has one channel
-- [ ] `ctx.player` in a handler is `unknown` (`docs/DESIGN-API.md` §8), and the trade example casts it in
-      every handler that publishes. Measure once, in `spike/declare/`, whether a class type given at the
-      `nw.Views` cast can be threaded to the handler's `ctx` by the view type function, and write either
-      the spelling into `api_ok` or the reason it cannot be into §8
+- [x] `ctx.player` in a handler is `unknown` (`docs/DESIGN-API.md` §8), and the trade example casts it in
+      every handler that publishes. ~~Measure once, in `spike/declare/`, whether a class type given at the
+      `nw.Views` cast can be threaded to the handler's `ctx` by the view type function~~ — it does not have
+      to come from the cast, and no spike was needed: a type function's **arguments** are types, so
+      `Views<D>` instantiates `ServerView`/`ClientView` with `Context.Ctx` and the shape arrives with its
+      real classes. The route was already in the codebase unnoticed — `nw.policy`'s own signature is how
+      `{ player: Player, character: Model? }` reaches `Channel`'s type functions, which is what the
+      earlier phase-1 diagnostics printed. A handler's `ctx` is `nw.Ctx` now: `ctx.player.UserId` type
+      checks, `ctx.character` narrows from `Model?`, `ctx.playr` is still a typo the analyser catches, and
+      every `ctx.player :: Player` in the tutorial, the worked example, `mistakes.md`, `trade_ok` and
+      `tutorial_ok` is gone. `api_ok` pins the fields and the whole-`ctx` annotation; §8's "the one field
+      that is `unknown`" section is struck and rewritten
 
 ### Phase 2 — a type for every public value
 - [x] re-export `Policy<T>`, `Check<T>`, `Snapshot`, `Described`, `Rules`, `Limits`, `Audience<S>`, `Observer`

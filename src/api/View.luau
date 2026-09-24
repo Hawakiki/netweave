@@ -42,6 +42,7 @@
 ]]
 
 local Channel = require("./Channel")
+local Context = require("./Context")
 local Transport = require("./Transport")
 
 local View = {}
@@ -100,7 +101,7 @@ type function brandedAs(payload, name)
 end
 
 -- selene: allow(undefined_variable)
-type function channelView(channel, side)
+type function channelView(channel, side, ctx)
 	if not channel:is("table") then
 		error(
 			"a namespace holds channels, and this field is not one. Declare it with nw.command, "
@@ -129,7 +130,7 @@ type function channelView(channel, side)
 	end
 
 	--[[
-		The context, shaped rather than left as `unknown`.
+		The context, handed in rather than built here.
 
 		It was `types.unknown`, and that made `ctx` **unreadable**: a handler could not annotate it —
 		`Ctx` is not a supertype of `unknown`, so `function(ctx: nw.Ctx, shot)` was rejected — and it
@@ -137,22 +138,19 @@ type function channelView(channel, side)
 		and nobody noticed, because none of them wanted the context. Writing the worked example was
 		what noticed: `ctx.player` is the first thing a real handler reaches for.
 
-		The fields that can be named are named, so `ctx.now` is a number and `ctx.playr` is a typo the
-		analyser catches. The three Roblox-typed ones stay `unknown`, because a type function body has
-		no way to reach `Player`, `Model` or `Humanoid` — they pass through anywhere `unknown` is
-		accepted, which includes `publish`, and take a cast anywhere it is not. That limitation is
-		written down in `DESIGN-API.md` §8 rather than left to be discovered.
+		~~The three Roblox-typed fields stay `unknown`, because a type function body has no way to
+		reach `Player`, `Model` or `Humanoid`.~~ **It has one: they can be handed in.** A type
+		function's *arguments* are types, so `Views<D>` instantiates the two mappers with
+		`Context.Ctx` and the shape arrives with its real classes — the same route `nw.policy`'s own
+		signature already took to get `{ player: Player, character: Model? }` into `Channel`'s type
+		functions. So `ctx.player.UserId` type-checks in a handler, `ctx.playr` is a typo the analyser
+		catches, and the casts the worked example used are gone (`PLAN-M5` phase 1).
+
+		The cast to `type` is for the analyser reading *this* file: a type function's parameters are
+		`unknown` to it, and `types.newfunction` takes a `type`.
 	]]
-	local function context()
-		local ctx = types.newtable()
-
-		ctx:setproperty(types.singleton("player"), types.unknown)
-		ctx:setproperty(types.singleton("channel"), types.string)
-		ctx:setproperty(types.singleton("character"), types.optional(types.unknown))
-		ctx:setproperty(types.singleton("humanoid"), types.optional(types.unknown))
-		ctx:setproperty(types.singleton("now"), types.number)
-
-		return ctx
+	local function context(): type
+		return ctx :: type
 	end
 
 	local function listener(seen, withContext)
@@ -251,7 +249,7 @@ end
 	Maps a declaration table to what the server may do with each channel.
 ]=]
 -- selene: allow(undefined_variable)
-export type function ServerView(declaration)
+export type function ServerView(declaration, ctx)
 	local result = types.newtable()
 
 	for key, property in declaration:properties() do
@@ -266,7 +264,7 @@ export type function ServerView(declaration)
 			)
 		end
 
-		result:setproperty(key, channelView(channel, types.singleton("server")))
+		result:setproperty(key, channelView(channel, types.singleton("server"), ctx))
 	end
 
 	return result
@@ -279,7 +277,7 @@ end
 	Maps a declaration table to what the client may do with each channel.
 ]=]
 -- selene: allow(undefined_variable)
-export type function ClientView(declaration)
+export type function ClientView(declaration, ctx)
 	local result = types.newtable()
 
 	for key, property in declaration:properties() do
@@ -294,7 +292,7 @@ export type function ClientView(declaration)
 			)
 		end
 
-		result:setproperty(key, channelView(channel, types.singleton("client")))
+		result:setproperty(key, channelView(channel, types.singleton("client"), ctx))
 	end
 
 	return result
@@ -348,8 +346,8 @@ end
 export type Views<D> = {
 	name: string,
 	channels: D,
-	server: ServerView<D>,
-	client: ClientView<D>,
+	server: ServerView<D, Context.Ctx>,
+	client: ClientView<D, Context.Ctx>,
 }
 
 --[[

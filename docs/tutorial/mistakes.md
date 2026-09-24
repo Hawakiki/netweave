@@ -97,7 +97,7 @@ channel gets its own `Policy<T>`, and `nw.all` accepts it (Step 3).
 
 ```lua
 trade.server.decide:listen(function(ctx, d)
-	local profile = DataStore:GetAsync((ctx.player :: Player).UserId)   -- yields
+	local profile = DataStore:GetAsync(ctx.player.UserId)   -- yields
 	pending[d.tradeId].state = ...
 	trade.server.resolved:publish(d.tradeId, ...)
 end)
@@ -125,7 +125,7 @@ may yield, on a thread and a context of its own.
 sell = nw.signal({ data = t.struct({ itemId = t.u16 }), rate = 5 }),   -- shortest thing to write
 
 trade.server.sell:listen(function(ctx, s)
-	Inventory.remove(ctx.player :: Player, s.itemId)   -- passes, if nothing is annotated
+	Inventory.remove(ctx.player, s.itemId)   -- passes, if nothing is annotated
 end)
 ```
 
@@ -164,7 +164,7 @@ task.delay(1, function() print(lastCtx.player) end)   -- a second later, a diffe
 **What happens.** The record is reused. In Studio the read raises with a message that says to copy
 the fields; in production it is whichever request is live at that moment.
 
-**The fix.** `local player = ctx.player :: Player` — copy the fields, keep the copies.
+**The fix.** `local player = ctx.player` — copy the fields, keep the copies.
 
 ## 9. Passing a namespace to a function without the cast
 

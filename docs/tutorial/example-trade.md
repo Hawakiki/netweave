@@ -188,7 +188,7 @@ local function openTrade(from: Player, offer: nw.Trusted<Offer>): number
 end
 
 trade.server.offer:listen(function(ctx, offer)
-	local from = ctx.player :: Player
+	local from = ctx.player
 	local id = openTrade(from, offer)
 	trade.server.incoming:publish(offer.to, { tradeId = id, from = from.UserId })
 	-- pending[id] reaches both parties on the next tick through `replicate`. Nothing to call here.
