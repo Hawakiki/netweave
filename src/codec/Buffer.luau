@@ -818,6 +818,68 @@ end
 -- ---------------------------------------------------------------------------------------------
 
 --[=[
+	@interface Read
+	@within CodecBuffer
+	.buffer buffer
+	.cursor number
+	.limit number
+	.instances { Instance }
+	.instanceCursor number
+	.rejection string?
+
+	Where the *read* side is, as a record — the incoming counterpart of [CodecBuffer.Save].
+]=]
+export type Read = {
+	buffer: buffer,
+	cursor: number,
+	limit: number,
+	instances: { Instance },
+	instanceCursor: number,
+	rejection: string?,
+}
+
+--[=[
+	@within CodecBuffer
+	@function saveRead
+	@return Read
+
+	Parks the read side so something else may read, and [CodecBuffer.loadRead] puts it back.
+
+	One caller: `nw.validate` round-trips a value through the codec to hand back a schema-shaped
+	copy, and a handler may call it *while a batch is being read*. Without this, that read would
+	move the batch's cursor and the packets behind it would decode from the wrong offset.
+
+	:::caution
+	It allocates a record. That is affordable exactly once, on the escape hatch it exists for; the
+	receive path never needs it, because a payload that decoded is valid by construction.
+	:::
+]=]
+function Codec.saveRead(): Read
+	return {
+		buffer = incoming,
+		cursor = incomingCursor,
+		limit = incomingLimit,
+		instances = incomingInstances,
+		instanceCursor = incomingInstanceCursor,
+		rejection = rejection,
+	}
+end
+
+--[=[
+	@within CodecBuffer
+	@function loadRead
+	@param saved Read
+]=]
+function Codec.loadRead(saved: Read)
+	incoming = saved.buffer
+	incomingCursor = saved.cursor
+	incomingLimit = saved.limit
+	incomingInstances = saved.instances
+	incomingInstanceCursor = saved.instanceCursor
+	rejection = saved.rejection
+end
+
+--[=[
 	@within CodecBuffer
 	@function beginRead
 	@param source buffer
