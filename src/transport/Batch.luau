@@ -39,6 +39,9 @@
 ]]
 
 local Buffer = require("../codec/Buffer")
+--[[ For `Stage` alone. A leaf module with no requires of its own, and `Inbound` beside this one
+     already takes it for the severities (finding 48). ]]
+local Config = require("../api/Config")
 
 local Batch = {}
 
@@ -93,7 +96,7 @@ end
 	.deliver (channel: any, value: any, bytes: number, call: number?) -> ()
 	.reply (channel: any, call: number, status: number, value: any?, bytes: number) -> ()
 	.hello (hash: number) -> () -- a peer's protocol hash, off a control packet
-	.refuse (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> ()
+	.refuse (channel: any?, stage: Stage, reason: string, bytes: number, call: number?) -> ()
 
 	What [Batch.read] calls as it walks a batch. Every member is resolved once by the caller and
 	held, so nothing here allocates per packet.
@@ -102,6 +105,9 @@ end
 	budget costs an id read and a seek rather than a full deserialisation, so refusing is cheaper
 	than accepting and a flood cannot be amplified into work (`PLAN-M2` R-2).
 ]=]
+--[[ The stage a refusal is reported at, from the module that names them as rules. ]]
+export type Stage = Config.Stage
+
 export type Sink = {
 	resolve: (id: number) -> any,
 	--[[ Whether a query packet arriving here is a **request**. True on the server, false on the
@@ -111,7 +117,7 @@ export type Sink = {
 	--[[ nil to decode the packet, or a reason and the stage to report it at. The stage is the
 	     sink's to choose because the same refusal point serves two of them: over the rate is
 	     `budget`, and a peer on a protocol this one does not share is `protocol`. ]]
-	admit: (channel: any, bytes: number) -> (string?, string?),
+	admit: (channel: any, bytes: number) -> (string?, Stage?),
 	deliver: (channel: any, value: any, bytes: number, call: number?) -> (),
 	--[[ A replicated subject's change. The subject has been read; the change itself has not,
 	     because folding it into a baseline needs one this module does not hold. The sink reads it
@@ -131,7 +137,7 @@ export type Sink = {
 	     a table read each after the first (`PLAN-M5` D-7). Optional: a sink without one sees the
 	     kind reported as one this build does not read, like any other it lacks. ]]
 	digest: ((bytes: number) -> ())?,
-	refuse: (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> (),
+	refuse: (channel: any?, stage: Stage, reason: string, bytes: number, call: number?) -> (),
 }
 
 --[=[

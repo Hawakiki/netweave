@@ -462,6 +462,53 @@ do
 end
 
 -- ---------------------------------------------------------------------------------------------
+-- Every stage is a rule (M4 report finding 48)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`Stage` and `Rules` are two hand-kept lists of the same thing: a stage is where a refusal
+	happened and a rule is what to do about it, so a stage with no rule is a refusal a game cannot
+	configure and `severityOf` would answer for a name nothing declares.
+
+	The type lives in `Config` since this finding, which is what let `Batch.Sink` stop carrying it as
+	`string` — but a shared type is not a shared list, and §9's answer to a hand-kept list is to test
+	it against what it lists. Every member below is written out, because a type cannot be iterated.
+]]
+do
+	local stages: { Observer.Stage } = {
+		"parse",
+		"budget",
+		"authorize",
+		"handler",
+		"queue",
+		"send",
+		"protocol",
+		"query",
+		"direction",
+		"replicate",
+	}
+
+	for _, stage in stages do
+		local severity = Config.severityOf(stage)
+
+		check(
+			`{stage} is a rule with a default severity`,
+			severity == "off" or severity == "warn" or severity == "error"
+		)
+	end
+
+	--[[ And the one rule that is not a stage, so the two lists are known to differ by exactly it:
+	     `rateUnbounded` fires on a declaration rather than on a packet. ]]
+	local unbounded = Config.severityOf("rateUnbounded" :: any)
+	check("rateUnbounded is a rule and not a stage", unbounded ~= nil)
+
+	--[[ A name that is neither is refused, which is what makes the loop above mean something. ]]
+	refuses("configuring a rule that is not one", function()
+		Config.configure({ rules = { parsee = "warn" } :: any })
+	end)
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 Config.reset()
 Observer.reset()

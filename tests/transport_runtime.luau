@@ -108,7 +108,7 @@ local sink: Batch.Sink = {
 		error("this sink handles no replicated channel")
 	end,
 
-	admit = function(channel: any, _bytes: number): (string?, string?)
+	admit = function(channel: any, _bytes: number): (string?, Observer.Stage?)
 		return denyOn[channel.qualified], "budget"
 	end,
 

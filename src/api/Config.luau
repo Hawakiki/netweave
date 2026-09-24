@@ -97,6 +97,30 @@ export type Severity = "off" | "warn" | "error"
 	drift apart. `rateUnbounded` is the odd one out: it fires at declaration time, on the game's own
 	code, and is the only rule here that raises at `"error"`.
 ]=]
+--[=[
+	@type Stage "parse" | "budget" | "authorize" | "handler" | "queue" | "send" | "protocol" | "query" | "direction" | "replicate"
+	@within Config
+
+	Where on the receive path a packet was refused.
+
+	Here rather than in `Observer`, which is where a game reads it, because the modules that *produce*
+	a stage are lower than the observer: `Batch.Sink` carried it as `string` and `Inbound` cast it
+	back, so a misspelt stage type-checked all the way to the report (M4 report finding 48). This
+	module is the one both can reach — it is a leaf, and it already names every stage as a rule, which
+	`tests/config_runtime.luau` asserts member by member.
+]=]
+export type Stage =
+	"parse"
+	| "budget"
+	| "authorize"
+	| "handler"
+	| "queue"
+	| "send"
+	| "protocol"
+	| "query"
+	| "direction"
+	| "replicate"
+
 export type Rules = {
 	parse: Severity?,
 	budget: Severity?,

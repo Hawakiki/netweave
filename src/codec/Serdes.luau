@@ -88,7 +88,7 @@ local function isFinite(value: number): boolean
 	return value == value and value ~= math.huge and value ~= -math.huge
 end
 
-local WRITE_NUMBER: { [string]: (value: number) -> () } = {
+local WRITE_NUMBER: { [Encoding]: (value: number) -> () } = {
 	u8 = Buffer.writeU8,
 	u16 = Buffer.writeU16,
 	u32 = Buffer.writeU32,
@@ -104,7 +104,7 @@ local WRITE_NUMBER: { [string]: (value: number) -> () } = {
 	between the two families once per node at closure-build time, from the layout, so nothing
 	branches per packet (`src/codec/Buffer.luau`, Blocks).
 ]]
-local PUT_NUMBER: { [string]: (value: number) -> () } = {
+local PUT_NUMBER: { [Encoding]: (value: number) -> () } = {
 	u8 = Buffer.putU8,
 	u16 = Buffer.putU16,
 	u32 = Buffer.putU32,
@@ -115,7 +115,7 @@ local PUT_NUMBER: { [string]: (value: number) -> () } = {
 	f64 = Buffer.putF64,
 }
 
-local READ_NUMBER: { [string]: () -> number } = {
+local READ_NUMBER: { [Encoding]: () -> number } = {
 	u8 = Buffer.readU8,
 	u16 = Buffer.readU16,
 	u32 = Buffer.readU32,
@@ -303,7 +303,7 @@ local function lengthWriter(node: Node): (count: number, label: string) -> ()
 		end
 	end
 
-	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
+	local family: { [Encoding]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
 	local write = family[node.lengthStorage :: Encoding]
 	local offset = node.lengthOffset :: number
 	local min = node.min :: number
@@ -366,7 +366,7 @@ local FRACTIONAL: { [string]: boolean } = { f32 = true, f64 = true }
 table.freeze(FRACTIONAL)
 
 local function numberWriter(node: Node): Writer
-	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
+	local family: { [Encoding]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
 	local storage = node.storage :: Encoding
 	local write = family[storage]
 	local offset = node.offset :: number
@@ -526,7 +526,9 @@ end
 	generator emits the *name* of the primitive, and until this file did the same, netweave could
 	not (`RESEARCH §3.11-GG`).
 ]]
-local STORAGE_CODE: { [string]: number } = {
+--[[ Keyed by `Encoding` for the reason `Ir.ENCODING_SIZE` gives: the `code == nil` guard below
+     exists for an encoding missing from this table, and the analyser can see it now. ]]
+local STORAGE_CODE: { [Encoding]: number } = {
 	u8 = 1,
 	u16 = 2,
 	u32 = 3,
@@ -559,7 +561,7 @@ type Row = {
 	scale: number,
 	unit: number,
 	integral: boolean,
-	storage: string,
+	storage: Encoding,
 	code: number,
 }
 
@@ -631,7 +633,10 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 			scale = if step then 1 / step else 1,
 			unit = step or 1,
 			integral = node.whole == true,
-			storage = storage :: string,
+			--[[ `code == nil` above rejects a node with no storage, so this is narrowed by that guard
+			     rather than by the annotation; the solver does not carry the narrowing across the
+			     table literal. ]]
+			storage = storage :: Encoding,
 			--[[ Quantised codes are the plain ones plus five, so the chain keeps `u8` first and a field
 			     that is not quantised never reaches the three arms that are. ]]
 			code = if step then code + 5 else code,

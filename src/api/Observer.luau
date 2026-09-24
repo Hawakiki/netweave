@@ -71,17 +71,9 @@ local Observer = {}
 	and queued those, and could not budget them either, because the classes they name declare no
 	rate.
 ]=]
-export type Stage =
-	"parse"
-	| "budget"
-	| "authorize"
-	| "handler"
-	| "queue"
-	| "send"
-	| "protocol"
-	| "query"
-	| "direction"
-	| "replicate"
+--[[ Defined in `Config` and re-exported here, where a game reads it: the modules that produce a
+     stage sit below the observer, and `Config` is the leaf both halves can reach (finding 48). ]]
+export type Stage = Config.Stage
 
 --[=[
 	@interface Rejection

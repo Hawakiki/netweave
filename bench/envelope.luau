@@ -135,7 +135,7 @@ local sink: Batch.Sink = {
 
 	answers = true,
 
-	admit = function(): (string?, string?)
+	admit = function(): (string?, Batch.Stage?)
 		return nil, nil
 	end,
 
