@@ -201,10 +201,12 @@ one taking `Equip` is wanted.
 ~~What works is a helper that takes the schema as a witness, so each channel gets its own
 instance.~~ That was the spelling until `PLAN-M5` phase 1, and it is no longer needed.
 
-**`any` is the one spelling to avoid.** It reaches the channel class's type function as an error
-type and takes the whole namespace's views down with it — eleven diagnostics on one channel,
-measured. That is Luau's behaviour around `any`, not netweave's, and `unknown` is the word that
-means what a payload-agnostic policy means anyway: *this check does not look*.
+**`any` is the one spelling to avoid.** As a channel's only policy it is harmless; composed through
+`nw.all` it reaches the channel class's type function as an error type and takes the whole
+namespace's views down with it — thirteen diagnostics for one such channel beside two healthy ones,
+three of them on the healthy channels' own handlers. Measured. That is Luau's behaviour around
+`any`, not netweave's, and `unknown` is the word that means what a payload-agnostic policy means
+anyway: *this check does not look*.
 
 ## Compose them
 

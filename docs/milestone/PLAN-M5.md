@@ -199,6 +199,19 @@ when its argument contains an error type, so the body never runs and there is no
 `unknown` to. The lever is upstream — the argument must not carry an error type — which makes D-8 the
 same work as item 43 in phase 3: a `Policy<T>` whose composition does not produce one.
 
+**Closed with item 43, and not the way D-8 was written.** Re-measured on the intersection: a channel
+whose only policy takes `any` is clean now, where it used to take the namespace down, so the
+accidental cause is gone — an agnostic policy composes without `any` at all. What remains is a
+malformed declaration: no `rate`, a `data` that is not a schema, or `any` still composed through
+`nw.all`. Each reports five times at its own line, correctly, and twice or three times at the
+namespace line, where the message is that the views lack the keys of the channels that were fine.
+The mappers still cannot localise it — `ServerView` is one type function over the whole table, and an
+`error()` inside a channel's payload function leaves `CommandPayload<…>` unreduced, so the
+application is stuck and the body never runs. Returning `unknown` instead of erroring would unstick
+it and trade away the analysis-time half of G2 and G3, which is not a trade this milestone makes. So
+what ships is the reading: the channel named inside the `ServerView<…>` type is the one to fix, and
+`DESIGN-API` §7 says so under a heading of its own.
+
 ## 6. Tasks
 
 Numbered by subject. **Run in this order**, decided at opening (2026-09-11), smallest blast radius

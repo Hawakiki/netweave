@@ -157,10 +157,11 @@ end)
 	and a function type is contravariant in its parameters, so a check taking `unknown` is usable
 	wherever one taking `Equip` is wanted and `nw.all(policy.alive, policy.ownsSlot)` composes.
 
-	`any` is the one spelling still to avoid, and that is Luau rather than netweave: it reaches the
-	class type function as `*error-type*` and takes the namespace's views down with it. Measured
-	again while closing item 43 — three spellings against the same channel, `unknown` clean, a cast
-	clean, `any` eleven diagnostics.
+	`any` is the one spelling still to avoid **inside `nw.all`**, and that is Luau rather than
+	netweave. Measured while closing item 43 and D-8: as a channel's only policy it is clean now,
+	and composed through `nw.all` it still reaches the class type function as `*error-type*` — with
+	two healthy siblings in the same namespace, thirteen diagnostics, three of them the siblings'
+	own views. `unknown` is clean in both positions.
 ]]
 
 policy.ownsSlot = nw.policy(function(config)

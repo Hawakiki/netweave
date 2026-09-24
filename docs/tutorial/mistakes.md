@@ -86,9 +86,11 @@ decide = nw.command({ data = Decision, authorize = nw.all(policy.alive, policy.p
 	return function(ctx: nw.Ctx, _: any) ... end
 ```
 
-**What happens.** `any` reaches the class's type function as an error type, and the whole
-namespace's views become `unknown` — every handler in the file loses its payload type to fix one
-diagnostic, and nothing says which channel did it.
+**What happens.** Composed through `nw.all`, `any` reaches the class's type function as an error
+type, and the whole namespace's views stop resolving — every handler in the file loses its payload
+type to fix one diagnostic, and nothing says which channel did it. Measured: one such channel beside
+two healthy ones is thirteen diagnostics, three of them on the healthy channels. As a channel's only
+policy `any` is harmless since `PLAN-M5` phase 1, which is not a reason to write it.
 
 **The fix, since `PLAN-M5` phase 1.** Write the agnostic check's request `unknown`, and one policy
 goes on every channel — `Policy<T>` is an intersection, so contravariance applies (Step 3).
