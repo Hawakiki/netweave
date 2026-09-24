@@ -289,7 +289,8 @@ payload type function at once:
 - [x] `api_ok` writes each, in an annotation position: 39 public types covered, 0 gaps, 8 families
 
 ### Phase 3 — the M4 report's type-layer residue
-- [ ] items 5, 6, 7, 42, 43, 45, 46, 47, 48, 50 of `docs/SECURITY-REPORT-M4.md`, each its own commit
+- [x] items 5, 6, 7, 42, 43, 45, 46, 47, 48, 50 of `docs/SECURITY-REPORT-M4.md`, each its own commit —
+      nine closed, 46 in part with the reason for the rest written down
   - [x] 5 — `nw.validate` returns a schema-shaped copy; the brand-laundering half stays open with its
         measurement (`Unbranded<V>` costs "Code is too complex to typecheck")
   - [x] 6 — every field of `Channel<…>` is `read` and the declaration table is a frozen copy; the
@@ -530,16 +531,20 @@ payload type function at once:
       `Batch` reports it as a kind this build does not read, which there it is
 
 ### Phase 9 — the documents the above move
-- [ ] the vocabulary card's `intent` row says "send at the declared rate" now, and says the client paces
+- [x] the vocabulary card's `intent` row says "send at the declared rate" now, and says the client paces
       once phase 7 lands — the row changes in the same commit as `Driver`
-- [ ] `docs/tutorial/mistakes.md` re-ranked in place as each mechanism lands: 1 moves to the immediate
-      section after phase 8; 2, 3, 5 and 8 are struck through with the phase-7 commit beside them, the
+- [x] `docs/tutorial/mistakes.md` re-ranked in place as each mechanism lands: ~~1 moves to the immediate
+      section after phase 8~~; 2, 3, 5 and 8 are struck through with the phase-7 commit beside them, the
       way `CLAUDE.md` §3 corrects a plan, so the page keeps saying what used to go wrong and why it no
-      longer does
-- [ ] step 3 gains the prototyping pattern from the non-goal: a `todo(schema)` helper, one allow, and the
+      longer does. 1 is *listed* in §10 and stays where it is: renumbering ten entries loses the reason
+      the list was ranked that way, and five of the ten changed. So the correction is at the top and at
+      the bottom — the order is M4's, read by silence today the top three are 7, 6 and 9, and the closing
+      paragraph's "the frightening one is the first on this page" is struck with what replaced it
+- [x] step 3 gains the prototyping pattern from the non-goal: a `todo(schema)` helper, one allow, and the
       sentence that a reviewer greps for it; `tests/tutorial_ok.luau` carries it
-- [ ] `docs/DESIGN-API.md` §8 records the stage, `nw.keep` and the yield report beside the shared-record
-      decision they are the cost of
+- [x] `docs/DESIGN-API.md` §8 records the stage, `nw.keep` and the yield report beside the shared-record
+      decision they are the cost of — as a three-row ledger, with the note that the yield report is the
+      one place in netweave where a report was chosen over a refusal, and why
 - [x] **Done first, at opening** (step 1, both READMEs, `DESIGN-API.md` §0; re-measured with the exact
       flags `analyze` passes: 390 errors in `src/` alone, 435 with `tests/*_ok.luau`, 13 in `tutorial_ok`,
       76 in `api_reject`, the two messages as below). Step 1's sentence about the solver being off — "every

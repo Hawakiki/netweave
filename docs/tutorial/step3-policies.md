@@ -238,6 +238,29 @@ policy allowed it. Nothing else in the process can produce that type by accident
 annotating an authoritative function with `Trusted<T>` worth doing: a value that came from a
 `signal`, or from a table a script built by hand, does not fit.
 
+## Deferring one, on purpose
+
+A channel you are prototyping still needs `authorize`, because `nw.command` without it does not
+compile. Write the placeholder yourself:
+
+```lua
+--[[ TODO(netweave): a real policy before this ships. ]]
+local function todo(_schema: unknown)
+	return nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+end
+
+equip = nw.command({ data = Equip, rate = 5, authorize = todo(Equip) }),
+```
+
+netweave ships no `nw.todo`, and that is a decision rather than an omission: a pleasant library name
+gets reached for reflexively, and a command whose authorization is a library constant is one a
+reviewer cannot tell from a finished one. Yours has a name to grep for and a schema argument that
+says which channel it was meant for, so `todo(` in a diff is a question somebody can ask.
+
 ## What does not type-check
 
 `nw.all()` with no arguments is refused at declaration: it composes policies and was given none.

@@ -4,6 +4,14 @@ Collected from a reader who built [the trade example](example-trade.md) after th
 and checked against the source. The order is frequency times silence: the ones at the top are the
 ones you make often and find late.
 
+**The order is the one M4 measured, and five of the ten no longer belong in it.** `PLAN-M5` gave
+1, 2, 3, 5 and 8 a mechanism, so each of those now fails where it is written or reports itself on
+the console, and each keeps its place with the old behaviour struck through — a page that renumbers
+itself loses the reason it was ranked that way. Read by silence today and the top three are **7**
+(writing into a replicated value), **6** (a state change declared as a signal) and **9** (a
+namespace passed without the cast, which *removes* diagnostics from handlers written earlier).
+Number 1 is now the loudest thing in the library.
+
 ## 1. Declaring a namespace in a server-only script — ~~quiet~~ refused at its line since M5
 
 ```lua
@@ -25,7 +33,8 @@ naming the module and the fix. And for the disagreements that are a matter of de
 client, a half-deployed build — every hello now travels with a per-namespace digest, and the
 refusing peer's reason names the namespace one side lacks or the one a channel differs in, on both
 consoles, instead of two hashes. This entry stays at the top because it is the one the list was
-ranked around; in behaviour it now belongs with the immediate failures in §10.
+ranked around, and because the ranking is M4's rather than today's; in behaviour it belongs with
+the immediate failures in §10, where it is listed again.
 
 **The fix.** Every namespace lives in a shared module under `ReplicatedStorage`, required by both
 sides. A policy that is server-only reaches its dependency through a seam (Step 3), and the
@@ -189,6 +198,8 @@ is on a later line, which is what makes it hard to find.
 ## 10. The small ones that fail immediately
 
 ```lua
+nw.namespace("admin", { … })        -- in a ServerScriptService module: refused at that line (§1)
+
 local t = nw.types
 type P = t.PayloadOf<typeof(X)>     -- a value table carries no types: require(…netweave.types)
 
@@ -207,7 +218,13 @@ end)
 pos = t.vector3,                    -- 1e38 passes on an intent: t.vector3(t.i16(-2048, 2048))
 ```
 
-The frightening one is the first on this page. It is common — everyone wants admin commands in a
-server-only script — its symptom is "nothing works", and its cause is one word in a console line
-that the default sink prints three times and then suppresses. Declare everything in shared
-modules, on both sides, before the first packet moves.
+~~The frightening one is the first on this page.~~ **It was**, and it is the one entry on this list
+that changed category rather than degree: a namespace under `ServerScriptService` used to stop the
+whole game with "nothing works" and one console word for a cause, and it is refused at its own line
+now, before anything else, with the module named. Declare everything in shared modules on both
+sides anyway — the refusal is a guard, not a reason to find out this way.
+
+The frightening ones today are the two that still say nothing: **7**, where a client writes into a
+value it does not own and the next patch lands on a table netweave no longer recognises, and **9**,
+where a call written *below* your handlers takes the payload types off them and the only symptom is
+an error you do not get.
