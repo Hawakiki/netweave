@@ -904,6 +904,23 @@ yield with no packet of that player in between is neither detected nor harmed; w
 `nw.keep(ctx)` was considered and not added: nothing in the suite or the trade example keeps more
 than `ctx.player` past a yield, and that is one line.
 
+### What one shared record costs, and what was added to pay for it
+
+The record is reused per player because a fresh one per packet is an allocation on the hot path, and
+that single decision is behind three separate things a game used to have to know. `PLAN-M5` D-5's rule
+was to fold what a game cannot decide and report what it can only get wrong, and this is the ledger:
+
+| The cost | What pays it |
+|---|---|
+| A policy factory runs at load, **on both sides**, so a server-only `require` inside one breaks the client | A policy factory may return a second function: the **server stage**, run once at `Namespace.seal()`, before any packet decodes and never on the client (§5). The seam a game wrote by hand is the library's |
+| `ctx` is refreshed under anything that yields | The generation compare above, reported at `handler` or `authorize` with the fix in the reason |
+| A `ctx` kept past its handler reads somebody else's request | Studio's guard raises on the read; production reports the case that matters. No `nw.keep`, because copying the one field you need is shorter than the call would be |
+
+The middle row is the one to read twice: it is the only place in netweave where a **report** was
+chosen over a **refusal**. A yield inside a handler is legal Luau on a path netweave cannot make
+atomic, so refusing it would mean refusing handlers that work; the report comes after the damage, and
+says so.
+
 ## 9. Rejections
 
 Nothing is thrown. Every rejection is a value delivered to an observer, which is also what

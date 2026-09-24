@@ -273,6 +273,28 @@ local combat = nw.namespace("combat", {
 
 combat.server.resolved:publish(1, { tradeId = 1, accepted = true })
 
+--[[
+	Step 3's prototyping pattern. netweave ships no `nw.todo`, because a library name gets reached for
+	reflexively and a command authorized by a library constant is one a reviewer cannot tell from a
+	finished one (`PLAN-M5` non-goals). A game writes its own, with a name to grep for and the schema
+	it was meant for.
+]]
+local function todo(_schema: unknown)
+	return nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+end
+
+local prototype = nw.namespace("prototype", {
+	equip = nw.command({ data = Equip, rate = 5, authorize = todo(Equip) }),
+})
+
+prototype.server.equip:listen(function(_ctx, chosen)
+	local _slot: number = chosen.slot
+end)
+
 -- Step 4, server
 combat.server.equip:listen(function(ctx, chosen)
 	combat.server.loadout:publish(ctx.player, { primary = 100 + chosen.slot })
