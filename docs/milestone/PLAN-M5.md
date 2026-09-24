@@ -391,10 +391,21 @@ payload type function at once:
   - [x] M4-1 minor, the free list — `Inbound.pooled()` counts it, since lune cannot force a
         collection; the pool keeps at most 8 lists on the way back in. BEFORE on `5214fd1`: 64
         walks parked inside a yielding handler, 64 lists pooled after; AFTER: 8.
-- [ ] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
-      generated-code ceiling (35,073 against 12,476 ns a packet) and there is no fused struct reader to
-      match the writer; and the Down cell re-run on `0cb731d` beside the current tree in one session, to
-      find which of its four readings is the outlier (`bench/RESULTS.md`, "The Down cell")
+- [x] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
+      generated-code ceiling (35,073 against 12,476 ns a packet) ~~and there is no fused struct reader to
+      match the writer~~ — **there is, and it is taken**: instrumented at build time, six rows and six
+      bytes, for the `ArrayHeavy` element and for the struct alone. Re-priced under lune on `1c021e5`,
+      three runs: 20,936–21,413 ns a packet, 3.33x the bare ceiling and 2.21x the ceiling that checks
+      what it reads, 1.23x the `dispatched` rung — so what is left is the array's length handling and
+      one `table.clone(template)` per element, not the per-value dispatch. The encode side is 6.54x and
+      3.25x on the same instrument, so the writer is the further of the two from its ceiling, which is
+      the opposite of what this item assumed. `bench/RESULTS.md`, "The reader, priced"
+  - [ ] the Down cell re-run on `0cb731d` beside the current tree in one session, to find which of its
+        four readings is the outlier (`bench/RESULTS.md`, "The Down cell") — **left open on purpose**: it
+        needs the bench place built from a worktree at `0cb731d`, that matrix run, then the current
+        tree's in the same session, about twenty minutes of Studio for a question about the instrument
+        rather than about netweave. Nothing in the library waits on it, and the owner declined the
+        comparable multi-client runs on 2026-09-19
 
 ### Phase 5 — additions
 - [x] `t.string` `{ charset = … }`, linear by construction: stored as the pattern `[set]*`, so the

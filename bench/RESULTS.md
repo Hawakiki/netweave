@@ -808,6 +808,45 @@ above the 29,314 that the phase 7 session measured on a tree two milestones olde
 inside what a different Studio session does to this probe — the `inline` rung itself read 6,145
 then and 6,458 now.
 
+## The reader, priced — PLAN-M5 phase 4
+
+`PLAN-M5` phase 4 asked why netweave's client decode sat at 2.81x the generated-code ceiling in
+Studio at `249ca27` (35,073 against 12,476 ns a packet), and said there was no fused struct reader to
+match the writer's. **The second half is stale and the first is smaller than it was.**
+
+`fusedStructReader` exists since `03a11a3` and it *is* taken for this payload — instrumented at build
+time on `1c021e5`, six rows and six bytes, for the `ArrayHeavy` element and for the struct alone. So
+the gap is not a missing fused path.
+
+`bench/decode` under lune, three runs on `1c021e5`:
+
+| ns per packet, `ArrayHeavy`, lune | value |
+|---|---|
+| `inline` — the generated-code ceiling | 6,283 |
+| `inline + range` — plus the schema's own checks | 9,452 |
+| `dispatched` — the primitive fetched from a table | 17,002 |
+| `per value` — one call per value | 17,925 |
+| **netweave** | **20,936 .. 21,413** |
+
+That is **3.33x** the bare ceiling and **2.21x** the ceiling that checks what it reads — and the
+honest comparison is the second one, because netweave's reader refuses what the schema forbids and the
+bare rung does not. Against `dispatched`, which is the same strategy without the framing, netweave is
+1.23x: what is left is the array's length handling and one `table.clone(template)` per element, not
+the per-value dispatch the fused reader removed.
+
+The encode side, same instrument and same tree: netweave 14,443 ns a packet, 6.54x the bare ceiling
+and 3.25x the checking one. So the two halves are not symmetric — the writer is further from its
+ceiling than the reader is, which is the opposite of what the phase-4 note assumed.
+
+Studio is the platform of record and these are lune numbers; `require(ReplicatedStorage.netweave.bench.decode)`
+in a Play session is the Studio half, and it has not been re-run since `249ca27`.
+
+**Still open, and it needs a decision rather than a fix:** which of the four `ArrayHeavy` Down
+readings is the outlier (see "The Down cell"). Answering it means building the bench place from a
+worktree at `0cb731d`, running that matrix, then running the current tree's matrix in the same
+session — about twenty minutes of Studio for a question about an instrument rather than about
+netweave. Nothing in the library waits on it.
+
 ## The delta crossover, in bytes — PLAN-M5 phase 5
 
 `PLAN-M4` acceptance 8 asked where a diff loses to a resend and M4 closed without measuring it. It
