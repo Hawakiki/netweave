@@ -688,8 +688,35 @@ end
 	and every constructor would have to cast twice. Each public constructor states its own return
 	type instead, which is where the type belongs to be read anyway.
 ]]
+--[[
+	Which tables this module built.
+
+	`isType` was `type(value) == "table" and type(value.kind) == "string"`, so any table with a string
+	`kind` passed `t.optional`, `t.array`, `t.map`, `t.struct`, `Channel`'s `requireType` and
+	`nw.validate` — and every invariant the constructors enforce was advisory. Measured for five
+	shapes (M4 report finding 7): `order = {"a","a"}` double-encodes, a `max` of 2^31 gives a 2 GB
+	ceiling that the `maxBytes` policy is then measured against, `variants = {}` lowers to zero bits,
+	and `nw.validate(bogus, 5)` minted a `Trusted`.
+
+	A set rather than a field, because a field can be copied: `table.clone(t.u8)` would carry a
+	sentinel across but is not in here. Weak keys, so a schema built inside a function is collectable
+	with it, and the membership test is one lookup at declaration time — the wire path never asks.
+]]
+local constructed: { [any]: true } = setmetatable({}, { __mode = "k" }) :: any
+
 local function descriptor(fields: { [string]: any }): any
-	return table.freeze(fields)
+	local frozen = table.freeze(fields)
+	constructed[frozen] = true
+
+	return frozen
+end
+
+--[[ A callable constructor — `t.u8`, `t.string`, `t.vector3`, `t.instance` — is a `setmetatable`
+     table rather than a `descriptor`, and is usable bare, so it is registered the same way. ]]
+local function constructor(callable: any): any
+	constructed[callable] = true
+
+	return callable
 end
 
 --[[
@@ -1054,7 +1081,7 @@ local function ranged(base: { [string]: any }, label: string, refine: ((any, any
 		})
 	)
 
-	return table.freeze(callable)
+	return constructor(table.freeze(callable))
 end
 
 local t = {}
@@ -1346,9 +1373,11 @@ local function vectored(base: { [string]: any }, label: string, axes: number): a
 						.. `exactly like one that was applied`
 				)
 
-				--[[ The kind test rather than `isType`, which is defined further down and is a duck
-				     check anyway: what a component has to be is a *number* schema, and asking that
-				     directly is both narrower and available here. ]]
+				--[[ The kind test rather than `isType`, which is defined further down: what a component
+				     has to be is a *number* schema, and asking that directly is both narrower and
+				     available here. Since `PLAN-M5` phase 3 a forged table is refused either way —
+				     `isType` is a set of what this module built — and this still asks the narrower
+				     question. ]]
 				check(
 					type(component) == "table",
 					`{label} needs a netweave type for its components, got {typeof(component)}`
@@ -1395,7 +1424,7 @@ local function vectored(base: { [string]: any }, label: string, axes: number): a
 		})
 	)
 
-	return table.freeze(callable)
+	return constructor(table.freeze(callable))
 end
 
 --[=[
@@ -1543,7 +1572,7 @@ t.instance = (function(): Classed
 		})
 	)
 
-	return (table.freeze(callable) :: any) :: Classed
+	return (constructor(table.freeze(callable)) :: any) :: Classed
 end)()
 
 --[=[
@@ -1566,8 +1595,25 @@ end)()
 ]=]
 t.player = descriptor({ kind = "instance" :: Kind, class = "Player" }) :: Type<Player>
 
+--[=[
+	@within Types
+	@function isType
+	@param value any
+	@return boolean
+	@private
+
+	Whether this module built `value`.
+
+	Not a shape test: a table with a string `kind` used to pass, so every bound, every sorted order
+	and every non-empty enum the constructors check was advisory (M4 report finding 7). `Channel` and
+	`Trust` ask through here rather than repeating the test, because there is only one set.
+]=]
+function t.isType(value: any): boolean
+	return constructed[value] == true
+end
+
 local function isType(value: any): boolean
-	return type(value) == "table" and type(value.kind) == "string"
+	return constructed[value] == true
 end
 
 --[[

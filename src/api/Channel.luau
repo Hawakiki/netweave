@@ -530,8 +530,10 @@ export type function OutboundScope(spec)
 	return scope
 end
 
+--[[ Asked of the type library rather than repeated here: a table with a string `kind` used to pass
+     both copies, so every invariant the constructors enforce was advisory (M4 report finding 7). ]]
 local function isType(value: any): boolean
-	return type(value) == "table" and type(value.kind) == "string"
+	return Types.isType(value)
 end
 
 local function requireType(spec: any, field: string, class: string): Types.Descriptor
