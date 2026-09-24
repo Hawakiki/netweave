@@ -776,6 +776,28 @@ changes nothing, and a five-channel namespace does not reproduce it — so there
 `View` to fix; it is an inference-order effect with a size threshold. The cast is one token and it
 holds, which is why the tutorial writes it.
 
+### One bad channel is not one bad channel, and where to look
+
+A channel whose declaration the type layer refuses — no `rate`, a `data` that is not a schema, an
+`any` request type composed through `nw.all` — reports at its own line, which is right, and then
+reports again at the `nw.namespace(...)` line, which is not: the second diagnostic says the
+namespace's views do not have the keys of the channels that were **fine**, so a reader is sent
+looking for a fault in code that has none. Measured at thirteen diagnostics for one bad channel
+beside two good ones, two or three of them belonging to the good ones.
+
+`PLAN-M5` D-8 planned to have the view mappers hand a bad channel `unknown` on its own key and carry
+on. **They cannot, measured twice.** `ServerView` is one type function over the whole declaration
+table, and when one channel's `CommandPayload<…>` is left unreduced — which is what an `error()`
+inside it produces — the whole application is stuck and the body never runs, so there is nothing for
+it to give `unknown` to. The lever is upstream: the argument must not carry an unreduced application,
+which would mean the payload type functions returning `unknown` instead of erroring, and that trades
+away the analysis-time half of G2 and G3 for a tidier console.
+
+So the guidance is how to read it: **the channel named inside the `ServerView<…>` type is the one to
+fix.** Its own diagnostic is above, at its own line, and it says what to write. The `any`-in-`nw.all`
+case was the one a game hit by accident, and it is gone — `PLAN-M5` phase 3 item 43 made an agnostic
+policy compose without `any`.
+
 ### The condition attached
 
 `type function` requires **`LuauSolverV2`**. The stock solver rejects the syntax outright.
