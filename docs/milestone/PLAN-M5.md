@@ -235,12 +235,21 @@ payload type function at once:
       One gap measured and not closed: `t.unitVector3(t.string)` produces nothing, because the argument
       is itself an intersection and Luau's subtyping of one against `Type<number>` lets it through —
       `t.vector3(t.boolean)`, a plain table type, is refused. The runtime refuses both
-- [ ] the fifth `nw.Views` spelling, measured writing the tutorial (2026-09-10): passing a namespace
+- [x] the fifth `nw.Views` spelling, measured writing the tutorial (2026-09-10): passing a namespace
       *bare* to a parameter typed `nw.Views<typeof(ns.channels)>` or `typeof(ns)` turns the payloads of
       the handlers already written on that namespace into `unknown`, retroactively; the cast at the call
-      keeps them. `tests/tutorial_ok.luau` carries the cast with the measurement beside it. Pin the bare
+      keeps them. `tests/tutorial_ok.luau` carries the cast with the measurement beside it. ~~Pin the bare
       call in `api_reject` as a canary the way the annotated-local spelling is, or find the instantiation
-      that loses the brand and fix it in `View`
+      that loses the brand and fix it in `View`~~ — **neither, and both were tried.** The reproduction is
+      `spike/declare/passed.luau` (Q6), where the cast gives the two intended diagnostics and the bare
+      call gives four. It is not a lost brand and not the self-reference in the parameter's type: typing
+      the parameter by the channel table's own local, so the namespace is not named in it at all, changes
+      nothing, and a five-channel namespace with four handlers does not reproduce it while a nine-channel
+      one with a handler doing arithmetic on a payload does. So there is nothing in `View` to fix. And it
+      cannot be a canary: the shape *adds* two diagnostics while removing others, so `api_reject` would
+      have to declare a count that moves with the solver rather than with netweave. The guard is the cast,
+      recorded in `DESIGN-API` §7 beside the other `Views` caution, and `api_ok`'s own bare call now says
+      it is safe only because that namespace has one channel
 - [ ] `ctx.player` in a handler is `unknown` (`docs/DESIGN-API.md` §8), and the trade example casts it in
       every handler that publishes. Measure once, in `spike/declare/`, whether a class type given at the
       `nw.Views` cast can be threaded to the handler's `ctx` by the view type function, and write either
