@@ -153,7 +153,7 @@ export type Channel<C, A, T, R, U> = {
 	printing two structural table types and leaving the reader to diff them.
 
 	A type function body sees only the `types` library — not this module's locals — so the reasons
-	live inside `forbid` rather than in a constant table beside it.
+	live inside `permit` rather than in a constant table beside it.
 ]]
 --[[
 	A callable constructor's table half.
@@ -251,15 +251,51 @@ type function requireRate(spec, class)
 	return rate
 end
 
--- selene: allow(undefined_variable)
-type function forbid(spec, class, field)
-	local name = field:value()
+--[[
+	**Every key a class takes, and nothing else.**
 
-	if not propertyOf(spec, field) then
-		return types.singleton(true)
+	~~`forbid` names the keys that belong to *another* class~~ — one call per forbidden key per class,
+	a hand-picked list, and it could not see a misspelling: `maxbytes = 4`, `bursts = 50`, `authorise`, `Rate`,
+	`timeOut`, `rate_` all compiled, the runtime ignored the key, and the author believed a ceiling or
+	a depth was set — one diagnostic in a probe file of twenty-two declarations (M4 report
+	finding 45). This is what `CheckedSettings` already did for `nw.configure`, on the surface the
+	design calls the security documentation.
+
+	So each class passes the keys it takes and this walks the declaration. A key that belongs to
+	another class gets that class's reason; anything else is a misspelling, and the message lists what
+	the class does take, because the fix is a spelling and the list is the shortest way to find it.
+
+	The value types come with it: `rate = "20"` was the one diagnostic the probe did produce, but
+	`burst`, `maxBytes`, `timeout` and `unreliable` took a string with no complaint, and `timeout` and
+	`store` were presence-only — `store = {}` compiled.
+
+	The list arrives as one comma-separated singleton because a type function takes types, and a
+	string is the cheapest type that carries a list.
+]]
+-- selene: allow(undefined_variable)
+type function permit(spec, class, allowed)
+	local declaration = types.copy(spec)
+
+	if not declaration:is("table") then
+		error(
+			"a channel is declared with a table of fields, written inline. Use "
+				.. "nw.signal({ data = ..., rate = 20 }) rather than a value built elsewhere and "
+				.. "passed in: the fields have to be visible here for the analyzer to read them."
+		)
 	end
 
-	local reason = {
+	local names = {}
+	local list = {}
+
+	for name in string.gmatch(allowed:value(), "[^,]+") do
+		names[name] = true
+		table.insert(list, name)
+	end
+
+	--[[ A key that belongs to another class keeps its own sentence, because that mistake and a
+	     misspelling are not the same mistake: one is a class chosen wrongly and the other is a letter.
+	     `forbid` is gone — this is where its reasons live now. ]]
+	local elsewhere = {
 		authorize = "A channel that authorizes is a command or a query; an intent and a signal "
 			.. "carry no authority by definition, and letting them approve requests would make "
 			.. "the class name a lie. If you need to approve it, it is a command.",
@@ -284,7 +320,40 @@ type function forbid(spec, class, field)
 			.. "audience decides who gets a value and nothing has to say which value it is.",
 	}
 
-	error(`nw.{class:value()} forbids \`{name}\`. {reason[name]}`)
+	--[[ What a number key is for, so `maxBytes = "4"` is caught where `maxbytes = 4` is. `rate` is
+	     checked by `requireRate`, which has its own sentence about G2. ]]
+	local numbers = { burst = true, maxBytes = true, timeout = true }
+
+	for key, property in declaration:properties() do
+		local name = key:value()
+
+		if not names[name] then
+			local because = elsewhere[name]
+
+			if because then
+				error(`nw.{class:value()} forbids \`{name}\`. {because}`)
+			end
+
+			error(
+				`nw.{class:value()} has no \`{name}\`. It takes {table.concat(list, ", ")} — check the `
+					.. `spelling, because a key that is ignored looks exactly like one that worked.`
+			)
+		end
+
+		local value = property.read
+
+		if value then
+			if numbers[name] and not value:is("number") then
+				error(`nw.{class:value()} takes \`{name}\` as a number.`)
+			end
+
+			if name == "unreliable" and not value:is("boolean") then
+				error(`nw.{class:value()} takes \`unreliable\` as a boolean: unreliable = true.`)
+			end
+		end
+	end
+
+	return types.singleton(true)
 end
 
 -- selene: allow(undefined_variable)
@@ -318,11 +387,7 @@ export type function CommandPayload(spec)
 		)
 	end
 
-	forbid(spec, command, types.singleton("audience"))
-	forbid(spec, command, types.singleton("args"))
-	forbid(spec, command, types.singleton("returns"))
-	forbid(spec, command, types.singleton("timeout"))
-	forbid(spec, command, types.singleton("unreliable"))
+	permit(spec, command, types.singleton("data,rate,burst,maxBytes,authorize"))
 
 	return requireData(spec, command, types.singleton("data"), types.singleton("what the client sends"))
 end
@@ -337,10 +402,7 @@ export type function IntentPayload(spec)
 
 	requireRate(spec, intent)
 
-	forbid(spec, intent, types.singleton("authorize"))
-	forbid(spec, intent, types.singleton("audience"))
-	forbid(spec, intent, types.singleton("returns"))
-	forbid(spec, intent, types.singleton("timeout"))
+	permit(spec, intent, types.singleton("data,rate,burst,maxBytes,unreliable"))
 
 	return requireData(spec, intent, types.singleton("data"), types.singleton("the input being observed"))
 end
@@ -355,10 +417,7 @@ export type function SignalPayload(spec)
 
 	requireRate(spec, signal)
 
-	forbid(spec, signal, types.singleton("authorize"))
-	forbid(spec, signal, types.singleton("audience"))
-	forbid(spec, signal, types.singleton("returns"))
-	forbid(spec, signal, types.singleton("timeout"))
+	permit(spec, signal, types.singleton("data,rate,burst,maxBytes,unreliable"))
 
 	return requireData(spec, signal, types.singleton("data"), types.singleton("what the client sends"))
 end
@@ -384,9 +443,7 @@ export type function QueryArgs(spec)
 		error("nw.query needs `timeout`, in seconds. A request that never resolves is a leak.")
 	end
 
-	forbid(spec, query, types.singleton("data"))
-	forbid(spec, query, types.singleton("audience"))
-	forbid(spec, query, types.singleton("unreliable"))
+	permit(spec, query, types.singleton("args,returns,rate,burst,maxBytes,timeout,authorize"))
 
 	return requireData(spec, query, types.singleton("args"), types.singleton("the request"))
 end
@@ -413,13 +470,7 @@ end
 ]=]
 -- selene: allow(undefined_variable)
 export type function OutboundPayload(spec, class)
-	forbid(spec, class, types.singleton("rate"))
-	forbid(spec, class, types.singleton("burst"))
-	forbid(spec, class, types.singleton("maxBytes"))
-	forbid(spec, class, types.singleton("authorize"))
-	forbid(spec, class, types.singleton("args"))
-	forbid(spec, class, types.singleton("returns"))
-	forbid(spec, class, types.singleton("timeout"))
+	permit(spec, class, types.singleton("data,audience,unreliable"))
 
 	return requireData(spec, class, types.singleton("data"), types.singleton("what the server sends"))
 end
@@ -441,14 +492,7 @@ end
 export type function ReplicatePayload(spec)
 	local class = types.singleton("replicate")
 
-	forbid(spec, class, types.singleton("rate"))
-	forbid(spec, class, types.singleton("burst"))
-	forbid(spec, class, types.singleton("maxBytes"))
-	forbid(spec, class, types.singleton("authorize"))
-	forbid(spec, class, types.singleton("args"))
-	forbid(spec, class, types.singleton("returns"))
-	forbid(spec, class, types.singleton("timeout"))
-	forbid(spec, class, types.singleton("unreliable"))
+	permit(spec, class, types.singleton("subject,data,audience,store"))
 
 	if not propertyOf(spec, types.singleton("subject")) then
 		error(

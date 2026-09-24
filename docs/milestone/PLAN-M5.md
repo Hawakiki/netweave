@@ -290,6 +290,17 @@ payload type function at once:
 
 ### Phase 3 — the M4 report's type-layer residue
 - [ ] items 5, 6, 7, 42, 43, 45, 46, 47, 48, 50 of `docs/SECURITY-REPORT-M4.md`, each its own commit
+  - [x] 5 — `nw.validate` returns a schema-shaped copy; the brand-laundering half stays open with its
+        measurement (`Unbranded<V>` costs "Code is too complex to typecheck")
+  - [x] 6 — every field of `Channel<…>` is `read` and the declaration table is a frozen copy; the
+        per-record freeze is not done, and the ordering hazard that decided it is written down
+  - [x] 7 — a weak set of what `src/types` built, asked by `isType`, `Channel.requireType` and
+        `nw.validate`; a clone of a real descriptor is refused, which a sentinel field would admit
+  - [x] 43 — `Policy<T>` as an intersection (above)
+  - [x] 45 — each class passes the keys it takes and `permit` walks the declaration: a key of another
+        class keeps that class's reason, anything else is a spelling with the list beside it, and
+        `burst`/`maxBytes`/`timeout`/`unreliable` are checked by type. The M4 probe's twenty-two
+        declarations produced one diagnostic; they produce fifteen. `forbid` is gone, its reasons moved
 - [x] for 43, the measurement from the tutorial (2026-09-11): a payload-agnostic policy cannot be composed
       onto two payloads through `nw.all` in any spelling — `Policy<Equip>` is not `Policy<Offer>`,
       unannotated and `unknown` mismatch the same way, `any` reaches `CommandPayload` as `*error-type*`
