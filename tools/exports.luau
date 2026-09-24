@@ -77,6 +77,71 @@ local SURFACES = {
      A habit is not an inability, and this list is for inabilities. ]]
 local UNCOVERED: { [string]: string } = {}
 
+--[[
+	A public value gets a public type (`PLAN-M5` D-3).
+
+	The check above enumerates `export type` declarations, so it could never see a public *value*
+	with no type at all — which is how `nw.policy`'s return, `nw.audience.nearby`'s return and
+	`nw.configure`'s snapshot went three milestones with no name a game could write through `nw`
+	(M4-1). This table is the other half: every top-level value on `nw` is either a family whose
+	type is named here, or is listed in `UNTYPED` with the reason a type would be the wrong tool.
+
+	Both lists are tested against `src/netweave.luau` in both directions — a value on `nw` that is
+	in neither list fails, and an entry naming a value `nw` no longer has fails — so neither can
+	drift from what it lists (`CLAUDE.md` §9).
+]]
+local FAMILIES: { { values: { string }, type: string } } = {
+	{ values = { "policy", "all" }, type = "Policy" },
+	{ values = { "allow", "deny" }, type = "Verdict" },
+	{ values = { "validate" }, type = "Trusted" },
+	{ values = { "observe" }, type = "Observer" },
+	{ values = { "diagnostics" }, type = "Diagnostics" },
+	{ values = { "configure" }, type = "Snapshot" },
+	{ values = { "namespace" }, type = "Views" },
+	{ values = { "protocol" }, type = "Protocol" },
+}
+
+--[[
+	Values on `nw` that are not a family with a type of their own, and why.
+
+	The seven channel constructors are the deliberate one: a channel record's type is five type
+	parameters of internal shape, and the name a game writes is `nw.Views<typeof(ns.channels)>`,
+	which carries every channel's payload and view. A bare `nw.Channel` would be a name for a value
+	no game holds alone, and a name that exists is a name that will be reached for.
+]]
+local UNTYPED: { [string]: string } = {
+	milestone = "a string",
+	signature = "returns a string",
+	types = "a module; its own types are the t. surface above",
+	audience = "a module; its values are nw.Audience, checked as a type",
+	store = "a module; its values are nw.Store, checked as a type",
+	config = "a module; its values are nw.Snapshot and nw.Described, checked as types",
+	internal = "private (CLAUDE.md section 2)",
+	command = "a channel record, named through nw.Views<typeof(ns.channels)>",
+	intent = "a channel record, named through nw.Views<typeof(ns.channels)>",
+	signal = "a channel record, named through nw.Views<typeof(ns.channels)>",
+	query = "a channel record, named through nw.Views<typeof(ns.channels)>",
+	state = "a channel record, named through nw.Views<typeof(ns.channels)>",
+	event = "a channel record, named through nw.Views<typeof(ns.channels)>",
+	replicate = "a channel record, named through nw.Views<typeof(ns.channels)>",
+}
+
+--[[ Every `nw.<name> =` and `function nw.<name>` in the public module: the values a game can reach. ]]
+local function valuesOf(source: string): { string }
+	local names: { string } = {}
+
+	for name in string.gmatch(source, "\nnw%.([%a_][%w_]*)%s*=") do
+		table.insert(names, name)
+	end
+
+	for name in string.gmatch(source, "\nfunction nw%.([%a_][%w_]*)") do
+		table.insert(names, name)
+	end
+
+	table.sort(names)
+	return names
+end
+
 -- ---------------------------------------------------------------------------------------------
 
 local function exportsOf(source: string): { string }
@@ -121,7 +186,7 @@ end
 	in PLAN-M4-BUG.
 ]]
 local function stripCommentsAndStrings(source: string): string
-	local out = {}
+	local out: { string } = {}
 	local at = 1
 	local length = #source
 
@@ -188,7 +253,7 @@ local function mentions(haystack: string, needle: string): boolean
 	while true do
 		local start, finish = string.find(haystack, needle, at, true)
 
-		if not start then
+		if not start or not finish then
 			return false
 		end
 
@@ -254,10 +319,66 @@ for qualified in UNCOVERED do
 	end
 end
 
+-- ---------------------------------------------------------------------------------------------
+-- A public value gets a public type
+-- ---------------------------------------------------------------------------------------------
+
+local surface = fs.readFile("src/netweave.luau")
+local values = valuesOf(surface)
+local placed: { [string]: string } = {}
+local families = 0
+
+for _, family in FAMILIES do
+	if not seen[`nw.{family.type}`] then
+		fail(`FAMILIES names the type nw.{family.type}, which src/netweave.luau does not export.`)
+	end
+
+	for _, value in family.values do
+		if placed[value] then
+			fail(`nw.{value} is listed twice, under nw.{placed[value]} and nw.{family.type}.`)
+		end
+
+		placed[value] = family.type
+	end
+
+	families += 1
+end
+
+for value, reason in UNTYPED do
+	if placed[value] then
+		fail(`nw.{value} is both a family (nw.{placed[value]}) and UNTYPED ("{reason}"); pick one.`)
+	end
+
+	placed[value] = "untyped"
+end
+
+local present: { [string]: boolean } = {}
+
+for _, value in values do
+	present[value] = true
+
+	if not placed[value] then
+		fail(
+			`nw.{value} is a public value and neither FAMILIES nor UNTYPED in tools/exports.luau `
+				.. `names it. Give it a type a game can write through nw, and list the family — or say `
+				.. `why a type is the wrong tool (PLAN-M5 D-3).`
+		)
+	end
+end
+
+for value in placed do
+	if not present[value] then
+		fail(`tools/exports.luau lists nw.{value}, which src/netweave.luau no longer defines.`)
+	end
+end
+
 if failures > 0 then
 	error(`{failures} export checks failed`)
 end
 
-print(`OK      exports — {covered} public types written in an _ok file, {exempt} known gaps`)
+print(
+	`OK      exports — {covered} public types written in an _ok file, {exempt} known gaps, `
+		.. `{families} value families typed`
+)
 
 return true

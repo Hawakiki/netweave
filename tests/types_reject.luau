@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 11
+-- netweave:expect 24
 
 --[[
 	Every assignment here must be rejected. `lune run analyze` fails if the count on line 1 stops
@@ -74,5 +74,42 @@ type _notASchema = t.PayloadOf<number> -- netweave:reject PayloadOf takes a netw
 ]]
 local _action = t.union({ move = t.struct({ x = t.u8 }), wait = t.u8 })
 local _crossed: t.PayloadOf<typeof(_action)> = { tag = "wait", value = { x = 1 } } -- netweave:reject but got '"move" | "wait"'
+
+--[[ 12. A `charset` is a string. Annotated for the same reason `types_ok` annotates its options:
+     an unannotated literal is any table, and a wrong field in one is not a diagnostic. ]]
+local _badSet: t.TextOptions = { charset = 5 } -- netweave:reject Expected this to be 'string?', but got 'number'
+
+--[[ 13. A literal is a string, a boolean or a number; a table is refused at the call. ]]
+local _tableLiteral = t.literal({}) -- netweave:reject is not a subtype of
+
+--[[ 14. A literal carries its singleton, so another singleton is not the same type. ]]
+local _otherVersion: Type<"v4"> = t.literal("v3") -- netweave:reject Type<"v4">
+
+--[[ 15. A set's entries are `true`, not `boolean`. ]]
+local _looseSet: Type<{ [string]: boolean }> = t.set(t.string(1, 8)) -- netweave:reject Type<{ [string]: boolean }>
+
+--[[ 16. A default has to be a value of the inner type. ]]
+local _wrongDefault = t.optional(t.u8, "fast") -- netweave:reject default of the wrong kind
+
+--[[ 17. And a table field takes no default at all: a table default would be a fresh table on every
+     read and no two of them equal. ]]
+local _tableDefault = t.optional(t.struct({ x = t.u8 }), 5) -- netweave:reject takes a default only for
+
+--[[
+	18-24. **A constructor's arguments are checked by type, not only by count** (`PLAN-M5` D-1).
+
+	`Ranged<T>`, `Text`, `Componented<T>` and `Classed` were `typeof(setmetatable(…))` aliases,
+	which enforce how many arguments a call passes and nothing about what they are: `t.u8(0, "b")`
+	was accepted and declared a storage nobody asked for, and `t.vector3(t.boolean)` produced no
+	diagnostic at all (M4-1). They are intersections now — `Type<T> & ((…) -> Type<T>)` — which
+	checks both halves and is still usable bare, the bare spellings being in `types_ok`.
+]]
+local _wrongBound = t.u8(0, "b") -- netweave:reject Expected this to be 'number', but got 'string'
+local _wrongLow = t.u8("a", 3) -- netweave:reject Expected this to be 'number', but got 'string'
+local _wrongLength = t.buffer(0, "x") -- netweave:reject Expected this to be 'number', but got 'string'
+local _wrongOption = t.string(0, 5, { utf8 = 1 }) -- netweave:reject Expected this to be 'boolean?', but got 'number'
+local _wrongComponent = t.vector3(t.boolean) -- netweave:reject 'Type<boolean>'
+local _wrongPose = t.cframe(t.boolean) -- netweave:reject 'Type<boolean>'
+local _wrongClass = t.instance(5) -- netweave:reject Expected this to be 'string', but got 'number'
 
 return nil

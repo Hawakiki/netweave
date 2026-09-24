@@ -100,10 +100,16 @@ export type Config = {
 }
 
 export type Inbound = {
-	receive: (packed: buffer, instances: { Instance }?, sender: any?) -> (),
+	--[[ `{ unknown }`, because the sidecar is wire data and the read phase is what checks it
+	     (M4 report finding 50). ]]
+	receive: (packed: buffer, instances: { unknown }?, sender: any?) -> (),
 	drain: (channel: any) -> (),
 	tick: () -> (),
 	forget: (sender: any) -> (),
+	--[[ How many pending lists are parked in the free list right now. For `bench/residue`, which
+	     counts the pool rather than weighing it: lune cannot force a collection, so what the pool
+	     retains is not otherwise observable. ]]
+	pooled: () -> number,
 }
 
 --[[ `pcall` of a function whose return pack is empty is typed as returning `boolean` alone, so the
@@ -116,6 +122,18 @@ local read: (...any) -> ...any = Batch.read
 local function traceback(message: any): string
 	return `{tostring(message)}\n{debug.traceback("", 2)}`
 end
+
+--[[ A digest whose body does not parse inside its declared length, or claims more than a
+     declaration can hold. One string, for the same reason as the next one. ]]
+local MALFORMED_DIGEST = "a digest's body ends before the namespaces it counts do, or claims more "
+	.. "namespaces or a longer name than any declaration can hold"
+
+--[[ One string for every report of its kind, because a flood of yielding handlers is a flood, and
+     a reason built per packet is a reason that differs per packet (`CLAUDE.md` §9, "count it"). ]]
+local YIELDED_ACROSS_PACKET = "the handler yielded, and another packet of this player was dispatched "
+	.. "before it resumed, so the ctx it held was refreshed under it and every read after the yield "
+	.. "was that later request's. Copy the fields you need before yielding — local player = "
+	.. "ctx.player — or declare the channel a query, whose handler may yield on a thread of its own"
 
 --[[
 	What a `replicate` handler is given **is** this endpoint's baseline, and until M4 phase 8 it
@@ -255,7 +273,15 @@ function Inbound.new(config: Config): Inbound
 
 		At one batch a frame — every ordinary frame — this is still the same seven arrays reused
 		forever and still costs nothing.
+
+		Capped on the way back in. The pool used to keep every list it ever needed, so the most walks
+		ever in flight at once — a burst of yielding handlers — set its size for the life of the
+		server, each list seven arrays sized by the largest batch it carried (M4-1; `bench/residue`
+		counts it). Past the cap a returning list is dropped for the collector, and the walk that
+		needs one more than the cap allocates it: game code that yields in a handler pays for the
+		overlap it creates, once per overlap, rather than the server keeping the peak.
 	]]
+	local POOLED = 8
 	local free: { Pending } = { emptyPending() }
 
 	--[[
@@ -342,7 +368,15 @@ function Inbound.new(config: Config): Inbound
 
 			`xpcall` with the module-level `traceback` handler allocates no closure per call.
 		]]
+		local generation = Context.generation(who)
 		local ran, verdict = xpcall(authorize, traceback, ctx, value)
+
+		--[[ A check that yielded across another packet of this player read a refreshed record after
+		     the yield; the policy's own docstring forbids the yield, and this is where breaking that
+		     stops being silent. One integer compare, one constant reason (`PLAN-M5` D-5). ]]
+		if Context.generation(who) ~= generation then
+			report(channel, who, "authorize", YIELDED_ACROSS_PACKET, bytes)
+		end
 
 		if not ran then
 			report(channel, who, "authorize", `the policy raised: {tostring(verdict)}`, bytes)
@@ -490,10 +524,23 @@ function Inbound.new(config: Config): Inbound
 			value = narrowed
 		end
 
+		local generation = Context.generation(who)
 		local ok, failure = xpcall(handler, traceback, ctx, value)
 
 		if not ok then
 			report(channel, who, "handler", tostring(failure), bytes)
+		end
+
+		--[[
+			The handler yielded, and while it was parked another packet of the same player was
+			dispatched: `acquire` refreshed the shared record and `release` moved its generation, so
+			every `ctx` read the handler made after resuming was that later request's. The batch
+			survives — reading and dispatching are separate passes for this reason — and until now
+			the corruption did too, silently, everywhere the Studio guard is not. Reported with a
+			constant reason so a flood of them allocates nothing (`CLAUDE.md` §9, "count it").
+		]]
+		if Context.generation(who) ~= generation then
+			report(channel, who, "handler", YIELDED_ACROSS_PACKET, bytes)
 		end
 
 		Context.release(who)
@@ -600,7 +647,9 @@ function Inbound.new(config: Config): Inbound
 	local function dispatch(list: Pending)
 		local ok, failure = pcall(attempt, list)
 
-		table.insert(free, list)
+		if #free < POOLED then
+			table.insert(free, list)
+		end
 
 		if not ok then
 			report(nil, nil, "handler", `dispatch raised: {tostring(failure)}`, 0)
@@ -836,7 +885,7 @@ function Inbound.new(config: Config): Inbound
 		     reads replies, and neither ever reads the other (`src/transport/Batch.luau`). ]]
 		answers = isServer,
 
-		admit = function(channel: any, bytes: number): (string?, string?)
+		admit = function(channel: any, bytes: number): (string?, Observer.Stage?)
 			--[[ Once the pending set is full the rest of the batch is refused here, before decode,
 			     rather than decoded and then dropped. Refusing has to stay cheaper than accepting or
 			     the limit becomes the amplifier. ]]
@@ -902,6 +951,40 @@ function Inbound.new(config: Config): Inbound
 				report(nil, sender, "protocol", disagreement, bytes)
 			end
 		end,
+
+		--[[
+			A peer's per-namespace digest, beside its hello.
+
+			Decoded only when it changes something: the peer is refused and its reason does not yet
+			name a namespace. Every other digest — from a peer that agrees, from one already named,
+			from a peer that never said hello — is stepped over at the cost of one table read, which
+			is what bounds a flood of them (`PLAN-M5` D-7). The one that is decoded rewrites the
+			reason and is reported once more at `protocol`, so the console that printed two hashes
+			now prints the namespace.
+		]]
+		--[[ Absent, not silent, on an endpoint with no agreement: `Batch` then reports the kind as one
+		     this build does not read, which is what it is here, rather than stepping over it without
+		     a word — the fuzzer's client rig has no agreement and found the silence. ]]
+		digest = if agreement == nil
+			then nil
+			else function(bytes: number)
+				if not agreement.wants(sender) then
+					return
+				end
+
+				local entries = Batch.readDigest()
+
+				if not entries then
+					report(nil, sender, "parse", MALFORMED_DIGEST, bytes)
+					return
+				end
+
+				local named = agreement.digest(sender, entries)
+
+				if named then
+					report(nil, sender, "protocol", named, bytes)
+				end
+			end,
 
 		--[[
 			A peer asking for a replicated channel in full.
@@ -1158,8 +1241,8 @@ function Inbound.new(config: Config): Inbound
 
 		reply = holdReply,
 
-		refuse = function(channel: any?, stage: string, reason: string, bytes: number, id: number?)
-			report(channel, sender, stage :: Observer.Stage, reason, bytes)
+		refuse = function(channel: any?, stage: Observer.Stage, reason: string, bytes: number, id: number?)
+			report(channel, sender, stage, reason, bytes)
 
 			--[[ Any refusal of a replicated packet is a change this endpoint will never see, and
 			     every change after it is relative to one it does not have. The stage does not
@@ -1189,7 +1272,7 @@ function Inbound.new(config: Config): Inbound
 	}
 
 	return {
-		receive = function(packed: buffer, instances: { Instance }?, from: any?)
+		receive = function(packed: buffer, instances: { unknown }?, from: any?)
 			local list = claim()
 
 			--[[ Both of these belong to the read phase only. Restored rather than cleared, so a
@@ -1414,6 +1497,10 @@ function Inbound.new(config: Config): Inbound
 			end
 
 			Context.forget(who)
+		end,
+
+		pooled = function(): number
+			return #free
 		end,
 	}
 end

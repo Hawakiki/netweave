@@ -312,7 +312,73 @@ local function attach(namespace: nw.Views<typeof(shots.channels)>)
 	end)
 end
 
+--[[ Bare, and safe *here*: this namespace has one channel. On a namespace of about nine, passing it
+     bare makes the payload of a handler written earlier `unknown` — `spike/declare/passed.luau`, and
+     `tests/tutorial_ok.luau` casts at the call for that reason. Do not copy this line into a dense
+     file (`PLAN-M5` phase 1). ]]
 attach(shots)
+
+--[[
+	**A handler's `ctx` is `nw.Ctx`**, which is what `PLAN-M5` phase 1 closed.
+
+	It was a shape the view built with `player`, `character` and `humanoid` left `unknown`, on the
+	grounds that a `type function` body cannot name `Player`, `Model` or `Humanoid`. It cannot name
+	one — but it can be handed one, because a type function's arguments are types, so `Views<D>`
+	instantiates the mappers with `Context.Ctx`. What that buys is below: the fields read at their
+	real types, the whole `ctx` assignable to `nw.Ctx`, and a typo still caught.
+]]
+--[[
+	**A payload-agnostic policy composes onto any channel** (M4 report finding 43, closed in
+	`PLAN-M5` phase 3 by phase 1's callable shape).
+
+	`Policy<T>` was a `typeof(setmetatable(…))` alias, which fixes the argument count of a
+	reconfiguration and says nothing about variance, so `nw.all(alive, ownsSlot)` was refused in
+	every spelling — including the ones a policy module actually takes. It is
+	`Configured<T> & ((config: any) -> Configured<T>)` now, and a function type is contravariant in
+	its parameters, so a check taking `unknown` is usable wherever one taking the payload is.
+
+	Both halves are here: the composition, and the assignment that shows the direction.
+]]
+local agnostic = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: unknown)
+		return ctx.character and nw.allow() or nw.deny("no character")
+	end
+end)
+
+local ownsSlot = nw.policy(function()
+	return function(_ctx: nw.Ctx, request: { x: number })
+		return request.x < 3 and nw.allow() or nw.deny("no slot")
+	end
+end)
+
+local composed = nw.namespace("composed", {
+	fired = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = nw.all(agnostic, ownsSlot) }),
+})
+
+composed.server.fired:listen(function(_ctx, payload)
+	local _x: number = payload.x
+end)
+
+--[[ The direction on its own: an agnostic check where a narrower one is wanted, never the reverse. ]]
+local _asNarrow: nw.Policy<{ x: number }> = agnostic
+
+local function whoFor(_player: Player, _slot: number) end
+
+local function pivotOf(ctx: nw.Ctx): CFrame?
+	local character = ctx.character
+	return character and character:GetPivot()
+end
+
+shots.server.fired:listen(function(ctx, payload)
+	local _id: number = ctx.player.UserId
+	local _name: string = ctx.player.Name
+	local _humanoid: Humanoid? = ctx.humanoid
+	local _channel: string = ctx.channel
+	local _now: number = ctx.now
+
+	whoFor(ctx.player, payload.x)
+	local _pivot: CFrame? = pivotOf(ctx)
+end)
 
 --[[ A cast, and `typeof` — the two spellings for a local. Both keep the views typed; the cast is
      the one to reach for when the type has to be named. ]]
@@ -359,6 +425,75 @@ for _, byStage in diagnostics.channels do
 	for _, tally: nw.Tally in byStage do
 		local _count: number = tally.count
 	end
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A public value gets a public type (PLAN-M5 phase 2, D-3)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	Every alias `nw` gained in M5, each in an annotation position that checks — a local holding the
+	value the family produces, or a parameter the family consumes. `tools/exports` demands one per
+	value family and reads this file for the coverage.
+]]
+
+type Kit = { primary: number }
+
+--[[ `nw.Policy<T>`: the return of `nw.policy` and of `nw.all`, and the type of `authorize`. ]]
+local canEquip: nw.Policy<Kit> = nw.policy(function()
+	return function(_ctx: nw.Ctx, request: Kit)
+		return if request.primary > 0 then nw.allow(request) else nw.deny("nothing equipped")
+	end
+end)
+
+local _both: nw.Policy<Kit> = nw.all(canEquip, canEquip)
+
+--[[ `nw.Check<T>` and `nw.Factory<T>`: the two halves before `nw.policy` wraps them, for a game that
+     keeps them as values — a factory in one module, the wrapping in the declaration file. ]]
+local checkEquip: nw.Check<Kit> = function(_ctx: nw.Ctx, request: Kit)
+	return nw.allow(request)
+end
+
+local makeEquip: nw.Factory<Kit> = function(_config: any)
+	return checkEquip
+end
+
+local _fromFactory: nw.Policy<Kit> = nw.policy(makeEquip)
+
+--[[ `nw.Audience<S>`: what `nw.audience.*` are. The scope parameter is what gives or withholds
+     `broadcast`, and both spellings have to name it. ]]
+local _all: nw.Audience<"everyone"> = nw.audience.everyone
+local _mine: nw.Audience<"subset"> = nw.audience.owner
+local _close: nw.Audience<"subset"> = nw.audience.nearby(64)
+
+--[[ `nw.Store`: what every `nw.store.*` constructor returns and `replicate` takes. ]]
+local _plain: nw.Store = nw.store.of(held)
+local _fromAtom: nw.Store = nw.store.charm(function()
+	return held
+end)
+
+--[[ `nw.Observer`: the function `nw.observe` takes, for a game that builds one elsewhere. ]]
+local logRefusals: nw.Observer = function(rejection: nw.Rejection)
+	local _where: nw.Stage = rejection.stage
+end
+
+local _detach: () -> () = nw.observe(logRefusals)
+
+--[[ `nw.Snapshot`, `nw.Rules`, `nw.Limits`, `nw.Described`: the settings both ways. A game that
+     maps its own log level onto netweave's builds a `Rules` and hands it over; one with a
+     diagnostics screen reads the snapshot and the descriptions back. ]]
+local quiet: nw.Rules = { budget = "off", queue = "warn" }
+local roomy: nw.Limits = { queueCapacity = 1024 }
+local applied: nw.Snapshot = nw.configure({ rules = quiet, limits = roomy })
+local _inForce: nw.Severity = applied.rules.budget
+local _capacity: number = applied.limits.queueCapacity
+
+local snapshot: nw.Snapshot = nw.config.snapshot()
+local _again: nw.Severity = snapshot.rules.queue
+
+for _, row: nw.Described in nw.config.describe() do
+	local _rule: string = row.rule
+	local _now: nw.Severity = row.severity
 end
 
 return nil

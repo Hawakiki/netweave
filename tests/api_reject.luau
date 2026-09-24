@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 24
+-- netweave:expect 36
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -269,10 +269,58 @@ end)
 	and because nothing in `tests/` had ever written `Views<` — the erasure removes diagnostics, so
 	no rejection count could see it and no `_ok` file could either.
 
-	**If the count moves to 25, the hazard is gone**: delete this section, raise the header, and take
-	the caution off `View.Views` and `DESIGN-API.md` §7. That is the only way this file is allowed to
-	hold code that does not error.
+	**If the two statements below start erroring, the hazard is gone**: delete this section, lower the
+	header by two, and take the caution off `View.Views` and `DESIGN-API.md` §7. That is the only way
+	this file is allowed to hold code that does not error. ~~If the count moves to 25~~ — the count is
+	the wrong instrument for it, because a case added anywhere else moves it too, which is what
+	happened when the channel record's fields became `read`.
 ]]
+--[[
+	**The negative controls for the three types `PLAN-M5` phase 2 added** (acceptance 2). `api_ok`
+	annotates `nw.Policy<Kit>`, `nw.Snapshot` and `nw.Observer` and uses each; these are the same
+	three annotations given something that is not one, because a type that accepts everything is a
+	name rather than a type.
+]]
+local _notAPolicy: nw.Policy<{ x: number }> = function() end -- netweave:reject Configured<{ x: number }>
+local _notASnapshot: nw.Snapshot = { rules = "quiet", limits = {} } -- netweave:reject but got 'string'
+local _notAnObserver: nw.Observer = function(_rejection: number) end -- netweave:reject '(Rejection) -> ()'
+
+--[[
+	**A misspelt key is refused, and so is a key of the wrong type** (M4 report finding 45).
+
+	Each class used to forbid a hand-picked list of keys belonging to *other* classes and check nothing
+	else, so `maxbytes = 4`, `bursts = 50`, `authorise`, `Rate`, `timeOut` and `rate_` all compiled —
+	the runtime ignored the key and the author believed a ceiling or a depth was set. Twenty-two such
+	declarations produced one diagnostic in the M4 probe; they produce fifteen now. Each class passes
+	the keys it takes and the walk reports the rest: a key of another class keeps that class's reason,
+	anything else is a spelling and the message lists what the class does take.
+]]
+local _typoKey = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow, maxbytes = 4 }) -- netweave:reject has no `maxbytes`
+local _wrongClassKey =
+	nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow, store = nw.store.of({}) }) -- netweave:reject forbids `store`
+local _typoValue = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow, maxBytes = "4" }) -- netweave:reject takes `maxBytes` as a number
+local _typoBurst = nw.intent({ data = t.struct({ x = t.u8 }), rate = 60, burst = "60" }) -- netweave:reject takes `burst` as a number
+local _typoUnreliable =
+	nw.event({ data = t.struct({ x = t.u8 }), audience = nw.audience.everyone, unreliable = "yes" }) -- netweave:reject takes `unreliable` as a boolean
+local _typoOnEvent =
+	nw.event({ data = t.struct({ x = t.u8 }), audience = nw.audience.everyone, ratelimit = 5 }) -- netweave:reject has no `ratelimit`
+
+--[[
+	**A channel's fields are `read`, so switching a guarantee off takes a cast** (M4 report finding 6).
+
+	`Inbound` reads `authorize`, `rate` and `maxBytes` per packet and treats a nil `authorize` as
+	allow, so each of these was one typed line that took G1 or G2 off — and a reviewer grepping for
+	`:: any` found nothing, because none was needed. The three below are the three the transport
+	reads; `Channel.Channel` says why the record itself is not frozen at seal.
+]]
+local guarded = nw.namespace("guarded", {
+	fire = nw.command({ data = t.struct({ x = t.u8 }), rate = 10, authorize = allow }),
+})
+
+guarded.channels.fire.authorize = nil -- netweave:reject Property authorize of table 'Channel<"command", "none", { x: number }, nil, nil>' is read-only
+guarded.channels.fire.rate = 1000000000 -- netweave:reject Property rate of table 'Channel<"command", "none", { x: number }, nil, nil>' is read-only
+guarded.channels.fire.maxBytes = 1000000000 -- netweave:reject Property maxBytes of table 'Channel<"command", "none", { x: number }, nil, nil>' is read-only
+
 local canary = nw.namespace("canary", {
 	fire = nw.command({ data = t.struct({ x = t.u8 }), rate = 10, authorize = allow }),
 })

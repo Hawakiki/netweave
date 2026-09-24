@@ -36,7 +36,10 @@ local function walk(dir: string)
 			walk(path)
 		elseif string.match(path, "%.luau?$") then
 			checked += 1
-			local ok, err = pcall(luau.compile, fs.readFile(path))
+			local source = fs.readFile(path)
+			local ok, err = pcall(function()
+				return luau.compile(source)
+			end)
 			if not ok then
 				failed += 1
 				print(`  {color("red", "SYNTAX")} {path}`)

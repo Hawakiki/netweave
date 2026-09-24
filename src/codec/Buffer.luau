@@ -55,7 +55,11 @@ local incomingCursor = 0
 --[[ The end of the *packet*, not of the batch. A corrupt inner length must not read into the
      next packet's bytes, let alone off the end of the buffer. ]]
 local incomingLimit = 0
-local incomingInstances: { Instance } = {}
+--[[ `{ unknown }`, not `{ Instance }`: this is the sidecar a peer sent, and what it holds is what
+     the read phase exists to check. `FireServer(buffer, { {} })` puts a table in it, and an
+     annotation asserting otherwise made `Serdes.isInstance` read as a contradiction of the signature
+     rather than as the narrowing it is (M4 report finding 50). ]]
+local incomingInstances: { unknown } = {}
 local incomingInstanceCursor = 0
 local rejection: string? = nil
 
@@ -778,8 +782,14 @@ end
 	@return buffer -- an exact-size copy
 	@return { Instance }
 
-	Hands over what has been written and resets. The copy is unavoidable: the growable buffer is
-	larger than its contents, and a remote must not carry the slack.
+	Hands over what has been written and empties the buffer. The copy is unavoidable: the growable
+	buffer is larger than its contents, and a remote must not carry the slack.
+
+	:::note
+	The buffer itself stays, at the size it grew to, so a record saved after a `take` starts the
+	next frame with the capacity the last one needed. A destination that once sent a large batch
+	keeps a buffer that size until [Outbound.forget] drops the record.
+	:::
 ]=]
 function Codec.take(): (buffer, { Instance })
 	blockDepth = 0
@@ -792,13 +802,87 @@ function Codec.take(): (buffer, { Instance })
 	local instances = (table.create(outgoingInstanceCount) :: any) :: { Instance }
 	table.move(outgoingInstances, 1, outgoingInstanceCount, 1, instances)
 
-	Codec.load(nil)
+	--[[
+		Emptied, not replaced. This used to be `load(nil)`, which put a fresh 64-byte buffer here,
+		so the record `Outbound.flush` saved afterwards regrew through every doubling each frame to
+		reach the size it had the frame before — five `buffer.create` and copies per destination per
+		frame at 1.5 KB, while the comment at the call site said the record kept what it had
+		(SECURITY-REPORT-M4 76; `bench/residue` rung 76). The sidecar is cleared for the same reason
+		and one more: an `Instance` held past its frame is a reference the game cannot see.
+	]]
+	table.clear(outgoingInstances)
+	outgoingUsed = 0
+	outgoingInstanceCount = 0
+
 	return packed, instances
 end
 
 -- ---------------------------------------------------------------------------------------------
 -- Incoming
 -- ---------------------------------------------------------------------------------------------
+
+--[=[
+	@interface Read
+	@within CodecBuffer
+	.buffer buffer
+	.cursor number
+	.limit number
+	.instances { Instance }
+	.instanceCursor number
+	.rejection string?
+
+	Where the *read* side is, as a record — the incoming counterpart of [CodecBuffer.Save].
+]=]
+export type Read = {
+	buffer: buffer,
+	cursor: number,
+	limit: number,
+	--[[ Wire data, so `{ unknown }`; see `incomingInstances`. ]]
+	instances: { unknown },
+	instanceCursor: number,
+	rejection: string?,
+}
+
+--[=[
+	@within CodecBuffer
+	@function saveRead
+	@return Read
+
+	Parks the read side so something else may read, and [CodecBuffer.loadRead] puts it back.
+
+	One caller: `nw.validate` round-trips a value through the codec to hand back a schema-shaped
+	copy, and a handler may call it *while a batch is being read*. Without this, that read would
+	move the batch's cursor and the packets behind it would decode from the wrong offset.
+
+	:::caution
+	It allocates a record. That is affordable exactly once, on the escape hatch it exists for; the
+	receive path never needs it, because a payload that decoded is valid by construction.
+	:::
+]=]
+function Codec.saveRead(): Read
+	return {
+		buffer = incoming,
+		cursor = incomingCursor,
+		limit = incomingLimit,
+		instances = incomingInstances,
+		instanceCursor = incomingInstanceCursor,
+		rejection = rejection,
+	}
+end
+
+--[=[
+	@within CodecBuffer
+	@function loadRead
+	@param saved Read
+]=]
+function Codec.loadRead(saved: Read)
+	incoming = saved.buffer
+	incomingCursor = saved.cursor
+	incomingLimit = saved.limit
+	incomingInstances = saved.instances
+	incomingInstanceCursor = saved.instanceCursor
+	rejection = saved.rejection
+end
 
 --[=[
 	@within CodecBuffer
@@ -808,7 +892,7 @@ end
 
 	Points the reader at a freshly arrived batch and clears any previous rejection.
 ]=]
-function Codec.beginRead(source: buffer, instances: { Instance }?)
+function Codec.beginRead(source: buffer, instances: { unknown }?)
 	incoming = source
 	incomingCursor = 0
 	incomingLimit = buffer.len(source)
@@ -1149,12 +1233,20 @@ end
 --[=[
 	@within CodecBuffer
 	@function readInstance
-	@return Instance? -- nil when the sidecar is exhausted
+	@return unknown -- nil when the sidecar is exhausted, and whatever the peer put there otherwise
 
-	Consumes the next instance in write order. A packet that is skipped must skip its instances
-	too, or every later packet reads the wrong ones.
+	Consumes the next entry in write order. A packet that is skipped must skip its instances too, or
+	every later packet reads the wrong ones.
+
+	:::caution
+	**`unknown`, not `Instance?`.** A sidecar entry is a client argument like any other:
+	`FireServer(buffer, { {} })` puts a table there, and `value:IsA(class)` on a table raises on the
+	receive path, which is guarantee G4 broken by the one piece of wire data that does not travel in
+	the buffer. `Serdes` checks it with `isInstance` before asking anything else, and this type is
+	what makes that check the narrowing rather than a contradiction (M4 report finding 50).
+	:::
 ]=]
-function Codec.readInstance(): Instance?
+function Codec.readInstance(): unknown
 	incomingInstanceCursor += 1
 	return incomingInstances[incomingInstanceCursor]
 end

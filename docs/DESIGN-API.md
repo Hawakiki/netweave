@@ -21,7 +21,7 @@ That choice narrows the audience, and pretending otherwise would set the wrong e
 | | Fit |
 |---|---|
 | Writes `--!strict`, has used ByteNet/Blink/Zap | **the target.** The declaration is no longer than ByteNet's, and the rate limits and authorization checks they already scatter by hand move into one reviewable place. |
-| Does not use `--!strict`, does not know the solver setting | **not the target.** Half the guarantees are type errors; without the new solver they are nothing, and the user sees analysis errors inside code they did not write (§7). |
+| Does not use `--!strict`, does not know the solver setting | **not the target.** Half the guarantees are type errors; without the new solver they are nothing, and the user sees analysis errors inside code they did not write (§7) — measured 2026-09-11 with luau-lsp 1.69.0 and `--flag:LuauSolverV2=false`: **390 errors inside `src/`**, `This syntax is not supported` on every `type function` and `read keyword is illegal here` on every read-only field, while `tests/api_reject.luau` yields 76 errors and none of its 24 declared ones. |
 
 Blink and Zap serve anyone who can run a CLI. netweave asks for a typed codebase first. That is
 a smaller slice of the ecosystem, chosen on purpose.
@@ -334,6 +334,17 @@ This is the one place where merging is semantically safe. `RESEARCH §3.7-E` arg
 unreliable traffic is a semantic error in general — losing one datagram loses N events — and
 `intent` is the exception that proves it, because losing a superseded input is free.
 
+**And since `PLAN-M5` phase 7 the client side means it too.** Measured writing the tutorial: a
+`send` in every `RenderStepped` against `rate = 30` was forty refusals a second at stage `budget`,
+reported on the server and invisible on the client, while the handler saw one value a tick anyway —
+wasted bytes and a refusal count that reads as an attack. The client view now holds the newest value
+per intent channel and pushes it at the declared rate through the same token bucket the server runs,
+keyed by channel rather than by sender (`src/transport/Pacer.luau`). A held value is superseded,
+never dropped and never reported; `nw.diagnostics().paced` counts what was held. `bench/pace.luau`
+is the number: sixty sends a second for three seconds, before and after. `signal` and `command` are
+not paced, because there every packet is a packet, and the server's budget stays the enforcement
+either way — the pacer is the courtesy that makes it quiet on honest traffic (D-6 of that plan).
+
 ### Internally there are three primitives, not six
 
 ```
@@ -523,6 +534,29 @@ return policy
 
 Named values, so they are reusable and unit-testable without a network. `nw.all` composes.
 
+**The factory runs on both sides, and since `PLAN-M5` phase 7 there is a third piece for what may
+run on one.** A declaration file is required by the client too, so a factory that reaches for
+`ServerStorage` crashes the client at load; a first reader ranked that third among the mistakes
+they made (`docs/tutorial/mistakes.md`). The factory may return a second function, the **server
+stage**: netweave runs it once on the server when the protocol is sealed, before any packet
+decodes, and discards it on the client. A policy attached to two channels runs its stage once; a
+composed policy's stages are its members'; a stage that raises or yields fails the seal with the
+channel named, because a check that ran before its stage did would be a policy deciding on nothing.
+The structural idea is still Flamework's two-stage middleware (`RESEARCH §3.5-S3`); what is added is
+a stage that knows which side it is on, which Flamework gets from `createServer` and a shared
+declaration file cannot (D-5 of that plan).
+
+```lua
+policy.canAfford = nw.policy(function()
+    local wallet: Wallet? = nil
+    return function(ctx, offer)                                  -- per request, server only
+        return (wallet :: Wallet).goldOf(ctx.player) >= offer.gold and nw.allow() or nw.deny("poor")
+    end, function()                                              -- once at seal, server only
+        wallet = require(game:GetService("ServerStorage").Wallet)
+    end
+end)
+```
+
 ## 6. Trust
 
 `Untrusted<T>` records provenance in the type: this value came off the wire.
@@ -601,6 +635,25 @@ misdescribed the entire value and allocated one per packet.
 **Server-authored data uses a cast**, `(value :: any) :: nw.Trusted<T>`, pinned in
 `tests/api_ok.luau`. Deliberately a cast rather than an `nw.trust()` helper, for the same reason
 there is no `nw.untrust`: a function gets reached for reflexively and a cast does not.
+
+### `nw.validate` is still a way to launder the brand, and that is open
+
+`nw.validate(Schema, value)` produces `Trusted<T>`, and `value` is typed `any` — so
+`nw.validate(Schema, untrusted)` is the `nw.untrust` this section refused to ship, spelled as a call
+rather than a cast, and a reviewer grepping for `:: nw.Trusted` does not find it (M4 report
+finding 5).
+
+Two halves. The one about *keys* is closed: `validate` round-trips the value through the codec, so
+what comes back is a schema-shaped copy and a field the schema does not name cannot ride inside a
+`Trusted<T>` whose type says it is not there. The one about the *brand* is open, and the fix was
+written and reverted rather than skipped: an `Unbranded<V>` type function on the value parameter,
+walking an intersection for `__nwUntrusted` and `__nwTrusted`, makes `tests/api_ok.luau` report
+**"Code is too complex to typecheck"** with 709 diagnostics behind it, because every call site then
+solves a free generic and feeds it to a second type function beside `TrustedPayload`. The measurement
+is in `src/api/Trust.luau` beside the code.
+
+So: **do not pass a channel payload to `nw.validate`.** It arrived with its schema already run, and
+its type already says what it is. Narrow it with a policy on the channel instead.
 
 ### The limits, stated plainly
 
@@ -731,6 +784,39 @@ pinned as a canary in `tests/api_reject.luau`, and the type is documented in `sr
 rather than removed, because a game that has already written the annotation would otherwise lose
 its type outright.
 
+**Cast the namespace where you pass it.** A module that takes the namespace as a parameter —
+`function wire(ns: nw.Views<typeof(combat.channels)>)` — has to be called
+`wire(combat :: nw.Views<typeof(combat.channels)>)` rather than `wire(combat)`. Passed bare, on a
+namespace of about nine channels, the payload of a handler written *earlier in the file* becomes
+`unknown`: a handler that was typed stops being typed because of a call written later
+(`spike/declare/passed.luau`, Q6; `PLAN-M5` phase 1). It is not the brand and not the
+self-reference in the parameter's type — typing the parameter by the channel table's own local
+changes nothing, and a five-channel namespace does not reproduce it — so there is nothing in
+`View` to fix; it is an inference-order effect with a size threshold. The cast is one token and it
+holds, which is why the tutorial writes it.
+
+### One bad channel is not one bad channel, and where to look
+
+A channel whose declaration the type layer refuses — no `rate`, a `data` that is not a schema, an
+`any` request type composed through `nw.all` — reports at its own line, which is right, and then
+reports again at the `nw.namespace(...)` line, which is not: the second diagnostic says the
+namespace's views do not have the keys of the channels that were **fine**, so a reader is sent
+looking for a fault in code that has none. Measured at thirteen diagnostics for one bad channel
+beside two good ones, two or three of them belonging to the good ones.
+
+`PLAN-M5` D-8 planned to have the view mappers hand a bad channel `unknown` on its own key and carry
+on. **They cannot, measured twice.** `ServerView` is one type function over the whole declaration
+table, and when one channel's `CommandPayload<…>` is left unreduced — which is what an `error()`
+inside it produces — the whole application is stuck and the body never runs, so there is nothing for
+it to give `unknown` to. The lever is upstream: the argument must not carry an unreduced application,
+which would mean the payload type functions returning `unknown` instead of erroring, and that trades
+away the analysis-time half of G2 and G3 for a tidier console.
+
+So the guidance is how to read it: **the channel named inside the `ServerView<…>` type is the one to
+fix.** Its own diagnostic is above, at its own line, and it says what to write. The `any`-in-`nw.all`
+case was the one a game hit by accident, and it is gone — `PLAN-M5` phase 3 item 43 made an agnostic
+policy compose without `any`.
+
 ### The condition attached
 
 `type function` requires **`LuauSolverV2`**. The stock solver rejects the syntax outright.
@@ -763,17 +849,19 @@ check that depends on a tool's default is a check that changes when the tool doe
 `ctx` reaches every policy and every handler, so it must not be allocated per packet — that
 would break the zero-hot-path-allocation criterion on day one (`RESEARCH §3.6-A4`, `§3.6-B4`).
 
-### What a handler sees, and the one field that is `unknown`
+### What a handler sees
 
-A `:listen` handler's `ctx` is a table the view builds, so `ctx.now` is a `number`, `ctx.channel` a
-`string`, and `ctx.playr` is a typo the analyser catches. `player`, `character` and `humanoid` are
-`unknown`, because a `type function` body has only the `types` library and no way to reach `Player`,
-`Model` or `Humanoid`. They pass anywhere `unknown` is accepted — `publish(ctx.player, ...)` is the
-common case and works — and take a cast anywhere it is not:
+A `:listen` handler's `ctx` is `nw.Ctx`, the same type a policy takes:
 
 ```lua
-local player = ctx.player :: Player
+combat.server.equip:listen(function(ctx, chosen)
+    Inventory.equip(ctx.player, chosen.slot)   -- ctx.player is a Player
+    local pivot = ctx.character and ctx.character:GetPivot()
+end)
 ```
+
+So `ctx.player.UserId` type-checks, `ctx.character` narrows from `Model?`, and `ctx.playr` is a
+typo the analyser catches.
 
 ~~The whole context was `unknown`.~~ **Until M3 phase 7**, which is worse than it sounds: a handler
 could neither read through it nor annotate it, because `Ctx` is not a supertype of `unknown` and
@@ -781,9 +869,14 @@ could neither read through it nor annotate it, because `Ctx` is not a supertype 
 suite was written `function(_ctx, ...)` and none of them wanted the context. Writing the worked
 example is what found it — `ctx.player` is the first thing a real handler reaches for.
 
-A **policy** is a plain function typed `(ctx: Ctx, value: T) -> Verdict`, so `nw.Ctx` annotates
-normally there, and the example above does. The asymmetry is not a design; it is what a type
-function can and cannot name.
+~~`player`, `character` and `humanoid` stay `unknown`, because a `type function` body has only the
+`types` library and no way to reach `Player`, `Model` or `Humanoid`, so they take a cast wherever
+`unknown` is not accepted.~~ **Corrected in `PLAN-M5` phase 1: a type function cannot *name* a
+Roblox class, but it can be *handed* one.** A type function's arguments are types, so `Views<D>`
+instantiates the two view mappers with `Context.Ctx` and the shape arrives with its real classes.
+That route was already in the codebase, unnoticed: `nw.policy`'s own signature is how
+`{ player: Player, character: Model? }` reaches `Channel`'s type functions. The casts the worked
+example carried are gone.
 
 **One `ctx` per player, fields refreshed in place, valid only for the synchronous duration of
 the handler.** Retaining it is a defect:
@@ -798,6 +891,35 @@ end)
 
 A generation counter bumped when the handler returns makes expired access an error in Studio.
 The guard compiles out in production, so the cost is zero where it matters.
+
+**And since `PLAN-M5` phase 7, the worst case is reported in production too.** The case the guard
+exists for is a handler or a policy check that yields while another packet of the same player is
+dispatched: the record is refreshed under it, and every read it makes after resuming is that later
+request's. The same generation counter answers that with one integer compare around the call — read
+before, compared after — and a moved value is reported at stage `handler` or `authorize` with a
+constant reason that spells the fix: copy the fields you need before yielding, or declare a `query`,
+whose handler runs on a thread and a context of its own. The report comes after the damage, and a
+yield with no packet of that player in between is neither detected nor harmed; what changed is that
+"nothing on the receive path is silent" (`CLAUDE.md` §9) now holds for this path as well.
+`nw.keep(ctx)` was considered and not added: nothing in the suite or the trade example keeps more
+than `ctx.player` past a yield, and that is one line.
+
+### What one shared record costs, and what was added to pay for it
+
+The record is reused per player because a fresh one per packet is an allocation on the hot path, and
+that single decision is behind three separate things a game used to have to know. `PLAN-M5` D-5's rule
+was to fold what a game cannot decide and report what it can only get wrong, and this is the ledger:
+
+| The cost | What pays it |
+|---|---|
+| A policy factory runs at load, **on both sides**, so a server-only `require` inside one breaks the client | A policy factory may return a second function: the **server stage**, run once at `Namespace.seal()`, before any packet decodes and never on the client (§5). The seam a game wrote by hand is the library's |
+| `ctx` is refreshed under anything that yields | The generation compare above, reported at `handler` or `authorize` with the fix in the reason |
+| A `ctx` kept past its handler reads somebody else's request | Studio's guard raises on the read; production reports the case that matters. No `nw.keep`, because copying the one field you need is shorter than the call would be |
+
+The middle row is the one to read twice: it is the only place in netweave where a **report** was
+chosen over a **refusal**. A yield inside a handler is legal Luau on a path netweave cannot make
+atomic, so refusing it would mean refusing handlers that work; the report comes after the damage, and
+says so.
 
 ## 9. Rejections
 

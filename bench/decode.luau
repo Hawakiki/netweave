@@ -88,7 +88,7 @@ type Entity = {
 	animation: number,
 }
 
-local payload: { Entity } = table.create(ENTITY_COUNT)
+local payload: { Entity } = (table.create(ENTITY_COUNT) :: any) :: { Entity }
 
 for index = 1, ENTITY_COUNT do
 	payload[index] = {
@@ -322,7 +322,7 @@ type Result = { name: string, fastest: number, median: number, high: number }
      deterministic, so noise only ever adds. The median and the slowest are printed beside it so
      that claim can be checked rather than taken. ]]
 local function measure(rung: Rung): Result
-	local samples: { number } = table.create(REPEATS)
+	local samples: { number } = (table.create(REPEATS) :: any) :: { number }
 
 	for _ = 1, WARMUP do
 		rung.run()

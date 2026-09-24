@@ -204,6 +204,27 @@ do
 	equals("a quantised direction is three bytes", direction.fixedSize, 3)
 	check("and stays a unit vector", direction.root.unit == true)
 	equals("with the step on the component", (direction.root.element :: Ir.Node).step, 2 / 254)
+
+	--[[ A cframe's component carries its position; the rotation goes with it as three `i16` and two
+	     index bits where an enum's tag would go, so a lone compact cframe is a flag byte and twelve,
+	     against the bare twenty-four (`PLAN-M5` phase 5). ]]
+	equals("a bare cframe is twenty-four bytes", Ir.lower(t.cframe).fixedSize, 24)
+
+	local posed = Ir.lower(t.cframe(t.i16(-2048, 2048)))
+	equals("a compact cframe is six of position and six of rotation", posed.root.fixedSize, 12)
+	equals("plus two bits", posed.root.bits, 2)
+	check(
+		"assigned like an enum's tag",
+		posed.root.tagChunks ~= nil and #(posed.root.tagChunks :: { number }) == 2
+	)
+	equals("which is one flag byte on its own", posed.fixedSize, 13)
+
+	local posedFloat = Ir.lower(t.cframe(t.f32))
+	equals("and with a float position, eighteen and a byte", posedFloat.fixedSize, 19)
+
+	--[[ Inside a struct with a boolean, the two bits share the struct's byte. ]]
+	local carried = Ir.lower(t.struct({ pose = t.cframe(t.i16(-2048, 2048)), alive = t.boolean }))
+	equals("the bits pack into the struct's bitfield", carried.fixedSize, 13)
 end
 
 -- ---------------------------------------------------------------------------------------------

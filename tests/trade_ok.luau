@@ -37,12 +37,25 @@ local Pending = t.struct({
 	state = t.enum({ offered = true, accepted = true, declined = true }),
 })
 
-type Offer = { to: Player, items: { number }, gold: number }
-type Decision = { tradeId: number, accept: boolean }
+type Offer = t.PayloadOf<typeof(Offer)>
+type Decision = t.PayloadOf<typeof(Decision)>
 type Pending = t.PayloadOf<typeof(Pending)>
 
-local server = {} :: {
-	wallet: { goldOf: (Player) -> number }?,
+type Wallet = { goldOf: (Player) -> number, transfer: (number, number, number) -> () }
+
+--[[ ServerStorage.Wallet and ServerStorage.Market, stubbed: the example requires them, and the
+     stage below reaches the first from the server only. ]]
+local Wallet: Wallet = {
+	goldOf = function(_player: Player): number
+		return 1000
+	end,
+	transfer = function(_from: number, _to: number, _gold: number) end,
+}
+
+local Market = {
+	price = function(_itemId: number): number
+		return 5
+	end,
 }
 
 local pending: { [number]: Pending } = {}
@@ -58,13 +71,11 @@ local function playersOf(p: Pending): { Player }
 	return out
 end
 
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return if ctx.humanoid ~= nil then nw.allow() else nw.deny("dead")
-		end
-	end)
-end
+local alive = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: unknown)
+		return if ctx.humanoid ~= nil then nw.allow() else nw.deny("dead")
+	end
+end)
 
 local policy = {}
 
@@ -75,13 +86,13 @@ policy.notSelf = nw.policy(function()
 end)
 
 policy.canAfford = nw.policy(function()
+	local wallet: Wallet? = nil
+
 	return function(ctx: nw.Ctx, offer: Offer)
-		local wallet = server.wallet
-		if not wallet then
-			return nw.deny("wallet not attached")
-		end
-		local balance = wallet.goldOf(ctx.player)
+		local balance = (wallet :: Wallet).goldOf(ctx.player)
 		return if balance < offer.gold then nw.deny(`offers {offer.gold}, holds {balance}`) else nw.allow()
+	end, function()
+		wallet = Wallet
 	end
 end)
 
@@ -99,12 +110,12 @@ local trade = nw.namespace("trade", {
 	offer = nw.command({
 		data = Offer,
 		rate = 1,
-		authorize = nw.all(alive(Offer), policy.notSelf, policy.canAfford),
+		authorize = nw.all(alive, policy.notSelf, policy.canAfford),
 	}),
 	decide = nw.command({
 		data = Decision,
 		rate = 2,
-		authorize = nw.all(alive(Decision), policy.party),
+		authorize = nw.all(alive, policy.party),
 	}),
 	hover = nw.intent({
 		data = t.struct({ slot = t.u8(0, 7) }),
@@ -120,7 +131,7 @@ local trade = nw.namespace("trade", {
 		returns = t.u32(0, 1_000_000),
 		rate = 5,
 		timeout = 5,
-		authorize = alive(t.u16),
+		authorize = alive,
 	}),
 
 	incoming = nw.event({
@@ -151,21 +162,6 @@ export type Trade = nw.Views<typeof(trade.channels)>
 -- ServerScriptService/Trade.server.luau
 -- ---------------------------------------------------------------------------------------------
 
-local Wallet = {
-	goldOf = function(_player: Player): number
-		return 1000
-	end,
-	transfer = function(_from: number, _to: number, _gold: number) end,
-}
-
-local Market = {
-	price = function(_itemId: number): number
-		return 5
-	end,
-}
-
-server.wallet = Wallet
-
 local nextId = 0
 
 local function openTrade(from: Player, offer: nw.Trusted<Offer>): number
@@ -175,7 +171,7 @@ local function openTrade(from: Player, offer: nw.Trusted<Offer>): number
 end
 
 trade.server.offer:listen(function(ctx, offer)
-	local from = ctx.player :: Player
+	local from = ctx.player
 	local id = openTrade(from, offer)
 	trade.server.incoming:publish(offer.to, { tradeId = id, from = from.UserId })
 end)

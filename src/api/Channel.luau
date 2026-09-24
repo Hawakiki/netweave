@@ -87,32 +87,49 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	last three are filled in by the namespace and the registry, because an id depends on every
 	other channel in the program (`WIRE-FORMAT.md` §3).
 ]=]
+--[[
+	**Every field is `read`**, because the transport reads each of them per packet and a game that
+	writes one has switched a guarantee off.
+
+	`ns.channels.equip.authorize = nil`, `.rate = 1e9` and `.maxBytes = 1e9` all type-checked with no
+	cast, and `Inbound` treats a nil `authorize` as allow — so G1 and G2 came off in one typed line
+	that a reviewer grepping for `:: any` would not find (M4 report finding 6). They need the cast
+	now, which is the whole point: *a forgery you have to write is one a reviewer sees*.
+
+	~~And the record is frozen at seal.~~ **Deliberately not, and here is the cost that decided it.**
+	`handler` is written *after* declaration by `:listen`, and sealing is triggered by the first
+	packet or by `nw.protocol()` — so a game that prints its signature early and attaches a handler
+	afterwards would be raising on a legal sequence. Moving the handler to a side table removes that,
+	and costs a lookup on the per-packet dispatch path plus 94 assignments across six test rigs that
+	own their own channel tables. The typed route is the one the finding is about, and it is closed;
+	`Namespace.declare` freezes the `channels` *table* so a late key cannot be added either.
+]]
 export type Channel<C, A, T, R, U> = {
-	__class: C,
-	__audience: A,
-	__payload: T,
-	__response: R,
+	read __class: C,
+	read __audience: A,
+	read __payload: T,
+	read __response: R,
 	--[[ What a `replicate` channel names its subjects with, and `nil` for every other class — the
 	     only one that puts a subject on the wire is the only one whose listener is handed one. ]]
-	__subject: U,
+	read __subject: U,
 
-	class: Class,
-	primitive: Primitive,
-	rate: number?,
-	burst: number?,
-	maxBytes: number?,
-	timeout: number?,
-	authorize: Policy.Check<T>?,
-	audience: Audience.Audience<A>?,
-	data: Types.Descriptor,
-	returns: Types.Descriptor?,
-	codec: Serdes.Codec,
-	responseCodec: Serdes.Codec?,
+	read class: Class,
+	read primitive: Primitive,
+	read rate: number?,
+	read burst: number?,
+	read maxBytes: number?,
+	read timeout: number?,
+	read authorize: Policy.Check<T>?,
+	read audience: Audience.Audience<A>?,
+	read data: Types.Descriptor,
+	read returns: Types.Descriptor?,
+	read codec: Serdes.Codec,
+	read responseCodec: Serdes.Codec?,
 
-	key: string,
-	qualified: string,
-	id: number,
-	handler: any,
+	read key: string,
+	read qualified: string,
+	read id: number,
+	read handler: any,
 }
 
 --[[
@@ -136,10 +153,39 @@ export type Channel<C, A, T, R, U> = {
 	printing two structural table types and leaving the reader to diff them.
 
 	A type function body sees only the `types` library — not this module's locals — so the reasons
-	live inside `forbid` rather than in a constant table beside it.
+	live inside `permit` rather than in a constant table beside it.
 ]]
+--[[
+	A callable constructor's table half.
+
+	`t.u8`, `t.string`, `t.vector3` and `t.instance` are `Type<T> & ((…) -> Type<T>)` since
+	`PLAN-M5` phase 1 — an intersection, because that is the only spelling that checks the argument
+	*types* rather than only their count. To a `type function` an intersection is not a table, so
+	anything reading `__payload` off a schema has to take the table half out first.
+
+	`src/types/init.luau` carries the same walk. A `type function` cannot reference an outer local
+	and calling one across a `require` needs it exported, so the copy is the cheaper of the two
+	costs — and the two are tested by the same `_ok` files, which annotate a payload projected
+	through both.
+]]
+-- selene: allow(undefined_variable)
+type function carrierOf(ty)
+	if not ty:is("intersection") then
+		return ty
+	end
+
+	for _, part in ty:components() do
+		if part:is("table") and part:readproperty(types.singleton("__payload")) then
+			return part
+		end
+	end
+
+	return ty
+end
+
+-- selene: allow(undefined_variable)
 type function payloadOf(descriptor, field)
-	local schema = types.copy(descriptor)
+	local schema = carrierOf(types.copy(descriptor))
 	local name = field:value()
 
 	--[[ The same sentence twice, because the two failures are the same mistake seen from either
@@ -168,6 +214,7 @@ type function payloadOf(descriptor, field)
 	return payload
 end
 
+-- selene: allow(undefined_variable)
 type function propertyOf(spec, field)
 	local declaration = types.copy(spec)
 
@@ -182,6 +229,7 @@ type function propertyOf(spec, field)
 	return declaration:readproperty(types.singleton(field:value()))
 end
 
+-- selene: allow(undefined_variable)
 type function requireRate(spec, class)
 	local rate = propertyOf(spec, types.singleton("rate"))
 
@@ -203,14 +251,51 @@ type function requireRate(spec, class)
 	return rate
 end
 
-type function forbid(spec, class, field)
-	local name = field:value()
+--[[
+	**Every key a class takes, and nothing else.**
 
-	if not propertyOf(spec, field) then
-		return types.singleton(true)
+	~~`forbid` names the keys that belong to *another* class~~ — one call per forbidden key per class,
+	a hand-picked list, and it could not see a misspelling: `maxbytes = 4`, `bursts = 50`, `authorise`, `Rate`,
+	`timeOut`, `rate_` all compiled, the runtime ignored the key, and the author believed a ceiling or
+	a depth was set — one diagnostic in a probe file of twenty-two declarations (M4 report
+	finding 45). This is what `CheckedSettings` already did for `nw.configure`, on the surface the
+	design calls the security documentation.
+
+	So each class passes the keys it takes and this walks the declaration. A key that belongs to
+	another class gets that class's reason; anything else is a misspelling, and the message lists what
+	the class does take, because the fix is a spelling and the list is the shortest way to find it.
+
+	The value types come with it: `rate = "20"` was the one diagnostic the probe did produce, but
+	`burst`, `maxBytes`, `timeout` and `unreliable` took a string with no complaint, and `timeout` and
+	`store` were presence-only — `store = {}` compiled.
+
+	The list arrives as one comma-separated singleton because a type function takes types, and a
+	string is the cheapest type that carries a list.
+]]
+-- selene: allow(undefined_variable)
+type function permit(spec, class, allowed)
+	local declaration = types.copy(spec)
+
+	if not declaration:is("table") then
+		error(
+			"a channel is declared with a table of fields, written inline. Use "
+				.. "nw.signal({ data = ..., rate = 20 }) rather than a value built elsewhere and "
+				.. "passed in: the fields have to be visible here for the analyzer to read them."
+		)
 	end
 
-	local reason = {
+	local names = {}
+	local list = {}
+
+	for name in string.gmatch(allowed:value(), "[^,]+") do
+		names[name] = true
+		table.insert(list, name)
+	end
+
+	--[[ A key that belongs to another class keeps its own sentence, because that mistake and a
+	     misspelling are not the same mistake: one is a class chosen wrongly and the other is a letter.
+	     `forbid` is gone — this is where its reasons live now. ]]
+	local elsewhere = {
 		authorize = "A channel that authorizes is a command or a query; an intent and a signal "
 			.. "carry no authority by definition, and letting them approve requests would make "
 			.. "the class name a lie. If you need to approve it, it is a command.",
@@ -235,9 +320,43 @@ type function forbid(spec, class, field)
 			.. "audience decides who gets a value and nothing has to say which value it is.",
 	}
 
-	error(`nw.{class:value()} forbids \`{name}\`. {reason[name]}`)
+	--[[ What a number key is for, so `maxBytes = "4"` is caught where `maxbytes = 4` is. `rate` is
+	     checked by `requireRate`, which has its own sentence about G2. ]]
+	local numbers = { burst = true, maxBytes = true, timeout = true }
+
+	for key, property in declaration:properties() do
+		local name = key:value()
+
+		if not names[name] then
+			local because = elsewhere[name]
+
+			if because then
+				error(`nw.{class:value()} forbids \`{name}\`. {because}`)
+			end
+
+			error(
+				`nw.{class:value()} has no \`{name}\`. It takes {table.concat(list, ", ")} — check the `
+					.. `spelling, because a key that is ignored looks exactly like one that worked.`
+			)
+		end
+
+		local value = property.read
+
+		if value then
+			if numbers[name] and not value:is("number") then
+				error(`nw.{class:value()} takes \`{name}\` as a number.`)
+			end
+
+			if name == "unreliable" and not value:is("boolean") then
+				error(`nw.{class:value()} takes \`unreliable\` as a boolean: unreliable = true.`)
+			end
+		end
+	end
+
+	return types.singleton(true)
 end
 
+-- selene: allow(undefined_variable)
 type function requireData(spec, class, field, purpose)
 	local declared = propertyOf(spec, field)
 
@@ -254,6 +373,7 @@ end
 
 	Checks a `command` declaration and projects the payload out of its `data`.
 ]=]
+-- selene: allow(undefined_variable)
 export type function CommandPayload(spec)
 	local command = types.singleton("command")
 
@@ -267,11 +387,7 @@ export type function CommandPayload(spec)
 		)
 	end
 
-	forbid(spec, command, types.singleton("audience"))
-	forbid(spec, command, types.singleton("args"))
-	forbid(spec, command, types.singleton("returns"))
-	forbid(spec, command, types.singleton("timeout"))
-	forbid(spec, command, types.singleton("unreliable"))
+	permit(spec, command, types.singleton("data,rate,burst,maxBytes,authorize"))
 
 	return requireData(spec, command, types.singleton("data"), types.singleton("what the client sends"))
 end
@@ -280,15 +396,13 @@ end
 	@type IntentPayload<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function IntentPayload(spec)
 	local intent = types.singleton("intent")
 
 	requireRate(spec, intent)
 
-	forbid(spec, intent, types.singleton("authorize"))
-	forbid(spec, intent, types.singleton("audience"))
-	forbid(spec, intent, types.singleton("returns"))
-	forbid(spec, intent, types.singleton("timeout"))
+	permit(spec, intent, types.singleton("data,rate,burst,maxBytes,unreliable"))
 
 	return requireData(spec, intent, types.singleton("data"), types.singleton("the input being observed"))
 end
@@ -297,15 +411,13 @@ end
 	@type SignalPayload<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function SignalPayload(spec)
 	local signal = types.singleton("signal")
 
 	requireRate(spec, signal)
 
-	forbid(spec, signal, types.singleton("authorize"))
-	forbid(spec, signal, types.singleton("audience"))
-	forbid(spec, signal, types.singleton("returns"))
-	forbid(spec, signal, types.singleton("timeout"))
+	permit(spec, signal, types.singleton("data,rate,burst,maxBytes,unreliable"))
 
 	return requireData(spec, signal, types.singleton("data"), types.singleton("what the client sends"))
 end
@@ -314,6 +426,7 @@ end
 	@type QueryArgs<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function QueryArgs(spec)
 	local query = types.singleton("query")
 
@@ -330,9 +443,7 @@ export type function QueryArgs(spec)
 		error("nw.query needs `timeout`, in seconds. A request that never resolves is a leak.")
 	end
 
-	forbid(spec, query, types.singleton("data"))
-	forbid(spec, query, types.singleton("audience"))
-	forbid(spec, query, types.singleton("unreliable"))
+	permit(spec, query, types.singleton("args,returns,rate,burst,maxBytes,timeout,authorize"))
 
 	return requireData(spec, query, types.singleton("args"), types.singleton("the request"))
 end
@@ -341,6 +452,7 @@ end
 	@type QueryReturns<S> S
 	@within Channel
 ]=]
+-- selene: allow(undefined_variable)
 export type function QueryReturns(spec)
 	return requireData(
 		spec,
@@ -356,14 +468,9 @@ end
 
 	Shared by `state` and `event`: both are server-to-client, so both forbid a budget and a policy.
 ]=]
+-- selene: allow(undefined_variable)
 export type function OutboundPayload(spec, class)
-	forbid(spec, class, types.singleton("rate"))
-	forbid(spec, class, types.singleton("burst"))
-	forbid(spec, class, types.singleton("maxBytes"))
-	forbid(spec, class, types.singleton("authorize"))
-	forbid(spec, class, types.singleton("args"))
-	forbid(spec, class, types.singleton("returns"))
-	forbid(spec, class, types.singleton("timeout"))
+	permit(spec, class, types.singleton("data,audience,unreliable"))
 
 	return requireData(spec, class, types.singleton("data"), types.singleton("what the server sends"))
 end
@@ -381,17 +488,11 @@ end
 	read from, and a `subject` type, because replication is the only class where the wire has to say
 	*which* value this is.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ReplicatePayload(spec)
 	local class = types.singleton("replicate")
 
-	forbid(spec, class, types.singleton("rate"))
-	forbid(spec, class, types.singleton("burst"))
-	forbid(spec, class, types.singleton("maxBytes"))
-	forbid(spec, class, types.singleton("authorize"))
-	forbid(spec, class, types.singleton("args"))
-	forbid(spec, class, types.singleton("returns"))
-	forbid(spec, class, types.singleton("timeout"))
-	forbid(spec, class, types.singleton("unreliable"))
+	permit(spec, class, types.singleton("subject,data,audience,store"))
 
 	if not propertyOf(spec, types.singleton("subject")) then
 		error(
@@ -425,6 +526,7 @@ end
 	the id an `any` nobody can check. That is the only reason the type exists: without it the
 	listener would take one argument at analysis and two at runtime, which is worse than either.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ReplicateSubject(spec)
 	local declared = propertyOf(spec, types.singleton("subject"))
 
@@ -445,6 +547,7 @@ end
 	Projects the declared audience's scope, which is what decides whether `broadcast` exists on the
 	server view. Guarantee G3 is this type function and the branch it feeds in `src/api/View.luau`.
 ]=]
+-- selene: allow(undefined_variable)
 export type function OutboundScope(spec)
 	local audience = propertyOf(spec, types.singleton("audience"))
 
@@ -471,8 +574,10 @@ export type function OutboundScope(spec)
 	return scope
 end
 
+--[[ Asked of the type library rather than repeated here: a table with a string `kind` used to pass
+     both copies, so every invariant the constructors enforce was advisory (M4 report finding 7). ]]
 local function isType(value: any): boolean
-	return type(value) == "table" and type(value.kind) == "string"
+	return Types.isType(value)
 end
 
 local function requireType(spec: any, field: string, class: string): Types.Descriptor
@@ -813,6 +918,7 @@ function Channel.command<S>(spec: S): Channel<"command", "none", CommandPayload<
 		burst = checkedBurst(raw, "command", rate),
 		maxBytes = checkedMaxBytes(raw, "command"),
 		authorize = requirePolicy(raw, "command"),
+		stages = Policy.stagesOf(raw.authorize),
 	})
 end
 
@@ -959,6 +1065,7 @@ function Channel.query<S>(spec: S): Channel<"query", "none", QueryArgs<S>, Query
 		burst = checkedBurst(raw, "query", rate),
 		maxBytes = checkedMaxBytes(raw, "query"),
 		authorize = requirePolicy(raw, "query"),
+		stages = Policy.stagesOf(raw.authorize),
 		timeout = timeout,
 		returns = returns,
 		responseCodec = Serdes.fromSchema(returns),

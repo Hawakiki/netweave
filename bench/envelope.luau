@@ -135,7 +135,7 @@ local sink: Batch.Sink = {
 
 	answers = true,
 
-	admit = function(): (string?, string?)
+	admit = function(): (string?, Batch.Stage?)
 		return nil, nil
 	end,
 
@@ -276,10 +276,10 @@ do
 	--[[ Both flag columns use one schema, so they must produce identical bytes. That is the
 	     automatic-packing claim (`PLAN-M1` D-3) stated as a measurement rather than an assertion. ]]
 	write(channels.FlagIdiomaticUp, flags)
-	local idiomatic = buffer.len(Buffer.take())
+	local idiomatic = buffer.len((Buffer.take()))
 
 	write(channels.FlagNaiveUp, flags)
-	local naive = buffer.len(Buffer.take())
+	local naive = buffer.len((Buffer.take()))
 
 	equals("idiomatic and naive cost the same", idiomatic, naive)
 end

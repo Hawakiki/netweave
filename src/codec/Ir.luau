@@ -40,7 +40,10 @@ local Ir = {}
 local MAX_CHUNK_BITS = 32
 local CHUNK_WIDTHS = { 4, 2, 1 }
 
-local ENCODING_SIZE: { [string]: number } = {
+--[[ Keyed by `Encoding` rather than `string`, so `ENCODING_SIZE[node.storage]` is `number?` and a
+     ninth encoding added to `Types.Encoding` and not to this table is a diagnostic rather than a
+     runtime nil (M4 report finding 47; `CLAUDE.md` §9, the hand-kept list). ]]
+local ENCODING_SIZE: { [Encoding]: number } = {
 	u8 = 1,
 	u16 = 2,
 	u32 = 4,
@@ -119,6 +122,8 @@ export type Field = {
 	.lengthOffset number?
 	.count number? -- exact length, when the schema fixed one
 	.variants { string }?
+	.literal (string | boolean | number)? -- `literal`: the one value; nothing on the wire
+	.default (string | boolean | number)? -- `optional`: read where the bit is clear, and never written
 	.lookup { [string]: number }? -- variant name to wire index
 	.inner Node?
 	.element Node?
@@ -154,6 +159,8 @@ export type Node = {
 	lengthOffset: number?,
 	count: number?,
 	variants: { string }?,
+	literal: (string | boolean | number)?,
+	default: (string | boolean | number)?,
 	lookup: { [string]: number }?,
 	inner: Node?,
 	element: Node?,
@@ -664,10 +671,30 @@ function lower(descriptor: Descriptor): Node
 	elseif kind == "color3" then
 		return { kind = kind, bits = 0, fixedSize = 3, instances = 0 }
 	elseif kind == "cframe" then
+		local component = descriptor.element
+
+		if component then
+			--[[
+				The position as three of the component, like a vector; the rotation as a quaternion
+				with its largest component dropped — three `i16` and a two-bit index saying which,
+				in the enclosing bitfield where an enum's tag would go. Seven bytes of rotation
+				become six and two bits, against the twelve of the axis-angle vector below
+				(`PLAN-M5` phase 5; the M4 report's "compact cframe" row).
+			]]
+			local element = lower(component)
+
+			return {
+				kind = kind,
+				bits = 2,
+				fixedSize = (element.fixedSize :: number) * 3 + 6,
+				instances = 0,
+				element = element,
+			}
+		end
+
 		--[[
 			Position plus an axis-angle vector. Zap keeps a table of 24 common rotations and spends
-			one byte when a CFrame matches one; that is a real saving and a later optimisation, not
-			a correctness matter.
+			one byte when a CFrame matches one; the componented form above is the compact spelling.
 		]]
 		return { kind = kind, bits = 0, fixedSize = 24, instances = 0 }
 	elseif kind == "instance" then
@@ -695,6 +722,10 @@ function lower(descriptor: Descriptor): Node
 			variants = variants,
 			lookup = lookup,
 		}
+	elseif kind == "literal" then
+		--[[ Nothing on the wire: the value is in both peers' declarations, and the signature
+		     carries it so the two agree on which. ]]
+		return { kind = kind, bits = 0, fixedSize = 0, instances = 0, literal = descriptor.literal }
 	elseif kind == "union" then
 		--[[
 			A tag, and then whichever branch it names.
@@ -770,6 +801,7 @@ function lower(descriptor: Descriptor): Node
 			fixedSize = if inner.fixedSize == 0 then 0 else nil,
 			instances = if inner.instances == 0 then 0 else nil,
 			inner = inner,
+			default = descriptor.default,
 		}
 	elseif kind == "array" then
 		return lowerArray(descriptor)
@@ -808,7 +840,8 @@ local function assignBits(node: Node, scope: Scope, next: number): number
 	if kind == "boolean" then
 		node.chunkIndex, node.mask = locate(scope, next)
 		return next + 1
-	elseif kind == "enum" then
+	elseif kind == "enum" or kind == "cframe" then
+		--[[ A compact cframe's two index bits live where an enum's tag does. ]]
 		local chunks: { number } = sized(node.bits)
 		local masks: { number } = sized(node.bits)
 
@@ -1298,7 +1331,22 @@ function Ir.patch(layout: Layout): Layout
 		fixedSize = fixedSize,
 		maxSize = flagBytes + ceiling(root),
 		instances = root.instances,
-		framing = if fixedSize then "static" else "counted",
+
+		--[[
+			**Always `counted`, whatever the sizes say.**
+
+			~~`if fixedSize then "static" else "counted"`~~, copied from `lower` — and wrong here, for
+			a reason `lower` has no way to know: the same channel emits a *removal*, which is the flag
+			bytes and nothing else, and a change carrying values. Where a refused one ends cannot be
+			known from the schema, so the length prefix earns its byte (`docs/WIRE-FORMAT.md` §2,
+			`Batch.writeChange`).
+
+			`t.struct({ a = t.boolean, b = t.enum{x,y} })` patched reported `static` at one byte, and
+			`Channel.make` hardcoded `"counted"` beside it — so nothing read this and nothing was
+			broken, which is exactly how the next reader of `delta.layout.framing` gets an answer the
+			wire format contradicts (M4 report finding 42).
+		]]
+		framing = "counted",
 	}
 end
 

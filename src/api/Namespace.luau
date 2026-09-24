@@ -122,11 +122,43 @@ end
 	and the numbering needs every declaration. See `docs/WIRE-FORMAT.md` §3.
 	:::
 ]=]
-function Namespace.declare(name: string, channels: { [string]: any }): Namespace
+function Namespace.declare(name: string, channels: { [string]: any }, source: string?): Namespace
 	checkName(name)
 
 	if type(channels) ~= "table" then
 		error(`nw.namespace needs a table of channels, got {typeof(channels)}`, 2)
+	end
+
+	--[[
+		The declaration that cannot work, refused where it is written (`PLAN-M5` D-7).
+
+		A namespace the client cannot require can never agree: the protocol hash covers every
+		declaration on each side, so one declared under `ServerScriptService` or `ServerStorage` puts
+		a channel in the server's hash that no client's can contain, and every client is refused at
+		`protocol` from its first batch — "nothing works", with the cause one word in a console line.
+		The first mistake on `docs/tutorial/mistakes.md`, and not a matter of degree.
+
+		`source` is what `nw.namespace` read off `debug.info(2, "s")`: on Roblox the declaring
+		module's full name, under lune a path, so the two prefixes match only where they mean
+		something and a source of any other shape does nothing. Two prefixes and no more: a bundler or
+		a `loadstring` wrapper gives a source that matches neither, and the worst case is today's
+		behaviour.
+	]]
+	if
+		source ~= nil
+		and (
+			string.find(source, "ServerScriptService.", 1, true) == 1
+			or string.find(source, "ServerStorage.", 1, true) == 1
+		)
+	then
+		error(
+			`the namespace {name} is declared in {source}, which the client cannot require, so no client `
+				.. `could ever agree on the protocol and every one would be refused at "protocol" from its `
+				.. `first batch. Declare it in a module under ReplicatedStorage, required by both sides; `
+				.. `what is server-only is a policy's dependency, reached from inside the check, not the `
+				.. `declaration (docs/tutorial/step3-policies.md).`,
+			3
+		)
 	end
 
 	if sealed then
@@ -189,11 +221,24 @@ function Namespace.declare(name: string, channels: { [string]: any }): Namespace
 		)
 	end
 
+	--[[
+		A copy, frozen. The caller's table was kept by reference, so a key declared *after*
+		`nw.namespace` and before the seal was numbered too — a channel whose `qualified` is `""`,
+		refused later with a message about something else (M4 report finding 6). Frozen rather than
+		only copied, because the views are built from this table and a key added to it afterwards
+		would have a view and no id.
+
+		The records inside are not frozen, and `Channel.Channel` says at length why: `handler` is
+		written after declaration by `:listen`, sealing is triggered by the first packet, and the
+		typed route is closed by every field of that type being `read`.
+	]]
+	local declared = table.freeze(table.clone(channels))
+
 	local namespace: Namespace = {
 		name = name,
-		channels = channels,
-		server = View.build(channels, "server"),
-		client = View.build(channels, "client"),
+		channels = declared,
+		server = View.build(declared, "server"),
+		client = View.build(declared, "client"),
 	}
 
 	namespaces[name] = namespace
@@ -228,6 +273,11 @@ local protocol: Protocol? = nil
 --[[ Wire id to channel, built when the protocol is sealed. The receive path resolves through this
      once per packet, so it is a flat array-like table rather than a search. ]]
 local byId: { [number]: any } = {}
+
+--[[ The `replicate` channels in id order, frozen at seal; before it, and after a reset, an empty
+     frozen list rather than nil, so the tick never has to ask. ]]
+local NONE: { any } = table.freeze({} :: { any })
+local replicated: { any } = NONE
 
 --[=[
 	@within Namespace
@@ -265,11 +315,22 @@ function Namespace.seal(): Protocol
 
 	table.clear(byId)
 
+	--[[ Built here and kept, rather than on each ask: the tick asked once a frame and got a fresh
+	     array each time, for a list that cannot change once the ids are assigned
+	     (SECURITY-REPORT-M4 77; `bench/residue` rung 77). ]]
+	local mirrored: { any } = {}
+
 	for id, qualified in names do
 		local channel = byName[qualified]
 		channel.id = id
 		byId[id] = channel
+
+		if channel.class == "replicate" then
+			table.insert(mirrored, channel)
+		end
 	end
+
+	replicated = table.freeze(mirrored)
 
 	--[[ After the ids are assigned, not before: the signature is taken in id order, and a channel
 	     without an id has nothing to be in order by. ]]
@@ -317,28 +378,15 @@ end
 	@private
 
 	Every declared `replicate` channel, in id order, sealing the protocol if that has not happened
-	yet.
-
-	The replication tick needs the list once a frame and nothing else needs it at all, so it is
-	built on demand rather than kept — and it is short, because a game declares a handful of
-	replicated channels and thousands of subjects on them.
+	yet. The same frozen list every time: nothing can be declared after the seal, so it is built
+	there once.
 ]=]
 function Namespace.replicated(): { any }
 	if not protocol then
 		Namespace.seal()
 	end
 
-	local out = {}
-
-	for id = 1, #byId do
-		local channel = byId[id]
-
-		if channel and channel.class == "replicate" then
-			table.insert(out, channel)
-		end
-	end
-
-	return out
+	return replicated
 end
 
 function Namespace.channelById(id: number): any?
@@ -387,6 +435,76 @@ function Namespace.get(name: string): Namespace?
 	return namespaces[name]
 end
 
+local stagesRan = false
+
+--[=[
+	@within Namespace
+	@function runStages
+	@private
+
+	Runs every policy's server stage once — once per distinct function, so a policy attached to two
+	channels, or a member of two compositions, runs its stage a single time. Called by the transport
+	on the server after the seal and before the first packet decodes, never on a client, and a
+	second call is one boolean.
+
+	A stage that raises or yields is a startup error and is raised as one, with the channel named:
+	a check that ran before its stage did would be a policy deciding on nothing, and a seal parked
+	on a yield would be a server that never opens (`PLAN-M5` D-5).
+]=]
+function Namespace.runStages()
+	if stagesRan then
+		return
+	end
+
+	--[[ Marked before running, so a stage that raises is raised once — loud at startup — rather
+	     than on every batch that follows. ]]
+	stagesRan = true
+
+	local seen: { [() -> ()]: boolean } = {}
+
+	for _, name in order do
+		for _, channel in namespaces[name].channels do
+			local stages: { () -> () }? = channel.stages
+
+			if not stages then
+				continue
+			end
+
+			for _, stage in stages do
+				if seen[stage] then
+					continue
+				end
+
+				seen[stage] = true
+
+				--[[ On a thread of its own so a yield is seen rather than parked on: a stage that
+				     does not finish synchronously has not filled what the check will read. ]]
+				local thread = coroutine.create(stage)
+				local ok, failure = coroutine.resume(thread)
+
+				if not ok then
+					error(
+						`the server stage of a policy on {channel.qualified} raised: {tostring(failure)}. `
+							.. `It runs once at seal, before any packet decodes, so this is a startup error; `
+							.. `fix it there instead of letting the check run over nothing.`,
+						0
+					)
+				end
+
+				if coroutine.status(thread) ~= "dead" then
+					error(
+						`the server stage of a policy on {channel.qualified} yielded, and a stage has to `
+							.. `finish before the first packet decodes. Remove the yield — read what is `
+							.. `already loaded, or require the module rather than waiting for it — so the `
+							.. `check never runs over a value the stage has not filled.`,
+						0
+					)
+				end
+			end
+		end
+	end
+end
+
 --[=[
 	@within Namespace
 	@function sealed
@@ -413,8 +531,10 @@ function Namespace.reset()
 	table.clear(namespaces)
 	table.clear(order)
 	table.clear(byId)
+	replicated = NONE
 	protocol = nil
 	sealed = false
+	stagesRan = false
 end
 
 return Namespace

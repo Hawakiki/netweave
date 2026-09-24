@@ -53,6 +53,19 @@ local NO_FLAGS: Flags = table.freeze({}) :: any
 
 local UNIT_TOLERANCE = 1e-3
 
+--[[
+	A compact cframe's three kept quaternion components are at most 1/sqrt(2) in magnitude, so an
+	`i16` is scaled to exactly that bound.
+
+	And their squares sum to at most **3/4**, not to 1: the component that was dropped is the
+	largest, so it is at least 1/2, and the other three carry what is left. A reader that allowed 1
+	would accept a packing whose "largest" was not the largest — measured while writing
+	`spike/additions/f_quaternion.luau`, whose worst honest sum over 200,000 random rotations is
+	0.7417. The slack is what three half-steps of rounding can add to a sum that was exactly 3/4.
+]]
+local QUATERNION_SCALE = 32767 * math.sqrt(2)
+local QUATERNION_MAX_REST = 0.75 + 3 * (1 / QUATERNION_SCALE)
+
 --[[ `table.create` is `{unknown}`, and Luau arrays are invariant. Centralised so the cast is
      written once rather than at every call site. Same helper as `Ir.sized`. ]]
 local function sized(count: number): any
@@ -75,7 +88,7 @@ local function isFinite(value: number): boolean
 	return value == value and value ~= math.huge and value ~= -math.huge
 end
 
-local WRITE_NUMBER: { [string]: (value: number) -> () } = {
+local WRITE_NUMBER: { [Encoding]: (value: number) -> () } = {
 	u8 = Buffer.writeU8,
 	u16 = Buffer.writeU16,
 	u32 = Buffer.writeU32,
@@ -91,7 +104,7 @@ local WRITE_NUMBER: { [string]: (value: number) -> () } = {
 	between the two families once per node at closure-build time, from the layout, so nothing
 	branches per packet (`src/codec/Buffer.luau`, Blocks).
 ]]
-local PUT_NUMBER: { [string]: (value: number) -> () } = {
+local PUT_NUMBER: { [Encoding]: (value: number) -> () } = {
 	u8 = Buffer.putU8,
 	u16 = Buffer.putU16,
 	u32 = Buffer.putU32,
@@ -102,7 +115,7 @@ local PUT_NUMBER: { [string]: (value: number) -> () } = {
 	f64 = Buffer.putF64,
 }
 
-local READ_NUMBER: { [string]: () -> number } = {
+local READ_NUMBER: { [Encoding]: () -> number } = {
 	u8 = Buffer.readU8,
 	u16 = Buffer.readU16,
 	u32 = Buffer.readU32,
@@ -172,6 +185,9 @@ local writeF32 = Buffer.writeF32
 local readF32 = Buffer.readF32
 local writeU8 = Buffer.writeU8
 local readU8 = Buffer.readU8
+local putI16 = Buffer.putI16
+local writeI16 = Buffer.writeI16
+local readI16 = Buffer.readI16
 
 --[[
 	Whether the subtree currently being built sits inside a claimed block.
@@ -287,7 +303,7 @@ local function lengthWriter(node: Node): (count: number, label: string) -> ()
 		end
 	end
 
-	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
+	local family: { [Encoding]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
 	local write = family[node.lengthStorage :: Encoding]
 	local offset = node.lengthOffset :: number
 	local min = node.min :: number
@@ -350,7 +366,7 @@ local FRACTIONAL: { [string]: boolean } = { f32 = true, f64 = true }
 table.freeze(FRACTIONAL)
 
 local function numberWriter(node: Node): Writer
-	local family: { [string]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
+	local family: { [Encoding]: (value: number) -> () } = if blocked then PUT_NUMBER else WRITE_NUMBER
 	local storage = node.storage :: Encoding
 	local write = family[storage]
 	local offset = node.offset :: number
@@ -510,7 +526,9 @@ end
 	generator emits the *name* of the primitive, and until this file did the same, netweave could
 	not (`RESEARCH §3.11-GG`).
 ]]
-local STORAGE_CODE: { [string]: number } = {
+--[[ Keyed by `Encoding` for the reason `Ir.ENCODING_SIZE` gives: the `code == nil` guard below
+     exists for an encoding missing from this table, and the analyser can see it now. ]]
+local STORAGE_CODE: { [Encoding]: number } = {
 	u8 = 1,
 	u16 = 2,
 	u32 = 3,
@@ -543,7 +561,7 @@ type Row = {
 	scale: number,
 	unit: number,
 	integral: boolean,
-	storage: string,
+	storage: Encoding,
 	code: number,
 }
 
@@ -615,7 +633,10 @@ local function rowsOf(fields: { Field }): ({ Row }?, number)
 			scale = if step then 1 / step else 1,
 			unit = step or 1,
 			integral = node.whole == true,
-			storage = storage :: string,
+			--[[ `code == nil` above rejects a node with no storage, so this is narrowed by that guard
+			     rather than by the annotation; the solver does not carry the narrowing across the
+			     table literal. ]]
+			storage = storage :: Encoding,
 			--[[ Quantised codes are the plain ones plus five, so the chain keeps `u8` first and a field
 			     that is not quantised never reaches the three arms that are. ]]
 			code = if step then code + 5 else code,
@@ -1232,6 +1253,80 @@ function buildWriter(node: Node): Writer
 			u8(math.clamp(math.round(value.B * 255), 0, 255))
 		end
 	elseif kind == "cframe" then
+		local component = node.element
+
+		if component then
+			local axis = buildWriter(component)
+			local chunks = node.tagChunks :: { number }
+			local masks = node.tagMasks :: { number }
+			local i16: (value: number) -> () = if blocked then putI16 else writeI16
+
+			--[[
+				Smallest three. A unit quaternion's largest component is at least 1/2 in magnitude
+				and the other three are at most 1/sqrt(2), so with the largest dropped the rest fit
+				an `i16` scaled to that bound, and the sign of the dropped one is fixed positive by
+				negating the whole quaternion — the same rotation either way. The index of the one
+				left out is two bits in the bitfield.
+			]]
+			return function(value: any, flags: Flags)
+				local position = value.Position
+				axis(position.X, flags)
+				axis(position.Y, flags)
+				axis(position.Z, flags)
+
+				local direction, angle = value:ToAxisAngle()
+				local half = angle / 2
+				local s = math.sin(half)
+				local qx, qy, qz, qw = direction.X * s, direction.Y * s, direction.Z * s, math.cos(half)
+
+				local ax, ay, az, aw = math.abs(qx), math.abs(qy), math.abs(qz), math.abs(qw)
+				local largest = 0
+				local magnitude = ax
+
+				if ay > magnitude then
+					largest, magnitude = 1, ay
+				end
+
+				if az > magnitude then
+					largest, magnitude = 2, az
+				end
+
+				if aw > magnitude then
+					largest = 3
+				end
+
+				local sign = if (largest == 0 and qx < 0)
+						or (largest == 1 and qy < 0)
+						or (largest == 2 and qz < 0)
+						or (largest == 3 and qw < 0)
+					then -1
+					else 1
+
+				for bit = 1, 2 do
+					if band(rshift(largest, bit - 1), 1) == 1 then
+						local chunk = chunks[bit]
+						flags[chunk] = bor(flags[chunk], masks[bit])
+					end
+				end
+
+				if largest ~= 0 then
+					i16(math.clamp(math.round(qx * sign * QUATERNION_SCALE), -32767, 32767))
+				end
+
+				if largest ~= 1 then
+					i16(math.clamp(math.round(qy * sign * QUATERNION_SCALE), -32767, 32767))
+				end
+
+				if largest ~= 2 then
+					i16(math.clamp(math.round(qz * sign * QUATERNION_SCALE), -32767, 32767))
+				end
+
+				if largest ~= 3 then
+					i16(math.clamp(math.round(qw * sign * QUATERNION_SCALE), -32767, 32767))
+				end
+			end
+		end
+
 		local f32: (value: number) -> () = if blocked then putF32 else writeF32
 
 		return function(value: any, _flags: Flags)
@@ -1279,10 +1374,36 @@ function buildWriter(node: Node): Writer
 		end
 	elseif kind == "enum" then
 		return enumWriter(node)
+	elseif kind == "literal" then
+		local literal = node.literal
+
+		--[[ Checked though nothing is written, for the same reason a one-variant enum checks its
+		     name: sending the wrong constant is a bug worth naming where it happens. ]]
+		return function(value: any, _flags: Flags)
+			if value ~= literal then
+				error(
+					`[netweave] {tostring(value)} is not the literal {tostring(literal)} this field declares`
+				)
+			end
+		end
 	elseif kind == "optional" then
 		local chunk = node.chunkIndex :: number
 		local mask = node.mask :: number
 		local writeInner = buildWriter(node.inner :: Node)
+		local default = node.default
+
+		if default ~= nil then
+			--[[ The default is never sent: the reader hands it back for a clear bit, so writing it
+			     would spend the field's bytes on the value the other side already has. ]]
+			return function(value: any, flags: Flags)
+				if value == nil or value == default then
+					return
+				end
+
+				flags[chunk] = bor(flags[chunk], mask)
+				writeInner(value, flags)
+			end
+		end
 
 		return function(value: any, flags: Flags)
 			if value == nil then
@@ -2180,6 +2301,58 @@ function buildReader(node: Node): Reader
 			return Color3.fromRGB(readU8(), readU8(), readU8())
 		end
 	elseif kind == "cframe" then
+		local component = node.element
+
+		if component then
+			local axis = buildReader(component)
+			local chunks = node.tagChunks :: { number }
+			local masks = node.tagMasks :: { number }
+
+			return function(flags: Flags): any
+				local px, py, pz = axis(flags), axis(flags), axis(flags)
+
+				if not (isFinite(px) and isFinite(py) and isFinite(pz)) then
+					reject("non-finite cframe")
+					return CFrame.identity
+				end
+
+				local largest = 0
+
+				for bit = 1, 2 do
+					if band(flags[chunks[bit]], masks[bit]) ~= 0 then
+						largest = bor(largest, bit32.lshift(1, bit - 1))
+					end
+				end
+
+				local a = readI16() / QUATERNION_SCALE
+				local b = readI16() / QUATERNION_SCALE
+				local c = readI16() / QUATERNION_SCALE
+				local rest = a * a + b * b + c * c
+
+				--[[ Three components of a unit quaternion, none of them the largest, sum to at
+				     most 3/4; past that, with the step's slack, the bytes were not a rotation. ]]
+				if rest > QUATERNION_MAX_REST then
+					reject("cframe rotation is not a unit quaternion")
+					return CFrame.identity
+				end
+
+				local d = math.sqrt(math.max(0, 1 - rest))
+				local qx, qy, qz, qw
+
+				if largest == 0 then
+					qx, qy, qz, qw = d, a, b, c
+				elseif largest == 1 then
+					qx, qy, qz, qw = a, d, b, c
+				elseif largest == 2 then
+					qx, qy, qz, qw = a, b, d, c
+				else
+					qx, qy, qz, qw = a, b, c, d
+				end
+
+				return CFrame.new(px, py, pz, qx, qy, qz, qw)
+			end
+		end
+
 		return function(_flags: Flags): any
 			local px, py, pz = readF32(), readF32(), readF32()
 			local ax, ay, az = readF32(), readF32(), readF32()
@@ -2211,6 +2384,14 @@ function buildReader(node: Node): Reader
 		local class = node.class
 		local root = node.descendantOf
 
+		--[[ Both sentences once, here, rather than concatenated on each refusal: they are constants
+		     per schema, and the refusal is the path a peer takes by naming an instance of the
+		     wrong class, which costs it nothing (SECURITY-REPORT-M4-1; `bench/residue`). The
+		     root's name is read now, so a container renamed after the declaration is named here as
+		     it was declared. ]]
+		local notClass = if class then "instance is not a " .. class else nil
+		local notInside = if root then "instance is not inside " .. root.Name else nil
+
 		return function(_flags: Flags): any
 			local value = readInstance()
 
@@ -2239,8 +2420,13 @@ function buildReader(node: Node): Reader
 				return nil
 			end
 
-			if class and not value:IsA(class) then
-				reject("instance is not a " .. class)
+			--[[ The cast says what `isInstance` has just established: the sidecar arrives as
+			     `{ unknown }` since M4 report finding 50, and a `boolean`-returning check does not
+			     narrow it. Same shape as `Recipients.positionOf` one module over. ]]
+			local instance = value :: Instance
+
+			if notClass and not instance:IsA(class :: string) then
+				reject(notClass)
 				return nil
 			end
 
@@ -2255,23 +2441,30 @@ function buildReader(node: Node): Reader
 				mean the same thing and hold different objects, and a hash that moved for it would
 				force a client redeploy for a server-side edit.
 			]]
-			if root and not value:IsDescendantOf(root) then
-				reject("instance is not inside " .. root.Name)
+			if notInside and not instance:IsDescendantOf(root :: Instance) then
+				reject(notInside)
 				return nil
 			end
 
-			return value
+			return instance
 		end
 	elseif kind == "enum" then
 		return enumReader(node)
+	elseif kind == "literal" then
+		local literal = node.literal
+
+		return function(_flags: Flags): any
+			return literal
+		end
 	elseif kind == "optional" then
 		local chunk = node.chunkIndex :: number
 		local mask = node.mask :: number
 		local readInner = buildReader(node.inner :: Node)
+		local default = node.default
 
 		return function(flags: Flags): any
 			if band(flags[chunk], mask) == 0 then
-				return nil
+				return default
 			end
 
 			return readInner(flags)

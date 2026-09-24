@@ -38,6 +38,15 @@ local harness = require("./harness")
 local nw = require("../src/netweave")
 local t = require("../src/types")
 
+--[[ What this endpoint just wrote, handed back the way a *peer's* sidecar arrives: `{ unknown }`,
+     because that is what the receive path is typed to check since M4 report finding 50. The cast is
+     the loopback itself — these entries really are instances, and the point is that the reader does
+     not get to assume it. ]]
+local function takeAsWire(): (buffer, { unknown })
+	local packed, instances = Buffer.take()
+
+	return packed, instances :: any
+end
 local suite = harness.suite("hostile_runtime", 0.9)
 local check, equals, fail = suite.check, suite.equals, suite.fail
 
@@ -246,7 +255,7 @@ end
 --[[ Feed the current buffer in as one batch, and answer the two questions every case asks: did it
      raise, and did anything vanish. ]]
 local function feed(instances: { any }?): (boolean, buffer)
-	local packed, carried = Buffer.take()
+	local packed, carried = takeAsWire()
 	local survived = pcall(inbound.receive, packed, instances or carried, mallory)
 
 	return survived, packed
@@ -467,7 +476,7 @@ do
 	Batch.writePacket(Carried, { who = harness.instance("real", "Part"), n = 1 })
 	Batch.writePacket(Fixed, { a = 3, b = 4 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 
 	--[[ The bytes are honest and the count is honest. Only the entry is not. ]]
 	instances[1] = 12345 :: any
@@ -494,7 +503,7 @@ do
 
 	Batch.writePacket(bare, { who = harness.instance("real"), n = 1 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	instances[1] = "not an instance" :: any
 
 	local survived = pcall(inbound.receive, packed, instances, mallory)
@@ -847,7 +856,7 @@ do
 
 	Batch.writePacket(Guarded, { n = 1 })
 
-	local packed, carried = Buffer.take()
+	local packed, carried = takeAsWire()
 	local survived = pcall(client.receive, packed, carried, nil)
 
 	check("a command arriving at a client does not raise", survived)
@@ -1014,7 +1023,7 @@ do
 
 	Batch.writePacket(Fixed, { a = 1, b = 2 })
 
-	local packed, carried = Buffer.take()
+	local packed, carried = takeAsWire()
 	local survived = pcall(exploding.receive, packed, carried, mallory)
 
 	check("a raise inside the read phase does not escape the receive path", survived)
@@ -1278,7 +1287,7 @@ do
 		Batch.writeChange(Replicated, index, nil, { n = index })
 	end
 
-	local changes, alsoCarried = Buffer.take()
+	local changes, alsoCarried = takeAsWire()
 	local stood = pcall(replicated.receive, changes, alsoCarried, mallory)
 
 	check("a batch of well-formed changes does not raise", stood)
@@ -1510,6 +1519,79 @@ do
 	check("while saying so", reportedAt("protocol") > 0)
 end
 
+do
+	--[[
+		A digest flood (PLAN-M5 D-7). The per-namespace digest is the one control packet whose body
+		is a list, so decoding it allocates a table per namespace — and a peer can send as many as it
+		likes before `admit` sees anything. The bound: a digest is decoded only for a peer that is
+		refused and not yet named, so the first one from a refused peer costs a decode and one named
+		report, and the next three hundred cost a table read each. Counted in reports, because a
+		decode that happened would have reported something, at `parse` or at `protocol`.
+	]]
+	reset()
+
+	local refused = Protocol.new({
+		hash = function(): number
+			return protocol.hash + 1
+		end,
+
+		announce = function() end,
+
+		namespaces = function()
+			return protocol.namespaces
+		end,
+
+		isServer = true,
+	})
+
+	local held = Baseline.new(true)
+
+	local guarded = Inbound.new({
+		resolve = Namespace.channelById,
+		admit = function(): string?
+			return nil
+		end,
+		isServer = true,
+		baselines = held,
+		agreement = refused,
+	})
+
+	--[[ A digest that differs from ours by one namespace's hash, so the first one names it. ]]
+	local theirs: { Protocol.NamespaceDigest } = {}
+	for index, entry in protocol.namespaces do
+		theirs[index] = { name = entry.name, hash = if index == 1 then entry.hash + 1 else entry.hash }
+	end
+
+	Batch.writeHello(protocol.hash)
+	local greeted = pcall(guarded.receive, (Buffer.take()), nil, mallory)
+	check("the mismatched hello does not raise", greeted)
+	local before = reportedAt("protocol")
+
+	for _ = 1, 300 do
+		Batch.writeDigest(theirs)
+	end
+
+	local flooded = pcall(guarded.receive, (Buffer.take()), nil, mallory)
+	check("three hundred digests do not raise", flooded)
+	equals("the first names the namespace and is reported once", reportedAt("protocol") - before, 1)
+	equals("and none of them is malformed", reportedAt("parse"), 0)
+	check(
+		"the verdict names the namespace",
+		string.find(refused.verdict(mallory) or "", `"{protocol.namespaces[1].name}"`, 1, true) ~= nil
+	)
+
+	--[[ A peer that agrees sends the same three hundred and pays nothing at all. ]]
+	refused.greet(mallory, protocol.hash + 1)
+	local agreedBefore = #reports
+
+	for _ = 1, 300 do
+		Batch.writeDigest(theirs)
+	end
+
+	pcall(guarded.receive, (Buffer.take()), nil, mallory)
+	equals("from an agreeing peer they are stepped over without a word", #reports - agreedBefore, 0)
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- One valid packet, so the rig is proved to be capable of delivering anything at all
 -- ---------------------------------------------------------------------------------------------
@@ -1567,7 +1649,7 @@ do
 	Batch.writeRequest(Asked, 7, { n = 1 })
 	Batch.writePacket(Fixed, { a = 3, b = 4 })
 
-	local packed, carried = Buffer.take()
+	local packed, carried = takeAsWire()
 	local survived = pcall(endpoint.receive, packed, carried, mallory)
 
 	check("the raise does not escape the batch", survived)

@@ -37,7 +37,7 @@ local WAIT_TIMEOUT = 30
 	@within Link
 	.send (reliable: boolean, destination: any, packed: buffer, instances: { Instance }) -> ()
 	.sendAll (reliable: boolean, packed: buffer, instances: { Instance }) -> ()
-	.receive ((packed: buffer, instances: { Instance }, sender: any?) -> ()) -> ()
+	.receive ((packed: buffer, instances: { unknown }, sender: any?) -> ()) -> () -- wire data on the way in
 
 	`destination` is the recipient on the server and ignored on the client, where there is only one
 	place to send. `sendAll` is server-only; on the client it is the same as `send`.
@@ -48,7 +48,7 @@ local WAIT_TIMEOUT = 30
 export type Link = {
 	send: (reliable: boolean, destination: any, packed: buffer, instances: { Instance }) -> (),
 	sendAll: (reliable: boolean, packed: buffer, instances: { Instance }) -> (),
-	receive: ((packed: buffer, instances: { Instance }, sender: any?) -> ()) -> (),
+	receive: ((packed: buffer, instances: { unknown }, sender: any?) -> ()) -> (),
 }
 
 local function remoteFolder(): Folder
@@ -132,7 +132,7 @@ function Link.roblox(): Link
 			end
 		end,
 
-		receive = function(handler: (packed: buffer, instances: { Instance }, sender: any?) -> ())
+		receive = function(handler: (packed: buffer, instances: { unknown }, sender: any?) -> ())
 			if isServer then
 				local function onServer(player: Player, packed: any, instances: any)
 					--[[ Both arguments come from a client and are whatever it chose to send. A

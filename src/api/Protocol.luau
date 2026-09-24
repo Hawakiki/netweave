@@ -60,7 +60,18 @@ export type Protocol = {
 	hash: number,
 	count: number,
 	names: { string },
+	--[[ One entry per namespace in name order, each hashing that namespace's channels alone, so a
+	     mismatch can be named (`PLAN-M5` D-7). The whole `hash` still decides. ]]
+	namespaces: { NamespaceDigest },
 }
+
+--[=[
+	@interface NamespaceDigest
+	@within Protocol
+	.name string
+	.hash number -- FNV-1a over the signatures of that namespace's channels, in id order
+]=]
+export type NamespaceDigest = { name: string, hash: number }
 
 --[[
 	The node attributes that reach the wire, listed rather than walked.
@@ -113,6 +124,18 @@ local function describe(node: Ir.Node, out: { string })
 		if value ~= nil then
 			table.insert(out, `{name}={tostring(value)};`)
 		end
+	end
+
+	--[[ With its type, because `tostring` folds `1` and `"1"` together and a peer declaring the
+	     string where this one declares the number is a peer that disagrees. ]]
+	if node.literal ~= nil then
+		table.insert(out, `literal={typeof(node.literal)}:{tostring(node.literal)};`)
+	end
+
+	--[[ Same again: a default is read on one side and never sent, so the two declarations meet
+	     only here. ]]
+	if node.default ~= nil then
+		table.insert(out, `default={typeof(node.default)}:{tostring(node.default)};`)
 	end
 
 	--[[ Variant order is the wire's tag order (`WIRE-FORMAT.md` §5), so it is written in the order
@@ -294,11 +317,82 @@ end
 	@return Protocol
 ]=]
 function Protocol.digest(names: { string }, byName: { [string]: any }): Protocol
+	--[[
+		One hash per namespace beside the whole, so a disagreement can be named (`PLAN-M5` D-7).
+
+		`names` is sorted, and a namespace's channels sort together — `a.x` < `a.y` < `ab.x`, because
+		`.` sorts before every letter — so one pass with a running group is enough, and the per-
+		namespace signature is the same block per channel that the whole hash is built from.
+	]]
+	local namespaces: { NamespaceDigest } = {}
+	local current: string? = nil
+	local parts: { string } = {}
+
+	local function close()
+		if current ~= nil then
+			--[[ The list is frozen below; the entries are not, because `table.freeze` gives them a
+			     read-only type that is not the `NamespaceDigest` a digest packet decodes into. ]]
+			table.insert(namespaces, { name = current, hash = fnv1a(table.concat(parts)) })
+		end
+	end
+
+	for _, qualified in names do
+		local dot = string.find(qualified, ".", 1, true)
+		local space = if dot then string.sub(qualified, 1, dot - 1) else qualified
+
+		if space ~= current then
+			close()
+			current = space
+			parts = {}
+		end
+
+		table.insert(parts, Protocol.signatureOf(byName[qualified]))
+	end
+
+	close()
+
 	return table.freeze({
 		hash = fnv1a(Protocol.signature(names, byName)),
 		count = #names,
 		names = table.freeze(names),
+		namespaces = table.freeze(namespaces),
 	}) :: any
+end
+
+--[=[
+	@within Protocol
+	@function difference
+	@param mine { NamespaceDigest } -- this peer's, sorted by name
+	@param theirs { NamespaceDigest } -- the other peer's, as its digest packet carried them
+	@return string? -- the first namespace the two disagree on, said from this peer's side; nil if none
+
+	Which namespace a protocol mismatch is in. The whole hash says *that* two builds disagree; this
+	says *where*, which is what the person at the console needs. One difference is named, the first
+	in name order, because a reason is one sentence.
+]=]
+function Protocol.difference(mine: { NamespaceDigest }, theirs: { NamespaceDigest }): string?
+	local i, j = 1, 1
+
+	while i <= #mine or j <= #theirs do
+		local a = mine[i]
+		local b = theirs[j]
+
+		if a and b and a.name == b.name then
+			if a.hash ~= b.hash then
+				return `the two disagree inside the namespace "{a.name}": a channel in it has another `
+					.. `name, class or schema on the peer`
+			end
+
+			i += 1
+			j += 1
+		elseif b and (not a or b.name < a.name) then
+			return `the peer declares a namespace "{b.name}" that this peer does not`
+		else
+			return `this peer declares a namespace "{(a :: NamespaceDigest).name}" that the peer does not`
+		end
+	end
+
+	return nil
 end
 
 --[=[
@@ -332,6 +426,10 @@ export type Config = {
 	hash: () -> number,
 	announce: (who: any?) -> (),
 	isServer: boolean,
+	--[[ This peer's per-namespace digest, read late for the same reason as `hash`. Optional so a
+	     rig that only tests the whole-hash verdict keeps its shape; without it a mismatch is never
+	     named, only detected. ]]
+	namespaces: (() -> { NamespaceDigest })?,
 }
 
 export type Agreement = {
@@ -339,6 +437,13 @@ export type Agreement = {
 	verdict: (who: any?) -> string?,
 	agreed: (who: any?) -> boolean,
 	forget: (who: any) -> (),
+	--[[ Whether a digest from this peer would change anything: refused, and not yet named. The
+	     transport asks before it decodes one, so a peer sending three hundred costs a table read
+	     for every one after the first (`PLAN-M5` D-7). ]]
+	wants: (who: any?) -> boolean,
+	--[[ The peer's per-namespace digest. Rewrites a refused peer's reason to name the namespace,
+	     once, and returns the new reason so the caller can report it; nil when nothing changed. ]]
+	digest: (who: any?, theirs: { NamespaceDigest }) -> string?,
 }
 
 --[=[
@@ -373,6 +478,9 @@ function Protocol.new(config: Config): Agreement
 	]]
 	local refusals: { [any]: string } = {}
 
+	--[[ Peers whose reason already names a namespace. A digest after that is not decoded. ]]
+	local named: { [any]: boolean } = {}
+
 	local function keyOf(who: any?): any
 		return if who == nil then SERVER else who
 	end
@@ -384,6 +492,7 @@ function Protocol.new(config: Config): Agreement
 
 			if hash == mine then
 				refusals[key] = nil
+				named[key] = nil
 				return nil
 			end
 
@@ -439,6 +548,44 @@ function Protocol.new(config: Config): Agreement
 
 		forget = function(who: any)
 			refusals[who] = nil
+			named[who] = nil
+		end,
+
+		wants = function(who: any?): boolean
+			local key = keyOf(who)
+			return refusals[key] ~= nil and not named[key]
+		end,
+
+		digest = function(who: any?, theirs: { NamespaceDigest }): string?
+			local key = keyOf(who)
+
+			if refusals[key] == nil or named[key] then
+				return nil
+			end
+
+			--[[ Marked before the comparison, so a digest that names nothing — two hashes that differ
+			     with every namespace agreeing cannot happen, but a malformed one can — is still the
+			     last one this peer gets to send us. ]]
+			named[key] = true
+
+			local digestOf = config.namespaces
+
+			if not digestOf then
+				return nil
+			end
+
+			local where = Protocol.difference(digestOf(), theirs)
+
+			if not where then
+				return nil
+			end
+
+			local reason = `{where}. Every packet between the two would decode as something else, so `
+				.. `the peer stays refused; redeploy both sides from the same declarations, and `
+				.. `nw.signature() prints what this one computed.`
+
+			refusals[key] = reason
+			return reason
 		end,
 	}
 end

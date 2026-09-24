@@ -17,6 +17,7 @@ local t = require("../src/types")
 
 local Namespace = nw.internal.namespaces
 local Observer = nw.internal.observer
+local Policy = require("../src/api/Policy")
 local Context = nw.internal.context
 local Transport = nw.internal.transport
 
@@ -197,6 +198,115 @@ do
 	refuses("configuring with a non-table", function()
 		(configured :: any)(9)
 	end, "table")
+end
+
+do
+	--[[
+		The server stage (`PLAN-M5` D-5): a factory's second return, run once on the server at seal.
+
+		The factory runs on both sides at load, so it is not where a server-only module is reached;
+		the stage is, and it is the seam the tutorial had a game write by hand, folded into the
+		library. Confirmed to fail on the pre-fix tree by absence: a second return was ignored, and
+		`Namespace.runStages` did not exist.
+	]]
+	Namespace.reset()
+
+	local ran = 0
+	local wallet: { goldOf: (any) -> number }? = nil
+
+	local canAfford = nw.policy(function()
+		return function(_ctx: nw.Ctx, offer: { gold: number })
+			local attached = wallet
+
+			if not attached then
+				return nw.deny("wallet not attached")
+			end
+
+			return if attached.goldOf(nil) >= offer.gold then nw.allow() else nw.deny("poor")
+		end, function()
+			ran += 1
+			wallet = {
+				goldOf = function()
+					return 100
+				end,
+			}
+		end
+	end)
+
+	--[[ Typed to the same payload as `canAfford`, because `nw.all` composes only identical
+	     `Policy<T>` (`PLAN-M5` phase 3, item 43). ]]
+	local plain = nw.policy(function()
+		return function(_ctx: nw.Ctx, _offer: { gold: number })
+			return nw.allow()
+		end
+	end)
+
+	equals("a factory's second return is the policy's stage", #Policy.stagesOf(canAfford), 1)
+	equals("and a factory without one has none", #Policy.stagesOf(plain), 0)
+	equals("nw.all carries its members' stages", #Policy.stagesOf(nw.all(plain, canAfford)), 1)
+
+	refuses("a second return that is not a function", function()
+		nw.policy(function()
+			return function()
+				return nw.allow()
+			end, 42 :: any
+		end)
+	end, "server stage")
+
+	--[[ Attached to two channels, one of them through `nw.all`: the stage is one function and runs
+	     once. Before it runs the check fails closed, which is what the tutorial's seam did by hand. ]]
+	nw.namespace("staged", {
+		buy = nw.command({ data = t.struct({ gold = t.u16 }), rate = 1, authorize = canAfford }),
+		sell = nw.command({
+			data = t.struct({ gold = t.u16 }),
+			rate = 1,
+			authorize = nw.all(plain, canAfford),
+		}),
+	})
+
+	local afford = (canAfford :: any).__nwCheck
+	equals("before the stage runs, the check has nothing and denies", afford(nil, { gold = 5 }).ok, false)
+	equals("and the stage has not run", ran, 0)
+
+	Namespace.runStages()
+	equals("after seal the stage ran once, not once per channel", ran, 1)
+	equals("and the check sees what it filled", afford(nil, { gold = 5 }).ok, true)
+
+	Namespace.runStages()
+	equals("a second call runs nothing", ran, 1)
+
+	Namespace.reset()
+	nw.namespace("staged", {
+		buy = nw.command({ data = t.struct({ gold = t.u16 }), rate = 1, authorize = canAfford }),
+	})
+	Namespace.runStages()
+	equals("a reset lets the next declaration's seal run it again", ran, 2)
+	Namespace.reset()
+
+	--[[ A stage that raises, and one that yields, are startup errors that name the channel. ]]
+	local broken = nw.policy(function()
+		return function()
+			return nw.allow()
+		end, function(): ()
+			error("the wallet module is missing")
+		end
+	end)
+
+	nw.namespace("broken", { buy = nw.command({ data = t.u8, rate = 1, authorize = broken }) })
+	refuses("a stage that raises fails the seal naming the channel", Namespace.runStages, "broken.buy")
+	Namespace.reset()
+
+	local parked = nw.policy(function()
+		return function()
+			return nw.allow()
+		end, function(): ()
+			coroutine.yield()
+		end
+	end)
+
+	nw.namespace("parked", { buy = nw.command({ data = t.u8, rate = 1, authorize = parked }) })
+	refuses("a stage that yields is refused rather than waited on", Namespace.runStages, "yielded")
+	Namespace.reset()
 end
 
 do
@@ -566,6 +676,50 @@ do
 end
 
 do
+	--[[
+		The declaration that cannot work, refused where it is written (`PLAN-M5` D-7). `source` is what
+		`nw.namespace` reads off `debug.info(2, "s")` — a module's full name on Roblox, a path under
+		lune — so under lune it is handed in, and `tests/roblox_runtime.luau` is where the real value is
+		measured to have this shape. Confirmed to fail on the pre-fix tree: `declare` took no source.
+	]]
+	Namespace.reset()
+
+	refuses("a namespace declared under ServerScriptService", function()
+		Namespace.declare(
+			"admin",
+			{ kick = nw.signal({ data = t.u8, rate = 1 }) },
+			"ServerScriptService.Admin"
+		)
+	end, "ReplicatedStorage")
+
+	refuses("or under ServerStorage", function()
+		Namespace.declare("admin", { kick = nw.signal({ data = t.u8, rate = 1 }) }, "ServerStorage.Net.Admin")
+	end, "ReplicatedStorage")
+
+	--[[ Named after its source, so the reader knows which file. ]]
+	refuses("naming the module", function()
+		Namespace.declare(
+			"admin",
+			{ kick = nw.signal({ data = t.u8, rate = 1 }) },
+			"ServerScriptService.Admin"
+		)
+	end, "ServerScriptService.Admin")
+
+	check("and nothing was declared by the refusals", Namespace.get("admin") == nil)
+
+	Namespace.declare("admin", { kick = nw.signal({ data = t.u8, rate = 1 }) }, "ReplicatedStorage.Net.Admin")
+	check("one under ReplicatedStorage is declared", Namespace.get("admin") ~= nil)
+
+	Namespace.reset()
+
+	--[[ Through the public entry, where the source is a lune path, which matches neither prefix. ]]
+	local declared = nw.namespace("lunePath", { ping = nw.signal({ data = t.u8, rate = 1 }) })
+	check("a lune path does nothing", declared ~= nil and Namespace.get("lunePath") ~= nil)
+
+	Namespace.reset()
+end
+
+do
 	Namespace.reset()
 
 	refuses("a namespace with a dot in its name", function()
@@ -678,6 +832,74 @@ do
 	end
 end
 
+--[[
+	**A hand-built table reaches neither a channel nor `nw.validate`** (M4 report finding 7).
+
+	Both asked the same shape test — a table with a string `kind` — so a forged descriptor declared a
+	channel whose ceiling the `maxBytes` policy was then measured against, and minted a `Trusted<T>`
+	out of nothing. Both ask the type library's own set now. `types_runtime` has the constructors'
+	half and the reason.
+]]
+do
+	local forged: any = { kind = "number", encoding = "u8", min = 0, max = 2 ^ 31 }
+
+	refuses("a channel declared with a forged schema", function()
+		(nw.signal :: any)({ data = forged, rate = 10 })
+	end, "netweave type")
+
+	local passes = nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+
+	refuses("a query whose returns is forged", function()
+		(nw.query :: any)({ args = t.u8, returns = forged, rate = 10, timeout = 5, authorize = passes })
+	end, "netweave type")
+
+	refuses("validating against a forged schema", function()
+		(nw.validate :: any)(forged, 5)
+	end, "netweave type")
+
+	--[[ And a clone of a real one, which is the shape a field-based brand would have let through. ]]
+	refuses("a channel declared with a clone of a real schema", function()
+		(nw.signal :: any)({ data = table.clone(t.u8 :: any), rate = 10 })
+	end, "netweave type")
+end
+
+--[[
+	**The declaration table is a frozen copy** (M4 report finding 6).
+
+	It was the caller's own table, kept by reference, so a key declared after `nw.namespace` and
+	before the seal was numbered too — a channel whose `qualified` was `""`, refused later with a
+	message about a different mistake. The views are built from this table, so a key added to it
+	afterwards would have a view and no id.
+]]
+do
+	Namespace.reset()
+
+	local declared = { fire = nw.signal({ data = t.struct({ x = t.u8 }), rate = 10 }) }
+	local ns = nw.namespace("frozen", declared)
+
+	check("the namespace does not hand back the table it was given", ns.channels ~= declared)
+	check("and what it hands back is frozen", table.isfrozen(ns.channels :: any))
+
+	local late = nw.signal({ data = t.struct({ y = t.u8 }), rate = 10 })
+	local added = pcall(function()
+		(ns.channels :: any).late = late
+	end)
+
+	check("a key added after declaration is refused", not added)
+
+	--[[ And the caller's own table stays writable, which is what makes the copy the fix rather than
+	     freezing what was passed in: a game may keep its declaration table for its own reasons. ]]
+	local theirs = declared :: any
+	theirs.own = late
+	check("while the caller's table is still theirs", theirs.own ~= nil)
+
+	Namespace.reset()
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- validate
 -- ---------------------------------------------------------------------------------------------
@@ -717,6 +939,39 @@ do
 	refuses("validating against something that is not a schema", function()
 		(nw.validate :: any)({ volume = 1 }, 1)
 	end, "netweave type")
+
+	--[[
+		**What comes back is a copy, holding exactly the keys the schema names** (M4 report finding 5).
+
+		The encoder ignores the rest, so returning the caller's own table handed back a `Trusted<T>`
+		with `isAdmin` still inside it, typed as though it were not there. `validate` writes the value
+		and reads it back, so the result is the decode of what the encoder wrote and cannot carry
+		anything the schema did not. Confirmed to fail on the pre-fix tree: `same table` was true and
+		`isAdmin rides` was true.
+	]]
+	local source = { volume = 40, name = "vaxze", muted = false, isAdmin = true }
+	local copied = nw.validate(Settings, source)
+
+	check("a validated value is not the table that was passed in", copied ~= nil and copied :: any ~= source)
+	equals("the schema's keys are there", (copied :: any).volume, 40)
+	equals("and the name", (copied :: any).name, "vaxze")
+	equals("a key the schema does not name does not ride along", (copied :: any).isAdmin, nil)
+
+	--[[ And the original is untouched, so a caller who keeps both sees two values rather than one
+	     aliased twice. ]]
+	equals("the caller's table keeps its own extra key", source.isAdmin, true)
+
+	source.volume = 7
+	equals("and mutating it afterwards cannot reach the validated copy", (copied :: any).volume, 40)
+
+	--[[ A nested table is copied too, for the same reason: the decode builds it. ]]
+	local Nested = t.struct({ inner = t.struct({ n = t.u8 }) })
+	local nestedSource = { inner = { n = 3, extra = 1 } }
+	local nested = nw.validate(Nested, nestedSource)
+
+	check("a nested table is a copy as well", nested ~= nil and (nested :: any).inner ~= nestedSource.inner)
+	equals("with only the named field", (nested :: any).inner.extra, nil)
+	equals("and the field itself", (nested :: any).inner.n, 3)
 end
 
 --[[ The encoder is shared between `validate` and a channel's codec, so a validation must not
@@ -735,6 +990,40 @@ do
 	equals("a validation between two writes leaves the buffer alone", buffer.len(packed), 4)
 	equals("first byte", buffer.readu8(packed, 0), 1)
 	equals("fourth byte", buffer.readu8(packed, 3), 4)
+end
+
+--[[
+	And the read side, which is the half that arrived with the copy: `validate` decodes now, so a
+	`validate` called from inside a `:listen` would move the cursor of the batch being read and every
+	packet behind it would decode from the wrong offset. Confirmed to fail with the `saveRead` pair
+	removed: the second read came back `a = 0, b = 0`.
+]]
+do
+	local Buffer = require("../src/codec/Buffer")
+	local Serdes = require("../src/codec/Serdes")
+
+	local codec = Serdes.fromSchema(t.struct({ a = t.u8, b = t.u8 }))
+
+	Buffer.load(nil)
+	codec.write({ a = 1, b = 2 })
+	codec.write({ a = 3, b = 4 })
+	local packed = Buffer.take()
+
+	Buffer.beginRead(packed, {})
+	local first = codec.read()
+	nw.validate(t.struct({ x = t.u32, y = t.u32 }), { x = 9, y = 9 })
+	local second = codec.read()
+
+	--[[ Asked before the fields are read: with the read parking removed the second packet decodes as
+	     nil, and indexing that aborts the file instead of failing the case — the `NO_REPORT` shape
+	     from `hostile_runtime`, one section over. ]]
+	local behind = (second :: any) or { a = -1, b = -1 }
+
+	equals("the packet before a validation reads", (first :: any).a, 1)
+	check("the one behind a validation still decodes", second ~= nil)
+	equals("and is not disturbed", behind.a, 3)
+	equals("to its last byte", behind.b, 4)
+	equals("with nothing left over", Buffer.remaining(), 0)
 end
 
 -- ---------------------------------------------------------------------------------------------

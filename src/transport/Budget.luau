@@ -53,6 +53,25 @@ export type Budget = {
 	usage: (sender: any, channel: any) -> (number, number, number),
 }
 
+--[[
+	One refusal sentence per rate, built on the first refusal at that rate and kept. Its one
+	variable is the channel's rate, and building it per refusal cost 2.8x an admission — not an
+	allocation, since Luau interns short strings and hands the same object back, but the
+	interpolation itself, on the path a flood takes (SECURITY-REPORT-M4-1; `bench/residue`).
+]]
+local overRate: { [number]: string } = {}
+
+local function overRateReason(rate: number): string
+	local reason = overRate[rate]
+
+	if not reason then
+		reason = `over {rate} packets per second`
+		overRate[rate] = reason
+	end
+
+	return reason
+end
+
 --[=[
 	@within Budget
 	@function new
@@ -181,7 +200,7 @@ function Budget.new(clock: (() -> number)?): Budget
 				     would understate exactly the traffic worth looking at. ]]
 				record.bytes += bytes
 
-				return `over {rate} packets per second`
+				return overRateReason(rate)
 			end
 
 			record.tokens -= 1

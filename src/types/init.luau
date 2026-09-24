@@ -46,7 +46,7 @@
 export type Encoding = "u8" | "u16" | "u32" | "u53" | "i8" | "i16" | "i32" | "i53" | "f32" | "f64"
 
 --[=[
-	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "optional" | "array" | "map" | "struct" | "union"
+	@type Kind "boolean" | "number" | "string" | "buffer" | "vector2" | "vector3" | "cframe" | "color3" | "instance" | "enum" | "literal" | "optional" | "array" | "map" | "struct" | "union"
 	@within Types
 
 	What a descriptor describes. The codec dispatches on this.
@@ -62,6 +62,7 @@ export type Kind =
 	| "color3"
 	| "instance"
 	| "enum"
+	| "literal"
 	| "optional"
 	| "array"
 	| "map"
@@ -81,6 +82,8 @@ export type Kind =
 	.class string? -- `instance`: the class an arrival must be, or nil for any
 	.descendantOf Instance? -- `instance`: the container an arrival must be inside
 	.variants { string }? -- `enum`: variant names, sorted. Wire index is the position here
+	.literal (string | boolean | number)? -- `literal`: the one value, which costs nothing on the wire
+	.default (string | boolean | number)? -- `optional`: what an absent value reads as, and what is not sent
 	.unit boolean? -- `vector3`: the magnitude must be 1
 	.inner Descriptor? -- `optional`
 	.element Descriptor? -- `array`
@@ -104,6 +107,8 @@ export type Descriptor = {
 	utf8: boolean?,
 	pattern: string?,
 	variants: { string }?,
+	literal: (string | boolean | number)?,
+	default: (string | boolean | number)?,
 	unit: boolean?,
 	inner: Descriptor?,
 	element: Descriptor?,
@@ -145,6 +150,8 @@ export type Type<T> = {
 	utf8: boolean?,
 	pattern: string?,
 	variants: { string }?,
+	literal: (string | boolean | number)?,
+	default: (string | boolean | number)?,
 	unit: boolean?,
 	inner: Descriptor?,
 	element: Descriptor?,
@@ -156,6 +163,36 @@ export type Type<T> = {
 	__payload: T,
 }
 
+--[[
+	A callable type's table half.
+
+	`Ranged<T>`, `Text`, `Componented<T>` and `Classed` are `Type<T> & ((…) -> Type<T>)`: an
+	intersection, because that is the only spelling that checks the **types** of the arguments and
+	still lets the value be used bare. A `typeof(setmetatable(…))` alias enforced the argument count
+	alone, so `t.u8(0, "b")` and `t.instance(5)` were accepted and the wrong storage was declared
+	(M4-1; `PLAN-M5` D-1).
+
+	The cost is this function. To a `type function` an intersection is not a table, so
+	`readproperty("__payload")` on one answers nothing — every payload extraction below has to take
+	the table half out first. Private, because nothing outside needs the shape; the two other
+	modules that read a schema's payload carry their own copy, since a `type function` cannot
+	reference an outer local and calling across a `require` needs the name exported.
+]]
+-- selene: allow(undefined_variable)
+type function carrierOf(ty)
+	if not ty:is("intersection") then
+		return ty
+	end
+
+	for _, part in ty:components() do
+		if part:is("table") and part:readproperty(types.singleton("__payload")) then
+			return part
+		end
+	end
+
+	return ty
+end
+
 --[=[
 	@type PayloadOf<T> T
 	@within Types
@@ -166,7 +203,10 @@ export type Type<T> = {
 	type Shot = t.PayloadOf<typeof(ShotType)>
 	```
 ]=]
+-- selene: allow(undefined_variable)
 export type function PayloadOf(ty)
+	ty = carrierOf(ty)
+
 	--[[ Asked before `readproperty`, which raises its own message on a non-table — `type.readproperty:
 	     expected self to be either a table, but got number instead` — printed verbatim at the call
 	     site in a game's declaration file, where nothing about it names netweave or the fix. ]]
@@ -221,18 +261,22 @@ type _instantiatePayloadOf = PayloadOf<Type<{ probe: boolean }>>
 ]]
 
 --[=[
-	@type OptionalPayload<I> I?
+	@type OptionalPayload<I, D> I? | I
 	@within Types
 
-	What [Types.optional] carries: the inner type's payload, or nil. Applied for you.
+	What [Types.optional] carries: the inner type's payload, or nil — and with a default, the
+	payload alone, because an absent value reads as the default. Applied for you.
 ]=]
 --[[ A schema built at runtime reaches these through `any`, and `any` carries no `__payload`. It
      stays `any` on the way out rather than being refused: the analyzer has been bypassed on
      purpose, and the runtime `check()` is the guard on that path. ]]
-export type function OptionalPayload(inner)
+-- selene: allow(undefined_variable)
+export type function OptionalPayload(inner, default)
 	if inner:is("any") then
 		return types.any
 	end
+
+	inner = carrierOf(inner)
 
 	local advice = "t.optional takes a netweave type, as in t.optional(t.u16) or t.optional(Entity). "
 		.. "What was passed carries no payload, so it did not come from t.u8, t.struct, t.enum or "
@@ -248,7 +292,61 @@ export type function OptionalPayload(inner)
 		error(advice)
 	end
 
-	return types.unionof(payload :: type, types.singleton(nil))
+	--[[ An absent second argument arrives as `unknown` (measured, `spike/additions`), and nil is
+	     the spelling of "no default" a caller could write out. ]]
+	if default:is("unknown") or default:is("nil") then
+		return types.unionof(payload :: type, types.singleton(nil))
+	end
+
+	--[[ The default's tag against the payload's, for the primitives the runtime admits: a string
+	     default on a number field is a diagnostic here rather than a raise at the declaration. A
+	     singleton's tag is "singleton", so its value's kind is read through it. ]]
+	local function primitive(ty: type): string?
+		if ty:is("singleton") then
+			return type(ty:value())
+		end
+
+		if ty:is("number") or ty:is("string") or ty:is("boolean") then
+			return ty.tag
+		end
+
+		if ty:is("union") then
+			local kind: string? = nil
+
+			for _, component in ty:components() do
+				local each = primitive(component)
+
+				if each == nil or (kind ~= nil and each ~= kind) then
+					return nil
+				end
+
+				kind = each
+			end
+
+			return kind
+		end
+
+		return nil
+	end
+
+	local wanted = primitive(payload :: type)
+	local given = primitive(default)
+
+	if wanted == nil then
+		error(
+			"t.optional takes a default only for a number, a string, a boolean or an enum: those are the "
+				.. "values two peers can compare, and a table default would be a fresh table on every read"
+		)
+	end
+
+	if given ~= wanted then
+		error(
+			`t.optional was given a default of the wrong kind: this field carries a {wanted}, and the `
+				.. `default is a {given or default.tag}`
+		)
+	end
+
+	return payload :: type
 end
 
 --[=[
@@ -257,10 +355,13 @@ end
 
 	What [Types.array] carries: a list of the element type's payload. Applied for you.
 ]=]
+-- selene: allow(undefined_variable)
 export type function ArrayPayload(element)
 	if element:is("any") then
 		return types.newtable(nil, { index = types.number, readresult = types.any, writeresult = types.any })
 	end
+
+	element = carrierOf(element)
 
 	local advice = "t.array takes a netweave element type, as in t.array(t.u8) or t.array(Entity, 100). "
 		.. "What was passed carries no payload, so it did not come from t.u8, t.struct, t.enum or "
@@ -288,6 +389,7 @@ end
 
 	What [Types.map] carries: the key type's payload indexing the value type's. Applied for you.
 ]=]
+-- selene: allow(undefined_variable)
 export type function MapPayload(key, value)
 	local advice = "t.map takes two netweave types, a key and a value, as in t.map(t.u16, Entity). "
 		.. "One of them carries no payload, so it did not come from t.u16, t.string, t.struct or "
@@ -297,6 +399,8 @@ export type function MapPayload(key, value)
 		if carrier:is("any") then
 			return types.any
 		end
+
+		carrier = carrierOf(carrier)
 
 		if not carrier:is("table") then
 			error(advice)
@@ -331,11 +435,15 @@ end
 	naive `struct<V>(fields: { [string]: Type<V> })` signature unifies `V` across fields and
 	rejects `{ id = t.u8, name = t.string }` outright (`spike/inference/README.md`, Q1 candidate A).
 ]]
+-- selene: allow(undefined_variable)
 export type function StructPayload(fields)
 	local result = types.newtable()
 
 	for key, property in fields:properties() do
-		local field = property.read
+		--[[ Through `carrierOf` before the shape test, not after: a callable constructor is an
+		     intersection and `is("table")` is false for one, so the guard would refuse every
+		     `t.u8` in a struct (`PLAN-M5` D-1). ]]
+		local field = if property.read then carrierOf(property.read) else nil
 
 		if not field or not field:is("table") then
 			error("a struct field is not a netweave type")
@@ -382,11 +490,13 @@ end
 	branches' fields readable as `nil` — the reader can still write `action.attack` and get no error,
 	which is the whole failure the tag exists to prevent.
 ]]
+-- selene: allow(undefined_variable)
 export type function UnionPayload(branches)
 	local result = nil
 
 	for key, property in branches:properties() do
-		local branch = property.read
+		--[[ `carrierOf` first, for the reason `StructPayload` gives. ]]
+		local branch = if property.read then carrierOf(property.read) else nil
 
 		if not branch or not branch:is("table") then
 			error("a union branch is not a netweave type")
@@ -412,6 +522,7 @@ export type function UnionPayload(branches)
 	return result
 end
 
+-- selene: allow(undefined_variable)
 export type function EnumPayload(variants)
 	local result = nil
 
@@ -440,22 +551,26 @@ end
 
 	The pair means a **value** range for numbers and a **length** range for strings and buffers.
 ]=]
-export type Ranged<T> = typeof(setmetatable(
-	{} :: Type<T>,
-	{} :: { __call: (self: any, min: number, max: number) -> Type<T> }
-))
+export type Ranged<T> = Type<T> & ((min: number, max: number) -> Type<T>)
 
 --[=[
 	@interface TextOptions
 	@within Types
 	.utf8 boolean? -- the bytes must decode as UTF-8
 	.pattern string? -- a Lua pattern the whole value must match, anchored by netweave
+	.charset string? -- a Lua character class every byte must belong to, written without the brackets
 
 	What [Types.string] accepts after its length bounds.
+
+	`charset` and `pattern` say the same kind of thing and cannot both be given. `charset = "%w_"`
+	is stored as the pattern `[%w_]*`, so two peers declaring it either way agree; it exists
+	because a class with one repetition is the one shape of pattern whose cost is linear in the
+	value whatever the length, and a peer chooses the length.
 ]=]
 export type TextOptions = {
 	utf8: boolean?,
 	pattern: string?,
+	charset: string?,
 }
 
 --[=[
@@ -467,13 +582,17 @@ export type TextOptions = {
 	```lua
 	t.string(1, 20)                                 -- a length, as before
 	t.string(1, 20, { utf8 = true })                -- and valid UTF-8
-	t.string(1, 20, { pattern = "[%w_]+" })         -- and word characters, whole-string
+	t.string(1, 20, { charset = "%w_" })            -- and only word characters, at any length
+	t.string(1, 20, { pattern = "%a+%d?" })         -- or a shape, when a set is not enough
 	```
+
+	:::note
+	A `pattern` with more than one unbounded item (`*`, `+`, `-`) is refused past a length the
+	matcher can afford, because the matcher backtracks and a peer chooses the bytes. A `charset` is
+	one class and one repetition, so it is never refused for cost.
+	:::
 ]=]
-export type Text = typeof(setmetatable(
-	{} :: Type<string>,
-	{} :: { __call: (self: any, min: number, max: number, options: TextOptions?) -> Type<string> }
-))
+export type Text = Type<string> & ((min: number, max: number, options: TextOptions?) -> Type<string>)
 
 --[=[
 	@type Componented<T> Type<T>
@@ -487,10 +606,7 @@ export type Text = typeof(setmetatable(
 	t.unitVector3(t.quantized(-1, 1, 2 / 254))  -- three u8, three
 	```
 ]=]
-export type Componented<T> = typeof(setmetatable(
-	{} :: Type<T>,
-	{} :: { __call: (self: any, component: Type<number>) -> Type<T> }
-))
+export type Componented<T> = Type<T> & ((component: Type<number>) -> Type<T>)
 
 --[=[
 	@interface InstanceOptions
@@ -515,10 +631,7 @@ export type InstanceOptions = {
 	t.instance("BasePart", { descendantOf = workspace })
 	```
 ]=]
-export type Classed = typeof(setmetatable(
-	{} :: Type<Instance>,
-	{} :: { __call: (self: any, className: string, options: InstanceOptions?) -> Type<Instance> }
-))
+export type Classed = Type<Instance> & ((className: string, options: InstanceOptions?) -> Type<Instance>)
 
 --[[
 	~~`f32` is `-2^24..2^24` and `f64` is `-2^53..2^53`.~~ **Those were the spans in which each
@@ -575,8 +688,35 @@ end
 	and every constructor would have to cast twice. Each public constructor states its own return
 	type instead, which is where the type belongs to be read anyway.
 ]]
+--[[
+	Which tables this module built.
+
+	`isType` was `type(value) == "table" and type(value.kind) == "string"`, so any table with a string
+	`kind` passed `t.optional`, `t.array`, `t.map`, `t.struct`, `Channel`'s `requireType` and
+	`nw.validate` — and every invariant the constructors enforce was advisory. Measured for five
+	shapes (M4 report finding 7): `order = {"a","a"}` double-encodes, a `max` of 2^31 gives a 2 GB
+	ceiling that the `maxBytes` policy is then measured against, `variants = {}` lowers to zero bits,
+	and `nw.validate(bogus, 5)` minted a `Trusted`.
+
+	A set rather than a field, because a field can be copied: `table.clone(t.u8)` would carry a
+	sentinel across but is not in here. Weak keys, so a schema built inside a function is collectable
+	with it, and the membership test is one lookup at declaration time — the wire path never asks.
+]]
+local constructed: { [any]: true } = setmetatable({}, { __mode = "k" }) :: any
+
 local function descriptor(fields: { [string]: any }): any
-	return table.freeze(fields)
+	local frozen = table.freeze(fields)
+	constructed[frozen] = true
+
+	return frozen
+end
+
+--[[ A callable constructor — `t.u8`, `t.string`, `t.vector3`, `t.instance` — is a `setmetatable`
+     table rather than a `descriptor`, and is usable bare, so it is registered the same way. ]]
+local function constructor(callable: any): any
+	constructed[callable] = true
+
+	return callable
 end
 
 --[[
@@ -617,7 +757,7 @@ end
 	whole difference between "the name is word characters" and "the name contains a word character
 	somewhere", and the unanchored reading is the one that lets anything through.
 ]]
-local TEXT_OPTIONS: { [string]: boolean } = { utf8 = true, pattern = true }
+local TEXT_OPTIONS: { [string]: boolean } = { utf8 = true, pattern = true, charset = true }
 table.freeze(TEXT_OPTIONS)
 
 --[[
@@ -746,6 +886,36 @@ local function scanPattern(pattern: string): (string?, number)
 	return nil, unbounded
 end
 
+--[[ The body of a set, as Lua reads one: a leading `^` negates, a `]` first is literal, `%`
+     escapes the next byte, and the first other `]` closes the set. The caller supplies the
+     brackets, so a close inside the body is the one thing this has to find. ]]
+local function classProblem(charset: string): string?
+	local length = #charset
+	local at = if string.sub(charset, 1, 1) == "^" then 2 else 1
+
+	if string.sub(charset, at, at) == "]" then
+		at += 1
+	end
+
+	while at <= length do
+		local char = string.sub(charset, at, at)
+
+		if char == "%" then
+			if at == length then
+				return "it ends with a lone %, which escapes nothing"
+			end
+
+			at += 2
+		elseif char == "]" then
+			return "a ] inside it closes the set early, and what follows would sit outside the brackets"
+		else
+			at += 1
+		end
+	end
+
+	return nil
+end
+
 local function refineText(constrained: any, options: any)
 	if options == nil then
 		return
@@ -759,8 +929,8 @@ local function refineText(constrained: any, options: any)
 	for key in options do
 		check(
 			TEXT_OPTIONS[key] == true,
-			`t.string has no option \`{tostring(key)}\`. The two are utf8 and pattern — check the `
-				.. `spelling, because an option that is ignored looks exactly like one that passed`
+			`t.string has no option \`{tostring(key)}\`. The three are utf8, pattern and charset — `
+				.. `check the spelling, because an option that is ignored looks exactly like one that passed`
 		)
 	end
 
@@ -775,6 +945,43 @@ local function refineText(constrained: any, options: any)
 	end
 
 	local pattern = options.pattern
+	local charset = options.charset
+
+	--[[
+		A set is a pattern with one class and one repetition, stored as that pattern: the reader,
+		the writer and the protocol signature then have one attribute to carry, and a peer that
+		spelled the same set as a pattern agrees with one that spelled it as a set. What the option
+		adds is the guarantee — a class with `*` is one unbounded item, which the rule below admits
+		at any length, so a set can never be refused for cost the way a pattern can (M4-1, the
+		matcher-cost finding; `PLAN-M5` phase 5).
+	]]
+	if charset ~= nil then
+		check(type(charset) == "string", `t.string's \`charset\` takes a string, got {typeof(charset)}`)
+		check(
+			pattern == nil,
+			"t.string takes `charset` or `pattern`, not both: a charset is the pattern [charset]*, so "
+				.. "write the set into the pattern if the pattern needs more than a set"
+		)
+		check(
+			charset ~= "",
+			"t.string's `charset` is empty, which admits no byte at all. Use a length of 0..0 if that is what you meant"
+		)
+
+		--[[ Two walks: the class walk, for a `]` that would close the set early and leave the rest
+		     outside it (`"%w]"` between brackets scans as the well-formed set `[%w]` followed by a
+		     literal bracket, not the set the author wrote), then the pattern walk over the whole
+		     thing for everything else the grammar refuses. ]]
+		local problem = classProblem(charset) or scanPattern(`[{charset}]`)
+
+		check(
+			problem == nil,
+			`t.string's \`charset\` "{charset}" is not a Lua character class: {problem or ""}. Write `
+				.. `what goes between the brackets — %w_ for word characters, a-z for a range, ^%c for `
+				.. `anything but a control character, %] for a bracket`
+		)
+
+		pattern = `[{charset}]*`
+	end
 
 	if pattern ~= nil then
 		check(type(pattern) == "string", `t.string's \`pattern\` takes a string, got {typeof(pattern)}`)
@@ -874,7 +1081,7 @@ local function ranged(base: { [string]: any }, label: string, refine: ((any, any
 		})
 	)
 
-	return table.freeze(callable)
+	return constructor(table.freeze(callable))
 end
 
 local t = {}
@@ -1166,9 +1373,11 @@ local function vectored(base: { [string]: any }, label: string, axes: number): a
 						.. `exactly like one that was applied`
 				)
 
-				--[[ The kind test rather than `isType`, which is defined further down and is a duck
-				     check anyway: what a component has to be is a *number* schema, and asking that
-				     directly is both narrower and available here. ]]
+				--[[ The kind test rather than `isType`, which is defined further down: what a component
+				     has to be is a *number* schema, and asking that directly is both narrower and
+				     available here. Since `PLAN-M5` phase 3 a forged table is refused either way —
+				     `isType` is a set of what this module built — and this still asks the narrower
+				     question. ]]
 				check(
 					type(component) == "table",
 					`{label} needs a netweave type for its components, got {typeof(component)}`
@@ -1215,7 +1424,7 @@ local function vectored(base: { [string]: any }, label: string, axes: number): a
 		})
 	)
 
-	return table.freeze(callable)
+	return constructor(table.freeze(callable))
 end
 
 --[=[
@@ -1271,11 +1480,24 @@ t.unitVector3 = vectored({
 }, "unitVector3", 3) :: Componented<Vector3>
 
 --[=[
-	@prop cframe Type<CFrame>
+	@prop cframe Componented<CFrame>
 	@within Types
-	Position and rotation.
+
+	Position and rotation: twenty-four bytes bare, and callable with the schema the **position** is
+	carried at, which also makes the rotation compact.
+
+	```lua
+	pose = t.cframe,                          -- three f32 and an axis-angle vector, 24 bytes
+	pose = t.cframe(t.i16(-2048, 2048)),      -- six bytes of position, six of rotation, two bits
+	```
+
+	Named, the rotation travels as a quaternion with its largest component dropped: three `i16`
+	and a two-bit index in the enclosing bitfield, against twelve bytes of axis-angle. The rotation
+	comes back within 1e-4 radians of what was sent — five runs of 200,000 random rotations measured
+	6.1e-5 to 6.4e-5, `spike/additions/f_quaternion.luau` — and the position is whatever the
+	component says, refused off the map like a vector's.
 ]=]
-t.cframe = descriptor({ kind = "cframe" :: Kind }) :: Type<CFrame>
+t.cframe = vectored({ kind = "cframe" :: Kind }, "cframe", 3) :: Componented<CFrame>
 
 --[=[
 	@prop color3 Type<Color3>
@@ -1350,7 +1572,7 @@ t.instance = (function(): Classed
 		})
 	)
 
-	return (table.freeze(callable) :: any) :: Classed
+	return (constructor(table.freeze(callable)) :: any) :: Classed
 end)()
 
 --[=[
@@ -1373,8 +1595,87 @@ end)()
 ]=]
 t.player = descriptor({ kind = "instance" :: Kind, class = "Player" }) :: Type<Player>
 
+--[=[
+	@within Types
+	@function isType
+	@param value any
+	@return boolean
+	@private
+
+	Whether this module built `value`.
+
+	Not a shape test: a table with a string `kind` used to pass, so every bound, every sorted order
+	and every non-empty enum the constructors check was advisory (M4 report finding 7). `Channel` and
+	`Trust` ask through here rather than repeating the test, because there is only one set.
+]=]
+function t.isType(value: any): boolean
+	return constructed[value] == true
+end
+
 local function isType(value: any): boolean
-	return type(value) == "table" and type(value.kind) == "string"
+	return constructed[value] == true
+end
+
+--[[
+	A default is checked here, at the declaration, by the bounds the descriptor already carries —
+	not by the codec, which this module cannot require. The kinds are the ones whose `==` is value
+	equality, because the writer decides "is this the default" with it, and a string or a number
+	is also what a default *is* to the game: the value the field has when nobody set it.
+]]
+local INTEGER: { [string]: boolean } = {
+	u8 = true,
+	u16 = true,
+	u32 = true,
+	u53 = true,
+	i8 = true,
+	i16 = true,
+	i32 = true,
+	i53 = true,
+}
+
+local function checkDefault(inner: { [string]: any }, default: any)
+	local kind = inner.kind
+	local given = type(default)
+
+	if kind == "number" then
+		check(given == "number", `t.optional's default for a number field is a number, got {given}`)
+		check(
+			default == default and default ~= math.huge and default ~= -math.huge,
+			"t.optional's default is not finite"
+		)
+		check(
+			(inner.min == nil or default >= inner.min) and (inner.max == nil or default <= inner.max),
+			`t.optional's default {default} is outside the field's range {tostring(inner.min)}..{tostring(
+				inner.max
+			)}`
+		)
+		check(
+			not INTEGER[inner.encoding] or default % 1 == 0,
+			`t.optional's default {default} is not whole, and the field is an integer`
+		)
+	elseif kind == "string" then
+		check(given == "string", `t.optional's default for a string field is a string, got {given}`)
+		check(
+			#default >= (inner.min or 0) and #default <= (inner.max or MAX_LENGTH),
+			`t.optional's default is {#default} bytes, outside the field's length {tostring(inner.min)}..{tostring(
+				inner.max
+			)}`
+		)
+	elseif kind == "boolean" then
+		check(given == "boolean", `t.optional's default for a boolean field is a boolean, got {given}`)
+	elseif kind == "enum" then
+		check(
+			given == "string" and table.find(inner.variants, default) ~= nil,
+			`t.optional's default {tostring(default)} is not a variant of the enum`
+		)
+	else
+		error(
+			`[netweave] t.optional takes a default only for a number, a string, a boolean or an enum, `
+				.. `not a {tostring(kind)}: those are the values two peers can compare, and a table `
+				.. `default would be a fresh table on every read`,
+			3
+		)
+	end
 end
 
 --[=[
@@ -1419,19 +1720,77 @@ end
 
 --[=[
 	@within Types
+	@function literal
+	@param value V -- a string, a boolean or a number
+	@return Type<V>
+
+	One value, known to both sides, costing nothing on the wire.
+
+	```lua
+	version = t.literal("v3"),   -- payload type "v3"
+	ready = t.literal(true),     -- payload type true
+	```
+
+	The writer refuses any other value, the reader hands the constant back, and a change never
+	moves it. It is for versioning a payload, for a `t.union` branch that carries a name and
+	nothing else, and for [Types.set], whose entries are literal `true`. A number literal's payload
+	is `number`, because Luau has no number singletons; the value is still checked on the way out.
+]=]
+function t.literal<V>(value: V & (string | boolean | number)): Type<V>
+	local kind = type(value)
+
+	check(
+		kind == "string" or kind == "boolean" or kind == "number",
+		`t.literal takes a string, a boolean or a number, got {typeof(value)}`
+	)
+	check(
+		kind ~= "number" or (value == value and value ~= math.huge and value ~= -math.huge),
+		"t.literal takes a finite number; NaN and the infinities are not values two peers can agree on"
+	)
+
+	return descriptor({
+		kind = "literal" :: Kind,
+		literal = value,
+	})
+end
+
+--[=[
+	@within Types
 	@function optional
 	@param inner I -- a netweave type
-	@return Type<OptionalPayload<I>>
+	@param default D? -- what an absent value reads as; a number, a string, a boolean or an enum variant
+	@return Type<OptionalPayload<I, D>>
 
 	A value that may be absent. Presence costs one bit in the enclosing bitfield, not a byte.
+
+	```lua
+	target = t.optional(t.u16),          -- payload number?, nil when absent
+	speed = t.optional(t.u8, 16),        -- payload number, 16 when absent, and 16 is never sent
+	```
+
+	With a default the payload is the inner type alone: the reader hands the default back where
+	the bit is clear, and the writer clears the bit for the default as well as for nil, so the
+	common value costs a bit rather than its bytes. The default is part of the protocol — two peers
+	declaring different ones disagree — and it is a primitive, because a table default would be a
+	fresh table on every read and no two of them equal.
 ]=]
-function t.optional<I>(inner: I): Type<OptionalPayload<I>>
+function t.optional<I, D>(inner: I, default: D?): Type<OptionalPayload<I, D>>
 	check(isType(inner), "optional needs a netweave type")
 	check((inner :: any).kind ~= "optional", "optional cannot wrap an optional")
+
+	if default == nil then
+		return descriptor({
+			kind = "optional" :: Kind,
+			inner = inner,
+		})
+	end
+
+	checkDefault(inner :: any, default)
 
 	return descriptor({
 		kind = "optional" :: Kind,
 		inner = inner,
+		default = default,
 	})
 end
 
@@ -1558,6 +1917,40 @@ function t.map<K, V>(key: K, value: V): Type<MapPayload<K, V>>
 		min = 0,
 		max = MAX_LENGTH,
 	})
+end
+
+--[=[
+	@within Types
+	@function set
+	@param element E -- a netweave type the receiver can look an entry up by; the same kinds [Types.map] takes as a key
+	@return Type<MapPayload<E, Type<true>>>
+
+	A set of values, carried as `{ [E]: true }`.
+
+	```lua
+	unlocked = t.set(t.string(1, 32)),   -- payload type { [string]: true }
+	```
+
+	It is a [Types.map] whose value is [Types.literal] `true`, and that is not sugar: a
+	`t.map(k, t.boolean)` spends a flag byte per entry on a bit that is always set, and a literal
+	costs nothing, so a set is its count and its entries and no more. A change replaces the set
+	whole, as it does a map.
+]=]
+function t.set<E>(element: E): Type<MapPayload<E, Type<true>>>
+	check(isType(element), "set needs a netweave element type")
+
+	local kind = (element :: any).kind
+
+	--[[ The map's own check would refuse the same kinds, in the map's words; a set is what the
+	     author wrote, so the refusal says so. ]]
+	check(
+		MAP_KEYS[kind] == true,
+		`a set of {tostring(kind)} cannot be looked up on the other side: an entry that decodes to `
+			.. `a fresh value is an entry nothing can find again. Use t.u16, t.string(0, 32), an enum `
+			.. `or t.instance, and put the rest of the value in a map keyed by it.`
+	)
+
+	return t.map(element, t.literal(true)) :: any
 end
 
 --[=[

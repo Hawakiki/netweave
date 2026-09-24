@@ -808,6 +808,84 @@ above the 29,314 that the phase 7 session measured on a tree two milestones olde
 inside what a different Studio session does to this probe — the `inline` rung itself read 6,145
 then and 6,458 now.
 
+## The reader, priced — PLAN-M5 phase 4
+
+`PLAN-M5` phase 4 asked why netweave's client decode sat at 2.81x the generated-code ceiling in
+Studio at `249ca27` (35,073 against 12,476 ns a packet), and said there was no fused struct reader to
+match the writer's. **The second half is stale and the first is smaller than it was.**
+
+`fusedStructReader` exists since `03a11a3` and it *is* taken for this payload — instrumented at build
+time on `1c021e5`, six rows and six bytes, for the `ArrayHeavy` element and for the struct alone. So
+the gap is not a missing fused path.
+
+`bench/decode` under lune, three runs on `1c021e5`:
+
+| ns per packet, `ArrayHeavy`, lune | value |
+|---|---|
+| `inline` — the generated-code ceiling | 6,283 |
+| `inline + range` — plus the schema's own checks | 9,452 |
+| `dispatched` — the primitive fetched from a table | 17,002 |
+| `per value` — one call per value | 17,925 |
+| **netweave** | **20,936 .. 21,413** |
+
+That is **3.33x** the bare ceiling and **2.21x** the ceiling that checks what it reads — and the
+honest comparison is the second one, because netweave's reader refuses what the schema forbids and the
+bare rung does not. Against `dispatched`, which is the same strategy without the framing, netweave is
+1.23x: what is left is the array's length handling and one `table.clone(template)` per element, not
+the per-value dispatch the fused reader removed.
+
+The encode side, same instrument and same tree: netweave 14,443 ns a packet, 6.54x the bare ceiling
+and 3.25x the checking one. So the two halves are not symmetric — the writer is further from its
+ceiling than the reader is, which is the opposite of what the phase-4 note assumed.
+
+Studio is the platform of record and these are lune numbers; `require(ReplicatedStorage.netweave.bench.decode)`
+in a Play session is the Studio half, and it has not been re-run since `249ca27`.
+
+**Still open, and it needs a decision rather than a fix:** which of the four `ArrayHeavy` Down
+readings is the outlier (see "The Down cell"). Answering it means building the bench place from a
+worktree at `0cb731d`, running that matrix, then running the current tree's matrix in the same
+session — about twenty minutes of Studio for a question about an instrument rather than about
+netweave. Nothing in the library waits on it.
+
+## The delta crossover, in bytes — PLAN-M5 phase 5
+
+`PLAN-M4` acceptance 8 asked where a diff loses to a resend and M4 closed without measuring it. It
+was to be a replication mode in the matrix, and it is `bench/crossover` under lune instead: the
+question is bytes, both sides are netweave, and a byte count on the real writer is exact where a
+Kbps cell carries the spread the sections above record. A struct of N `u16` fields, k of them moved
+since the recipient last saw it, written by `Batch.writeChange` on a `replicate` channel against
+`Batch.writePacket` on an `event` carrying the subject and every field; one packet each in an empty
+batch, the version byte excluded. Tree `31c315f`, and deterministic, so there is no spread.
+
+| N fields | k moved | diff bytes | resend bytes | cheaper |
+|---|---|---|---|---|
+| 1 | 1 | 7 | 5 | resend |
+| 2 | 1 | 7 | 7 | level |
+| 2 | 2 | 9 | 7 | resend |
+| 3 | 1 | 7 | 9 | diff |
+| 4 | 1 / 2 / 4 | 7 / 9 / 13 | 11 | diff / diff / resend |
+| 8 | 1 / 4 / 8 | 8 / 14 / 22 | 19 | diff / diff / resend |
+| 16 | 1 / 8 / 16 | 9 / 23 / 39 | 35 | diff / diff / resend |
+| 32 | 1 / 16 / 32 | 11 / 41 / 73 | 67 | diff / diff / resend |
+
+Three findings, each an assertion in the script:
+
+- **The crossover is at two fields.** A one-field subject is the one the diff cannot win — the
+  flag byte and the length prefix are the whole overhead and there is nothing to leave out — and it
+  loses by two bytes. Two fields with one moved is level. From three fields up a one-field change
+  is cheaper as a diff, by the fields it did not send.
+- **When everything moved, the diff loses at every size**, by its flag bytes plus the length
+  prefix: two bytes at N ≤ 7, six at N = 32. A subject whose every field changes every tick — a
+  position with no field at rest — is a `state` channel's shape, and this is the number that says
+  so.
+- **Nothing moved is zero bytes**, and the resend cannot say that: it writes its full size again
+  every tick. That is the difference a game feels, because most subjects are at rest most ticks.
+
+The `replicate` framing behind the numbers is `docs/WIRE-FORMAT.md` §5: id, a one-byte length, the
+subject, the flag bytes, then only the fields whose bit is set. The `event` resend is static-framed,
+so it carries no length at all — which is the byte that keeps the two-field case level rather than
+a diff win.
+
 ## Delivery (client to server) — the M1 run
 
 **This table is from `bench/runs/2026-09-04.json`, the M1 run, and was left sitting under the M3 and

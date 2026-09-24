@@ -323,6 +323,45 @@ check("and `?` is bounded", (pcall(function()
 	t.string(0, 65535, { pattern = "a?b?c?d?e?f?" })
 end)))
 
+--[[
+	The set. `charset` is the option that cannot be refused for cost: it is stored as the pattern
+	`[set]*`, one class and one repetition, which the rule above admits at any length — and it is
+	stored as that pattern so a peer that wrote the pattern by hand agrees with one that wrote the
+	set (`PLAN-M5` phase 5).
+]]
+local word = t.string(1, 65535, { charset = "%w_" })
+check("a charset is stored as its pattern", word.pattern == "[%w_]*")
+check("and admits any length, being one unbounded item", word.max == 65535)
+check("a negated set is a set", t.string(0, 8, { charset = "^%c" }).pattern == "[^%c]*")
+check("a range is a set", t.string(0, 8, { charset = "a-z0-9" }).pattern == "[a-z0-9]*")
+check(
+	"a bracket first in the set is literal, as Lua reads it",
+	t.string(0, 8, { charset = "]%w" }).pattern == "[]%w]*"
+)
+check("and an escaped one anywhere", t.string(0, 8, { charset = "%w%]" }).pattern == "[%w%]]*")
+
+rejects("a charset that is not a string", function()
+	t.string(0, 8, { charset = 5 } :: any)
+end)
+
+rejects("an empty charset", function()
+	t.string(0, 8, { charset = "" })
+end)
+
+rejects("a charset beside a pattern", function()
+	t.string(0, 8, { charset = "%w", pattern = "%w+" })
+end)
+
+--[[ `"%w]"` between brackets scans as the well-formed set `[%w]` and then a literal bracket, so
+     the pattern walk alone would accept a set the author did not write. ]]
+rejects("a charset that closes its own brackets", function()
+	t.string(0, 8, { charset = "%w]" })
+end)
+
+rejects("a charset ending in a lone %", function()
+	t.string(0, 8, { charset = "%w%" })
+end)
+
 --[[ And the third argument nothing else takes. `t.u8(0, 10, { utf8 = true })` used to be accepted
      and ignored, which looks exactly like an option that worked. ]]
 rejects("a third argument on a number", function()
@@ -459,6 +498,21 @@ check(
 check("and a float over exactly -1..1", t.unitVector3(t.f32(-1, 1)).unit == true)
 check("while a position keeps any number it likes", t.vector3(t.quantized(0, 1, 0.5)).kind == "vector3")
 
+--[[ A cframe takes a component the same way, for its position; the rotation compacts with it
+     (`PLAN-M5` phase 5). ]]
+local posed = t.cframe(t.i16(-2048, 2048))
+check("a cframe keeps its component", (posed.element :: any).encoding == "i16")
+check("and is still a cframe", posed.kind == "cframe")
+check("bare has none", t.cframe.element == nil)
+
+rejects("a cframe with a component that is not a number", function()
+	(t.cframe :: any)(t.boolean)
+end)
+
+rejects("a cframe with two arguments", function()
+	(t.cframe :: any)(t.i16, t.i16)
+end)
+
 rejects("a component and then something else", function()
 	(t.vector3 :: any)(t.f32, "extra")
 end)
@@ -575,6 +629,143 @@ end)
 rejects("array longer than the length prefix allows", function()
 	t.array(t.u8, 0, 70000)
 end)
+
+-- ---------------------------------------------------------------------------------------------
+-- The three additions of PLAN-M5 phase 5
+-- ---------------------------------------------------------------------------------------------
+
+--[[ A literal is the one value, recorded as declared; the wire half is `serdes_runtime`. ]]
+check("a string literal records its value", t.literal("v3").literal == "v3")
+check("and a boolean one", t.literal(false).literal == false)
+check("and a number one", t.literal(7).literal == 7)
+
+rejects("a table literal", function()
+	(t.literal :: any)({})
+end)
+
+rejects("a NaN literal", function()
+	t.literal(0 / 0)
+end)
+
+rejects("an infinite literal", function()
+	t.literal(math.huge)
+end)
+
+--[[ A set is a map whose value is the literal `true`, and that shape is what the codec and the
+     protocol see, so it is asserted rather than trusted. ]]
+local unlocked = t.set(t.string(1, 8))
+check("a set is a map", unlocked.kind == "map")
+check("of the element", (unlocked.key :: any).max == 8)
+check(
+	"to the literal true",
+	(unlocked.value :: any).kind == "literal" and (unlocked.value :: any).literal == true
+)
+
+rejects("a set of a kind a map cannot key by", function()
+	t.set(t.struct({ x = t.u8 }))
+end)
+
+rejects("a set of an optional", function()
+	t.set(t.optional(t.u8))
+end)
+
+rejects("a set of a non-type", function()
+	(t.set :: any)(5)
+end)
+
+--[[ A default is recorded, and checked against the bounds the descriptor carries — at the
+     declaration, which is the line that is wrong. ]]
+local speed = t.optional(t.u8, 16)
+check("a default is recorded", speed.default == 16)
+check("and an optional without one records nothing", t.optional(t.u8).default == nil)
+check("a string default", t.optional(t.string(0, 8), "anon").default == "anon")
+check("an enum default", t.optional(t.enum({ red = true, blue = true }), "red").default == "red")
+check("a boolean default", t.optional(t.boolean, false).default == false)
+check("a float default", t.optional(t.f32(0, 1), 0.5).default == 0.5)
+
+rejects("a default outside the range", function()
+	t.optional(t.u8, 300)
+end)
+
+rejects("a fractional default on an integer", function()
+	t.optional(t.u8, 1.5)
+end)
+
+rejects("a default of the wrong kind", function()
+	(t.optional :: any)(t.u8, "fast")
+end)
+
+rejects("a default that is not finite", function()
+	t.optional(t.f32, 0 / 0)
+end)
+
+rejects("a string default outside the length", function()
+	t.optional(t.string(1, 3), "toolong")
+end)
+
+rejects("a default that is not a variant", function()
+	(t.optional :: any)(t.enum({ red = true }), "blue")
+end)
+
+rejects("a default on a struct", function()
+	(t.optional :: any)(t.struct({ x = t.u8 }), 1)
+end)
+
+rejects("a default on an array", function()
+	(t.optional :: any)(t.array(t.u8), 1)
+end)
+
+-- ---------------------------------------------------------------------------------------------
+-- A hand-built table is not a schema (M4 report finding 7)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`isType` was a shape test — a table with a string `kind` — so every invariant the constructors
+	enforce was advisory. Measured for five shapes: `order = {"a","a"}` double-encodes, a `max` of
+	2^31 gives a 2 GB ceiling the `maxBytes` policy is then measured against, `variants = {}` lowers
+	to zero bits, and `nw.validate(bogus, 5)` minted a `Trusted`. It asks a weak set of what this
+	module built instead, and a set cannot be entered by copying a field.
+]]
+local forged: any = { kind = "number", encoding = "u8", min = 0, max = 2 ^ 31 }
+
+check("a hand-built table is not a netweave type", not t.isType(forged))
+check("while a real one is", t.isType(t.u8))
+check("including a callable used bare", t.isType(t.string) and t.isType(t.vector3) and t.isType(t.instance))
+check("and one it produced", t.isType(t.u8(0, 5)) and t.isType(t.instance("Sound")))
+
+--[[ The shape the set exists for: a clone carries every field and is still not one of ours. ]]
+check("a clone of a real descriptor is not one", not t.isType(table.clone(t.u8 :: any)))
+
+for name, build in
+	{
+		optional = function()
+			local _ = t.optional(forged)
+		end,
+		array = function()
+			local _ = t.array(forged)
+		end,
+		["map key"] = function()
+			local _ = t.map(forged, t.u8)
+		end,
+		["map value"] = function()
+			local _ = t.map(t.u8, forged)
+		end,
+		set = function()
+			local _ = t.set(forged)
+		end,
+		--[[ Through `any`, because the analyser refuses these two on its own — `StructPayload` and
+		     `UnionPayload` say "not a netweave type" at the call — and this section is about the
+		     *runtime* half, which a game reaching them through a table built at runtime gets. ]]
+		struct = function()
+			local _ = (t.struct :: any)({ n = forged })
+		end,
+		union = function()
+			local _ = (t.union :: any)({ a = forged })
+		end,
+	} :: { [string]: () -> () }
+do
+	rejects(`a forged descriptor inside t.{name}`, build)
+end
 
 -- ---------------------------------------------------------------------------------------------
 

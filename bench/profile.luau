@@ -131,7 +131,7 @@ type Entity = {
 
 --[[ Deterministic rather than random: `Random` does not exist under lune, and the values only have
      to be in range — nothing here branches on them. ]]
-local payload: { Entity } = table.create(ENTITY_COUNT)
+local payload: { Entity } = (table.create(ENTITY_COUNT) :: any) :: { Entity }
 
 for index = 1, ENTITY_COUNT do
 	payload[index] = {
@@ -370,10 +370,12 @@ end
      why it was tried first. ]]
 local function rowWriter(names: { string }): (value: any) -> ()
 	local count = #names
-	local offsets: { number } = table.create(count)
-	local mins: { number } = table.create(count)
-	local maxs: { number } = table.create(count)
-	local writes: { (b: buffer, offset: number, value: number) -> () } = table.create(count)
+	local offsets: { number } = (table.create(count) :: any) :: { number }
+	local mins: { number } = (table.create(count) :: any) :: { number }
+	local maxs: { number } = (table.create(count) :: any) :: { number }
+	local writes: { (b: buffer, offset: number, value: number) -> () } = (
+		table.create(count) :: any
+	) :: { (b: buffer, offset: number, value: number) -> () }
 
 	for index = 1, count do
 		offsets[index] = index - 1
@@ -444,7 +446,7 @@ type Result = { name: string, fastest: number, median: number, high: number }
 	taken.
 ]]
 local function measure(rung: Rung): Result
-	local samples: { number } = table.create(REPEATS)
+	local samples: { number } = (table.create(REPEATS) :: any) :: { number }
 
 	--[[ The cursor back to zero without giving up the capacity, which is the reset the send path
 	     itself uses for a packet it decided not to keep. `take` would hand back a copy and

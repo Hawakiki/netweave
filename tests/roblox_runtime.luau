@@ -58,21 +58,21 @@ local function encode(codec: Serdes.Codec, value: any): (buffer, { Instance })
 	return Buffer.take()
 end
 
-local function decode(codec: Serdes.Codec, bytes: buffer, instances: { Instance }?): (any, string?)
+local function decode(codec: Serdes.Codec, bytes: buffer, instances: { unknown }?): (any, string?)
 	Buffer.beginRead(bytes, instances)
 	return codec.read()
 end
 
 --[[ Round trips one value and hands the result back, so each datatype can compare it its own way:
      `CFrame` needs a tolerance, `Color3` does not. ]]
-local function roundTrip(descriptor: any, value: any, instances: { Instance }?): (any, string?, number)
+local function roundTrip(descriptor: any, value: any, instances: { unknown }?): (any, string?, number)
 	local codec = Serdes.fromSchema(descriptor)
 	local packed, sidecar = encode(codec, value)
-	local decoded, failure = decode(codec, packed, instances or sidecar)
+	local decoded, failure = decode(codec, packed, instances or sidecar :: { unknown })
 	return decoded, failure, buffer.len(packed)
 end
 
-local function rejects(name: string, descriptor: any, bytes: buffer, instances: { Instance }?)
+local function rejects(name: string, descriptor: any, bytes: buffer, instances: { unknown }?)
 	local codec = Serdes.fromSchema(descriptor)
 	local ok, value, failure = pcall(decode, codec, bytes, instances or {})
 
@@ -311,6 +311,82 @@ do
 	rejects("a cframe carrying NaN", t.cframe, hostile)
 end
 
+--[[
+	The compact cframe (`PLAN-M5` phase 5): the position as three of the component, the rotation as
+	a quaternion with its largest component dropped — three `i16` and a two-bit index. Thirteen
+	bytes for a narrowed position against twenty-four, and a rotation within 5e-5 radians of what
+	was sent, which the tolerance in `cframesMatch` is well above.
+]]
+do
+	local posed = t.cframe(t.i16(-2048, 2048))
+
+	local value, failure, size = roundTrip(posed, CFrame.identity)
+	equals("a compact cframe is thirteen bytes", size, 13)
+	equals("the identity decodes", failure, nil)
+	check("and round trips", cframesMatch(value, CFrame.identity))
+
+	local translated = roundTrip(posed, CFrame.new(10, -20, 30))
+	check("a translation round trips", cframesMatch(translated, CFrame.new(10, -20, 30)))
+
+	local rotated = CFrame.new(1, 2, 3) * CFrame.Angles(0.4, -1.2, 2.9)
+	check("a rotation round trips", cframesMatch(roundTrip(posed, rotated), rotated))
+
+	local extreme = CFrame.fromAxisAngle(Vector3.new(0, 1, 0), math.pi - 1e-3)
+	check("a rotation near pi round trips", cframesMatch(roundTrip(posed, extreme), extreme))
+
+	--[[ Every axis as the largest component, so all four index values are exercised. ]]
+	for _, axis in { Vector3.xAxis, Vector3.yAxis, Vector3.zAxis } do
+		local quarter = CFrame.fromAxisAngle(axis, math.pi / 2)
+		check(`a quarter turn about {axis} round trips`, cframesMatch(roundTrip(posed, quarter), quarter))
+		local most = CFrame.fromAxisAngle(axis, 3)
+		check(`and a wide turn about {axis}`, cframesMatch(roundTrip(posed, most), most))
+	end
+
+	--[[ Off the map is refused like a vector's position. ]]
+	local far = buffer.create(13)
+	buffer.writeu16(far, 1, 65535)
+	rejects("a compact cframe off the map", posed, far)
+
+	--[[ Three kept components whose squares sum past 3/4 were never a rotation: the component that
+	     was dropped is the largest, so it is at least 1/2 and these three carry at most 3/4. Both
+	     the gross case and one just over the bound, because the reader was written against 1 and
+	     the spike measured the true limit (`spike/additions/f_quaternion.luau`). ]]
+	local function bentBy(component: number): buffer
+		local bent = buffer.create(13)
+		buffer.writeu16(bent, 1, 2048)
+		buffer.writeu16(bent, 3, 2048)
+		buffer.writeu16(bent, 5, 2048)
+		buffer.writei16(bent, 7, component)
+		buffer.writei16(bent, 9, component)
+		buffer.writei16(bent, 11, component)
+		return bent
+	end
+
+	rejects("a compact cframe whose rotation is not a unit quaternion", posed, bentBy(32767))
+
+	--[[ Each component sqrt(0.3), so the sum is 0.9: inside the old bound of 1, outside the real
+	     one. 0.5477 * 32767 * sqrt(2) = 25383. ]]
+	rejects("and one whose dropped component was not the largest", posed, bentBy(25383))
+
+	--[[ The bound itself has to stay reachable: all four components 1/2 is a legal rotation whose
+	     sum is exactly 3/4, and 0.5 * 32767 * sqrt(2) = 23170. ]]
+	local onTheBound = buffer.create(13)
+	buffer.writeu16(onTheBound, 1, 2048)
+	buffer.writeu16(onTheBound, 3, 2048)
+	buffer.writeu16(onTheBound, 5, 2048)
+	buffer.writei16(onTheBound, 7, 23170)
+	buffer.writei16(onTheBound, 9, 23170)
+	buffer.writei16(onTheBound, 11, 23170)
+
+	local _, atBound = decode(Serdes.fromSchema(posed), onTheBound, {})
+	equals("while a rotation whose four components are all 1/2 is accepted", atBound, nil)
+
+	--[[ And the float spelling, for a position with no map. ]]
+	local _, _, floatSize = roundTrip(t.cframe(t.f32), rotated)
+	equals("a float-positioned compact cframe is nineteen bytes", floatSize, 19)
+	check("and round trips the same", cframesMatch(roundTrip(t.cframe(t.f32), rotated), rotated))
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Instances
 -- ---------------------------------------------------------------------------------------------
@@ -537,6 +613,95 @@ do
 	if player then
 		equals("a player owns themselves", roster.owner(player), player)
 		check("and the roster lists them", table.find(roster.all(), player) ~= nil)
+
+		--[[ `within` measures the list it is handed, not the engine's: it used to call
+		     `GetPlayers()` itself once per subject per publish when the tick had already taken
+		     the roster for the frame (SECURITY-REPORT-M4 77; `PLAN-M5` phase 4). Handed the frame's
+		     list it finds the player; handed an empty one it finds nobody — which is what shows the
+		     list is the one being read. Needs a character to measure from; said when there is none. ]]
+		--[[ The character spawns a moment after the player, and the suite reaches here first —
+		     measured: a skip on every run without the wait. ]]
+		local character = player.Character
+		local characterDeadline = os.clock() + 10
+
+		while (character == nil or character.PrimaryPart == nil) and os.clock() < characterDeadline do
+			task.wait(0.1)
+			character = player.Character
+		end
+
+		local root = character and character.PrimaryPart
+
+		if root then
+			local out = {}
+			equals(
+				"within finds the player from the frame's list",
+				roster.within(root, 1e6, out, roster.all()),
+				1
+			)
+			equals("and names them", out[1], player)
+			equals("and finds nobody in an empty list", roster.within(root, 1e6, out, {}), 0)
+
+			--[[
+				What one player costs per subject, against the real engine (`PLAN-M5` phase 5).
+				`within` reads a player's position once per list rather than once per subject, and
+				`Recipients.of` answers membership from the list rather than asking `has` — three
+				engine calls — per recipient. Both are timed over the same list the tick would hand
+				every subject of a frame. A number, not an assertion: the lune half is `bench/tick`'s
+				`nearby-all` and `select-all` rungs, and this is the half a stub cannot show.
+			]]
+			local CALLS = 20000
+			local list = roster.all()
+			local chosen = {
+				kind = "select",
+				select = function()
+					return list
+				end,
+			}
+
+			--[[ The fastest pass of seven, not one pass. Across three Studio sessions one pass moved
+			     these two numbers 364 → 650 ns and 142 → 220 — the same instability `bench/residue`'s
+			     rungs were corrected for, and for the same reason: the work is deterministic, so noise
+			     only ever adds (`CLAUDE.md` §9). ]]
+			local PASSES = 7
+
+			local function fastest(body: () -> ()): number
+				local best = math.huge
+
+				for _ = 1, PASSES do
+					local started = os.clock()
+
+					for _ = 1, CALLS do
+						body()
+					end
+
+					local each = (os.clock() - started) * 1e9 / CALLS
+
+					if each < best then
+						best = each
+					end
+				end
+
+				return best
+			end
+
+			local withinNs = fastest(function()
+				roster.within(root, 1e6, out, list)
+			end)
+
+			local selectNs = fastest(function()
+				Recipients.of(chosen, root, roster, out, nil, list)
+			end)
+
+			print(
+				`        measured: with {#list} player(s) and the frame's list, within {string.format(
+					"%.0f",
+					withinNs
+				)} ns a subject, `
+					.. `a select returning the roster {string.format("%.0f", selectNs)} ns a subject (fastest of {PASSES} x {CALLS})`
+			)
+		else
+			print("        skip: the player has no character yet, so within was not asserted")
+		end
 	end
 
 	part:Destroy()
@@ -711,7 +876,7 @@ do
 			]]
 			local arrived: { { any } } = {}
 
-			again.receive(function(packed: buffer, instances: { Instance }, sender: any?)
+			again.receive(function(packed: buffer, instances: { unknown }, sender: any?)
 				table.insert(arrived, { buffer.len(packed), instances, sender })
 			end)
 
@@ -864,15 +1029,30 @@ if ready then
 
 	Namespace.reset()
 
+	--[[ A policy with a server stage (PLAN-M5 D-5): the real driver runs it at the seal its first
+	     send triggers, before that packet is written, and once for the two channels it is on. ]]
+	local staged = 0
+	local stagedPolicy = nw.policy(function()
+		return function()
+			return nw.allow()
+		end, function()
+			staged += 1
+		end
+	end)
+
 	local studio = nw.namespace("studio", {
 		hello = nw.event({ data = t.u8, audience = nw.audience.owner }),
 		wide = nw.event({ data = t.array(t.u8), audience = nw.audience.owner, unreliable = true }),
+		buy = nw.command({ data = t.u8, rate = 1, authorize = stagedPolicy }),
+		sell = nw.command({ data = t.u8, rate = 1, authorize = stagedPolicy }),
 	})
 
 	puppet:FireClient(client, "arm")
 	heard(PUPPET_TIMEOUT, "armed")
 
+	equals("a server stage has not run before the first send", staged, 0)
 	studio.server.hello:publish(player, 7)
+	equals("the first send sealed and ran it, once for two channels", staged, 1)
 	frames(2)
 
 	local batch = heard(2, "netweave")
@@ -1007,6 +1187,49 @@ if player then
 	check("after forget, a new acquisition still works", fresh.player == player)
 	Context.release(player)
 	Context.forget(player)
+end
+
+-- ---------------------------------------------------------------------------------------------
+-- A namespace declared where the client cannot require it (PLAN-M5 D-7)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`tests/api_runtime.luau` proves the guard against a source it hands in. What only Studio can say is
+	that `debug.info(2, "s")` inside `nw.namespace` really is the declaring module's full name, with
+	the prefix the guard looks for: `tests/serveronly/declares.luau` is mapped a second time under
+	`ServerScriptService` by both place files and declares a namespace when called. The namespaces
+	this file and the rest of the suite declare from `ReplicatedStorage` are the other direction.
+]]
+
+do
+	local ServerScriptService = game:GetService("ServerScriptService")
+	local folder = ServerScriptService:FindFirstChild("netweaveServerOnly")
+	local declares = if folder then folder:FindFirstChild("declares") else nil
+
+	if declares then
+		Namespace.reset()
+
+		local ok, err = pcall(function()
+			(require :: any)(declares)(nw, t)
+		end)
+
+		check("a namespace declared from ServerScriptService is refused", not ok)
+		check(
+			"with ReplicatedStorage named as the fix",
+			not ok and string.find(tostring(err), "ReplicatedStorage", 1, true) ~= nil
+		)
+		check(
+			`and the module named as the cause: {tostring(err)}`,
+			not ok
+				and string.find(tostring(err), "ServerScriptService.netweaveServerOnly.declares", 1, true)
+					~= nil
+		)
+		check("and nothing was declared", Namespace.get("serverOnly") == nil)
+
+		Namespace.reset()
+	else
+		print("        skip: ServerScriptService.netweaveServerOnly is not mapped in this place")
+	end
 end
 
 puppet:Destroy()

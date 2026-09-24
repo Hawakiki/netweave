@@ -46,6 +46,9 @@ try {
 	Add-Step "tools/exports" @("lune", "run", "tools/exports")
 	Add-Step "bench/envelope" @("lune", "run", "bench/envelope")
 	Add-Step "bench/check" @("lune", "run", "bench/check")
+	Add-Step "bench/pace" @("lune", "run", "bench/pace")
+	Add-Step "bench/residue" @("lune", "run", "bench/residue")
+	Add-Step "bench/crossover" @("lune", "run", "bench/crossover")
 	Add-Step "stylua" @("stylua", "--check", "src", "tests", "analyze.luau", "bench", "spike")
 	Add-Step "selene" @("selene", "src", "tests")
 

@@ -106,7 +106,25 @@ local _entityFixed: Type<{ Entity }> = t.array(entity, 100)
 
 local _mapPayload: t.MapPayload<typeof(t.u16), typeof(entity)> =
 	{ [1] = { id = 1, x = 0, y = 0, z = 0, orientation = 0, animation = 0 } }
-local _optionalPayload: t.OptionalPayload<typeof(entity)> = nil
+local _optionalPayload: t.OptionalPayload<typeof(entity), nil> = nil
+
+--[[
+	The three additions of `PLAN-M5` phase 5, each carrying the payload its docstring promises.
+
+	A literal keeps a string or boolean singleton, and a number widens to `number` because Luau has
+	no number singletons; a set is `{ [E]: true }`; an optional with a default drops the nil. The
+	negative controls are in `types_reject`.
+]]
+local _version: Type<"v3"> = t.literal("v3")
+local _ready: Type<true> = t.literal(true)
+local _seven: Type<number> = t.literal(7)
+local _unlocked: Type<{ [string]: true }> = t.set(t.string(1, 32))
+local _byId: Type<{ [number]: true }> = t.set(t.u16)
+local _speed: Type<number> = t.optional(t.u8, 16)
+local _team: Type<"red" | "blue"> = t.optional(t.enum({ red = true, blue = true }), "red")
+local _nick: Type<string> = t.optional(t.string(0, 16), "anon")
+local _muted: Type<boolean> = t.optional(t.boolean, false)
+local _defaulted: t.OptionalPayload<typeof(t.u8), number> = 3
 local _arrayPayload: t.ArrayPayload<typeof(weapon)> = { "primary", "melee" }
 
 --[[ Nesting: a struct inside an array inside a struct. ]]
@@ -203,6 +221,11 @@ local _heading: number = heading(_aim)
 local _options: t.TextOptions = { utf8 = true, pattern = "[%w_]+" }
 local _named: t.Type<string> = t.string(1, 20, _options)
 
+--[[ And the set, which is the option a length-unbounded field should reach for: one class, one
+     repetition, linear whatever the peer sends (`PLAN-M5` phase 5). ]]
+local _setOptions: t.TextOptions = { charset = "%w_" }
+local _word: t.Type<string> = t.string(1, 65535, _setOptions)
+
 --[[ And the callable itself, which is the type that carries that parameter: `Ranged<string>` does
      not, so annotating it that way would compile and then refuse the options at the call site. ]]
 local _text: t.Text = t.string
@@ -249,6 +272,31 @@ local _componented: t.Componented<Vector3> = t.vector3
 local _narrowVector: t.Type<Vector3> = _componented(t.i16(-2048, 2048))
 local _flatVector: t.Type<Vector2> = t.vector2(t.i16(-1024, 1024))
 local _direction: t.Type<Vector3> = t.unitVector3(t.quantized(-1, 1, 2 / 254))
+local _posed: t.Componented<CFrame> = t.cframe
+local _pose: t.Type<CFrame> = _posed(t.i16(-2048, 2048))
+
+--[[
+	The accepted twin of every `types_reject` case 18-24. A callable constructor is
+	`Type<T> & ((…) -> Type<T>)` since `PLAN-M5` phase 1, so a call with the wrong argument *type* is
+	a diagnostic where it used to be accepted — and this is the half that says the checking did not
+	simply refuse everything. Both spellings of each: called, and bare.
+]]
+local _goodBound: t.Type<number> = t.u8(0, 5)
+local _goodLength: t.Type<buffer> = t.buffer(0, 8)
+local _goodOption: t.Type<string> = t.string(0, 5, { utf8 = true })
+local _goodComponent: t.Type<Vector3> = t.vector3(t.i16(-2048, 2048))
+local _goodPose: t.Type<CFrame> = t.cframe(t.f32)
+local _goodClass: t.Type<Instance> = t.instance("Sound")
+local _goodContained: t.Type<Instance> = t.instance("BasePart", { descendantOf = workspace })
+
+--[[ And a payload projected *through* the intersection, which is what the look-through in
+     `src/types/init.luau`, `src/api/Channel.luau` and `src/api/Trust.luau` is for: three copies of
+     one walk, and this line is what fails if any of them is deleted. ]]
+local _throughRanged: t.PayloadOf<typeof(t.u8)> = 5
+local _throughText: t.PayloadOf<typeof(t.string)> = "x"
+local _throughComponented: t.PayloadOf<typeof(t.vector3)> = Vector3.zero
+local _throughClassed: t.PayloadOf<typeof(t.instance)> = workspace
+local _insideStruct: t.PayloadOf<typeof(t.struct({ n = t.u8, s = t.string }))> = { n = 1, s = "x" }
 
 --[[ `t.player` is the payload type Luau cannot get from a class name — `t.instance("Player")` is
      `Type<Instance>`, and `UserId` is what says these are not the same annotation. ]]

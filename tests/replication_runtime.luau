@@ -322,12 +322,15 @@ local serverIn = Inbound.new({
 ]]
 local attempts = 0
 
-local watched = {
-	change = function(on: any, destination: any, subject: any, old: any, new: any): (boolean, string?)
-		attempts += 1
-		return serverOut.change(on, destination, subject, old, new)
-	end,
-}
+--[[ Only `change` is stood in, because only `change` is counted; the rest of the record is the real
+     one. Through `any` because `Tick.Config` names `Outbound.Outbound` since M4 report finding 46,
+     and a rig that supplies one method has to say that is what it is doing. ]]
+local watched = table.clone(serverOut) :: any
+
+watched.change = function(on: any, destination: any, subject: any, old: any, new: any): (boolean, string?)
+	attempts += 1
+	return serverOut.change(on, destination, subject, old, new)
+end
 
 local tick = Tick.new({
 	outbound = watched,

@@ -315,9 +315,13 @@ do
 	Codec.writeInstance(a)
 	Codec.writeInstance(b)
 
-	local packed, instances = Codec.take()
+	local packed, written = Codec.take()
 	check("instances are not in the buffer", buffer.len(packed) == 0)
-	check("instances kept their order", instances[1] == a and instances[2] == b)
+	check("instances kept their order", written[1] == a and written[2] == b)
+
+	--[[ Read back as a peer's sidecar arrives: `{ unknown }`, which is what the receive path is
+	     typed to check since M4 report finding 50. ]]
+	local instances = written :: { unknown }
 
 	Codec.beginRead(packed, instances)
 	check("instances read back in order", Codec.readInstance() == a and Codec.readInstance() == b)

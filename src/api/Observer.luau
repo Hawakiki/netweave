@@ -71,17 +71,9 @@ local Observer = {}
 	and queued those, and could not budget them either, because the classes they name declare no
 	rate.
 ]=]
-export type Stage =
-	"parse"
-	| "budget"
-	| "authorize"
-	| "handler"
-	| "queue"
-	| "send"
-	| "protocol"
-	| "query"
-	| "direction"
-	| "replicate"
+--[[ Defined in `Config` and re-exported here, where a game reads it: the modules that produce a
+     stage sit below the observer, and `Config` is the leaf both halves can reach (finding 48). ]]
+export type Stage = Config.Stage
 
 --[=[
 	@interface Rejection
@@ -207,6 +199,23 @@ type Counter = { count: number, bytes: number }
 local tallies: { [string]: { [string]: Counter } } = {}
 local total = 0
 local since = os.clock()
+
+--[[ One integer per channel that has ever been paced, incremented in place: a client that sends an
+     intent every frame against its rate pays a table read here, not an allocation. ]]
+local paced: { [string]: number } = {}
+
+--[=[
+	@within Observer
+	@function pace
+	@param channel string -- the qualified name of the intent channel
+	@private
+
+	Counts an intent send the client held to its declared rate. Called by the transport's pacer;
+	read back through [Observer.diagnostics] as `paced`.
+]=]
+function Observer.pace(channel: string)
+	paced[channel] = (paced[channel] or 0) + 1
+end
 
 local function tally(channel: string, stage: Stage, bytes: number)
 	local byStage = tallies[channel]
@@ -382,6 +391,10 @@ export type Diagnostics = {
 	read since: number,
 	read total: number,
 	read channels: { read [string]: { read [string]: Tally } },
+	--[[ Intent sends the client held back to the declared rate, per channel. Not refusals — a held
+	     value is superseded, never lost — so they are beside the counters rather than in them
+	     (`PLAN-M5` D-6). ]]
+	read paced: { read [string]: number },
 }
 
 --[=[
@@ -434,6 +447,7 @@ function Observer.diagnostics(): Diagnostics
 		since = since,
 		total = total,
 		channels = table.freeze(channels),
+		paced = table.freeze(table.clone(paced)),
 	}
 
 	table.freeze(taken)
@@ -467,6 +481,7 @@ function Observer.reset()
 	table.clear(observers)
 	table.clear(seen)
 	table.clear(tallies)
+	table.clear(paced)
 	count = 0
 	emitting = 0
 	tombstones = false

@@ -46,8 +46,17 @@ directory*, so it could not reach its own children. `CLAUDE.md` §2 has the meas
 Half of netweave's guarantees are `type function` errors, and the old Luau solver rejects that
 syntax outright. As of the solver's general release, a `--!strict` project stays on the **old**
 solver by default. Open **Workspace Properties → Scripting** and enable the new type solver for this
-place. Without it, every declaration in this tutorial still runs, but the lines marked "does not
-type-check" will type-check, which is the opposite of what you want from them.
+place. ~~Without it, every declaration in this tutorial still runs, but the lines marked "does not
+type-check" will type-check.~~ **That sentence was wrong in direction, and it was measured** (luau-lsp
+1.69.0, `--flag:LuauSolverV2=false`, the flags `analyze` uses): with the old solver the first thing
+you see is netweave's own folder turning red — 390 errors inside `src/`, mostly `This syntax is not
+supported` on every `type function` and `read keyword is illegal here` on every read-only field —
+plus a handful of knock-on errors in your own declaration file (`Unknown type 't.PayloadOf'`, an
+`Expected 'Type<a>', got 'Ranged'`), and not one of the guarantee diagnostics: `tests/api_reject.luau`
+produces 76 errors under the old solver, none of them the 24 it declares. The library still *runs*,
+because the VM does not type-check; the editor does not, and what it says is noise in files you did
+not write. So turn the solver on before anything else, and if you see those two messages inside
+`ReplicatedStorage.netweave`, that is the setting, not the library.
 
 `docs/DESIGN-API.md` §0 explains why the library requires the solver rather than degrading without
 it. The short version: a guarantee that is only sometimes checked is a guarantee nobody can rely on.

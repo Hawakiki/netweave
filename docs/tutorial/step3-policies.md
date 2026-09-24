@@ -18,7 +18,7 @@ local nw = require(ReplicatedStorage.netweave.netweave)
 local t = require(ReplicatedStorage.netweave.types)
 
 local Equip = t.struct({ slot = t.u8(0, 9) })
-type Equip = { slot: number }
+type Equip = t.PayloadOf<typeof(Equip)>
 
 local policy = {}
 
@@ -42,15 +42,17 @@ end)
 return policy
 ```
 
-`type Equip = { slot: number }` is written by hand here, and it is the one place in this tutorial
-where the schema's type is. `nw.all` composes two policies only when their payload types are
-*identical*, and a `t.PayloadOf<typeof(Equip)>` alias is not reliably identical to itself across
-two closures: measured across ten spellings while this step was written, the alias fails to compose
-in most shapes a policy module takes — policies kept as fields of a table, a factory that takes
-`config`, a check written with the `and … or` idiom — with a diagnostic that reads "expected Policy,
-got Policy" because one side has become `Policy<unknown>`. The same shapes with a hand-written type
-compose every time. So: derive payload types with `t.PayloadOf` everywhere else (Steps 8 and 9), and
-write a policy's request type by hand. Making the alias compose is `PLAN-M5` phase 3, item 43.
+A policy's request type is derived like every other, `t.PayloadOf<typeof(Equip)>`, so the check and
+the wire cannot drift.
+
+~~It used to be written by hand here, the one place in this tutorial where a schema's type was.~~
+`nw.all` composes two policies only when their payload types are *identical*, and an alias was not
+reliably identical to itself across two closures: measured across ten spellings, it failed to
+compose in most shapes a policy module takes — policies kept as fields of a table, a factory that
+takes `config`, a check written with the `and … or` idiom — reading "expected Policy, got Policy"
+because one side had become `Policy<unknown>`. `PLAN-M5` phase 1 fixed it at the root: `Policy<T>` is
+an intersection rather than a `typeof(setmetatable(…))` alias, so a function type's contravariance
+applies. Re-measured at the same ten spellings: zero diagnostics.
 
 A check returns a verdict: `nw.allow(value)` or `nw.deny(reason)`. `nw.allow()` with no value
 passes the request through as it was; `nw.allow(request)` with a value hands that value on, so a
@@ -63,9 +65,8 @@ model is not the client's to learn.
 `ctx` is the context for this request. It carries `player`, the sender; `channel`, the qualified
 name; `now`, the clock at receipt; and `character` and `humanoid`, looked up from the player the
 first time something reads them and not before, so a channel whose policies never ask pays nothing.
-Inside a handler `ctx.player` is typed `unknown`, because the type that builds the handler's
-signature cannot name `Player`; it passes anywhere `unknown` is accepted, `publish` included, and
-where you need the real type you write `ctx.player :: Player` (`docs/DESIGN-API.md` §8).
+A handler's `ctx` is the same `nw.Ctx` a check gets, so `ctx.player` is a `Player` on both sides of
+the wire and needs no cast.
 It is valid only for the synchronous duration of the handler that received it. The record is reused
 per player, so a `ctx` kept in an upvalue and read during a later packet's handler would quietly
 hand over *that* request's data; in Studio every acquisition is wrapped in a guard that raises on
@@ -107,43 +108,41 @@ reaches for `ServerStorage` breaks the client at startup, and this is the first 
 runs into: a wallet, a datastore wrapper, an inventory service, all of which exist on one side.
 
 The inner function runs only where a packet is received, which for every inbound class is the
-server. So the answer is to keep the factory pure and reach the server-only thing from inside the
-check, through a seam the server fills in before any traffic arrives:
+server. So a factory has a third piece for exactly this: a **server stage**, a second function it
+may return, which netweave runs once on the server when the protocol is sealed — before any packet
+decodes — and discards on the client. It is the place to reach the module that exists on one side:
 
 ```lua
 -- ReplicatedStorage/Net/Trade.luau — required by both sides
 local Offer = t.struct({ to = t.player, gold = t.u32(0, 1_000_000) })
 type Offer = { to: Player, gold: number }
 
---[[ What the server attaches at startup. Empty on the client, and never read there. ]]
-local server = {} :: { wallet: { goldOf: (Player) -> number }? }
+type Wallet = { goldOf: (Player) -> number }
 
 policy.canAfford = nw.policy(function()
-	return function(ctx: nw.Ctx, offer: Offer)
-		local wallet = server.wallet
+	local wallet: Wallet? = nil                         -- filled by the stage; nil on the client, unread there
 
-		if not wallet then
-			return nw.deny("wallet not attached")   -- fail closed: a missing seam refuses, never allows
-		end
-
-		local held = wallet.goldOf(ctx.player)
+	return function(ctx: nw.Ctx, offer: Offer)          -- per request, server only
+		local held = (wallet :: Wallet).goldOf(ctx.player)
 		return if held < offer.gold then nw.deny(`offers {offer.gold} gold, holds {held}`) else nw.allow()
+	end, function()                                     -- once, at seal, server only
+		wallet = require(game:GetService("ServerStorage").Wallet)
 	end
 end)
-
-return { ns = trade, server = server }
 ```
 
-```lua
--- ServerScriptService/Trade.server.luau
-local Trade = require(ReplicatedStorage.Net.Trade)
-Trade.server.wallet = require(ServerStorage.Wallet)
-```
+The check can cast `wallet` without a guard, because the stage has run before the first packet
+that could reach the check: a stage that raises or yields fails the seal with the channel named,
+loudly, at startup, rather than letting a check run over nothing. A policy attached to two
+channels — or a member of two `nw.all` compositions — runs its stage once. A `require` inside the
+stage is fine, because the stage runs synchronously at seal and never inside the receive loop.
 
-A `require` written inside the check also works, and is cached after the first call, but the first
-call runs the module's body inside the receive loop, and **a check must not yield**: it holds a
-`ctx` that is recycled the moment it returns, and the loop behind it is waiting. The seam costs one
-table read and cannot yield, which is why it is the shape to prefer.
+Before `PLAN-M5` the same problem was solved by hand with a seam: an empty table the shared file
+exports, the server fills at startup, and the check reads and denies when empty. That spelling
+still works and is what a library older than this milestone needs; the stage is the seam folded
+into the declaration, with the fail-closed behaviour enforced by the seal instead of by the game.
+Either way, **a check must not yield**: it holds a `ctx` that is recycled the moment it returns,
+and the loop behind it is waiting.
 
 ## A policy that needs game state
 
@@ -180,32 +179,34 @@ which is the one thing this library asks you to give up.
 
 ## A policy that ignores the payload
 
-`policy.alive` above reads no field of the request, and it is still annotated `_request: Equip`,
-which makes it `Policy<Equip>` and nothing else: composed with a `Policy<Offer>` through `nw.all`
-it is a type error, "expected Policy, got Policy". That is the first thing a second channel runs
-into, and the spellings that look like the fix do not work today — an unannotated `_request` and
-`unknown` fail the same way, and `any` reaches the class's type function as an error type and takes
-the whole namespace's views down with it. All four were measured writing this step.
-
-What works is to write the payload-agnostic policy as a helper that takes the schema as a witness,
-so the type is inferred from the argument and each channel gets its own instance:
+A policy that reads no field of the request goes on any channel, and the way to say so is one
+word — write the request `unknown`:
 
 ```lua
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
-		end
-	end)
-end
+policy.alive = nw.policy(function()
+    return function(ctx: nw.Ctx, _request: unknown)
+        return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
+    end
+end)
 
-offer = nw.command({ data = Offer, rate = 1, authorize = nw.all(alive(Offer), policy.canAfford) }),
-decide = nw.command({ data = Decision, rate = 2, authorize = nw.all(alive(Decision), policy.party) }),
-priceOf = nw.query({ args = t.u16, returns = t.u32, rate = 5, timeout = 5, authorize = alive(t.u16) }),
+offer = nw.command({ data = Offer, rate = 1, authorize = nw.all(policy.alive, policy.canAfford) }),
+decide = nw.command({ data = Decision, rate = 2, authorize = nw.all(policy.alive, policy.party) }),
+priceOf = nw.query({ args = t.u16, returns = t.u32, rate = 5, timeout = 5, authorize = policy.alive }),
 ```
 
-The factory runs once per instance, so this costs one closure per channel at load and nothing per
-request. Making `Policy<T>` compose across payloads without the witness is `PLAN-M5` phase 3.
+One instance serves every channel: `Policy<T>` is `Configured<T> & ((config) -> Configured<T>)`, and
+a function type is contravariant in its parameters, so a check taking `unknown` is usable wherever
+one taking `Equip` is wanted.
+
+~~What works is a helper that takes the schema as a witness, so each channel gets its own
+instance.~~ That was the spelling until `PLAN-M5` phase 1, and it is no longer needed.
+
+**`any` is the one spelling to avoid.** As a channel's only policy it is harmless; composed through
+`nw.all` it reaches the channel class's type function as an error type and takes the whole
+namespace's views down with it — thirteen diagnostics for one such channel beside two healthy ones,
+three of them on the healthy channels' own handlers. Measured. That is Luau's behaviour around
+`any`, not netweave's, and `unknown` is the word that means what a payload-agnostic policy means
+anyway: *this check does not look*.
 
 ## Compose them
 
@@ -236,6 +237,29 @@ Because `equip` is a `command` with a policy, its server handler receives the pa
 policy allowed it. Nothing else in the process can produce that type by accident, which is what makes
 annotating an authoritative function with `Trusted<T>` worth doing: a value that came from a
 `signal`, or from a table a script built by hand, does not fit.
+
+## Deferring one, on purpose
+
+A channel you are prototyping still needs `authorize`, because `nw.command` without it does not
+compile. Write the placeholder yourself:
+
+```lua
+--[[ TODO(netweave): a real policy before this ships. ]]
+local function todo(_schema: unknown)
+	return nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+end
+
+equip = nw.command({ data = Equip, rate = 5, authorize = todo(Equip) }),
+```
+
+netweave ships no `nw.todo`, and that is a decision rather than an omission: a pleasant library name
+gets reached for reflexively, and a command whose authorization is a library constant is one a
+reviewer cannot tell from a finished one. Yours has a name to grep for and a schema argument that
+says which channel it was meant for, so `todo(` in a diff is a question somebody can ask.
 
 ## What does not type-check
 

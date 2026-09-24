@@ -27,6 +27,7 @@ local Inbound = require("./Inbound")
 local Link = require("./Link")
 local Namespace = require("../api/Namespace")
 local Outbound = require("./Outbound")
+local Pacer = require("./Pacer")
 local Protocol = require("../api/Protocol")
 local Query = require("./Query")
 local Recipients = require("./Recipients")
@@ -52,6 +53,13 @@ function Driver.install()
 	local roster = Recipients.roblox()
 	local outbound = Outbound.new(link, roster)
 	local budget = Budget.new()
+
+	--[[ A client's intent sends, held to the declared rate (`PLAN-M5` D-6). Built on the server too,
+	     where nothing ever calls `send`, because one code path is cheaper to be right about than
+	     two; an empty pacer's tick is one `#` on an empty array. ]]
+	local pacer = Pacer.new(function(channel: any, value: any)
+		outbound.push(channel, Outbound.SERVER, value)
+	end)
 
 	--[[
 		`task.spawn` is passed in rather than reached for inside `Query`, which keeps that module
@@ -80,7 +88,13 @@ function Driver.install()
 		end,
 
 		announce = function(who: any?)
-			outbound.hello(if who == nil then Outbound.SERVER else who, Namespace.protocol().hash)
+			local protocol = Namespace.protocol()
+			outbound.hello(if who == nil then Outbound.SERVER else who, protocol.hash, protocol.namespaces)
+		end,
+
+		--[[ Read late like `hash`, and for the same reason. ]]
+		namespaces = function()
+			return Namespace.protocol().namespaces
 		end,
 
 		isServer = isServer,
@@ -141,11 +155,23 @@ function Driver.install()
 		(`PLAN-M4-BUG` phase 6).
 	]]
 	local function ensure()
+		--[[ After the seal, and on the server only: every policy's server stage, once. Asked on
+		     every send and receive because `Namespace.protocol()` seals too, from a game that
+		     prints its hash before its first packet, and a seal that ran there must not leave the
+		     stages unrun; the second and every later call is one boolean (`PLAN-M5` D-5). ]]
 		if Namespace.sealed() then
+			if isServer then
+				Namespace.runStages()
+			end
+
 			return
 		end
 
 		Namespace.seal()
+
+		if isServer then
+			Namespace.runStages()
+		end
 
 		--[[
 			The client's hello goes out here, the moment the protocol is real and before anything
@@ -160,14 +186,15 @@ function Driver.install()
 			to. It answers on a mismatch instead (`src/api/Protocol.luau`).
 		]]
 		if not isServer then
-			outbound.hello(Outbound.SERVER, Namespace.protocol().hash)
+			local protocol = Namespace.protocol()
+			outbound.hello(Outbound.SERVER, protocol.hash, protocol.namespaces)
 		end
 	end
 
 	--[[ Sealing on the way in as well as on the way out. A client that only listens never sends, so
 	     `ensure` would never run and its hello would never leave — and a listen-only client on a
 	     stale build is exactly the one whose mis-decodes are hardest to explain. ]]
-	link.receive(function(packed: buffer, instances: { Instance }, sender: any?)
+	link.receive(function(packed: buffer, instances: { unknown }, sender: any?)
 		ensure()
 		inbound.receive(packed, instances, sender)
 	end)
@@ -193,6 +220,9 @@ function Driver.install()
 		if replicate then
 			replicate()
 		end
+
+		--[[ Held intent values whose channel has a token again go out in this frame's batch. ]]
+		pacer.tick()
 
 		outbound.flush()
 	end)
@@ -220,7 +250,14 @@ function Driver.install()
 	Transport.install({
 		send = function(channel: any, value: any)
 			ensure()
-			outbound.push(channel, Outbound.SERVER, value)
+
+			--[[ An intent is the newest value at the declared rate, and nothing else is: a signal
+			     or a command sent past its rate is the server's refusal to make. ]]
+			if channel.class == "intent" then
+				pacer.send(channel, value)
+			else
+				outbound.push(channel, Outbound.SERVER, value)
+			end
 		end,
 
 		publish = function(channel: any, subject: any, value: any)

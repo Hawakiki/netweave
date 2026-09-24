@@ -39,6 +39,15 @@ local harness = require("./harness")
 local nw = require("../src/netweave")
 local t = require("../src/types")
 
+--[[ What this endpoint just wrote, handed back the way a *peer's* sidecar arrives: `{ unknown }`,
+     because that is what the receive path is typed to check since M4 report finding 50. The cast is
+     the loopback itself — these entries really are instances, and the point is that the reader does
+     not get to assume it. ]]
+local function takeAsWire(): (buffer, { unknown })
+	local packed, instances = Buffer.take()
+
+	return packed, instances :: any
+end
 --[[
 	~~0.9~~ **0.25, which is the honest share of assertions.** The floor was met by counting the nine
 	"was exercised" self-checks and the run-shape checks as refusals (M4-1); tagged honestly, the failure
@@ -325,6 +334,17 @@ local agreement = Protocol.new({
 	isServer = true,
 })
 
+--[[ A digest is the fourth thing a batch can do (PLAN-M5 D-7): `Inbound` asks `wants` once per digest
+     packet, before deciding whether to decode it, so wrapping that is how one is counted as having
+     arrived — whether or not this peer was refused enough to want it. ]]
+local digested = 0
+local wantsOf = agreement.wants
+
+agreement.wants = function(who: any?): boolean
+	digested += 1
+	return wantsOf(who)
+end
+
 --[[ A resync is the third thing a batch can do besides deliver and report: an honoured one clears a
      baseline and says nothing, like a hello. Counted through the store it clears, so the corpus can
      carry resyncs without invariant 3 calling every honoured one a silence. ]]
@@ -410,7 +430,7 @@ end
 
 --[[ The sidecar is typed `{ Instance }` all the way down, and under lune there are no instances —
      these tables stand in, the same way `tests/transport_runtime.luau` does it. ]]
-type Sample = { packed: buffer, instances: { Instance } }
+type Sample = { packed: buffer, instances: { unknown } }
 
 local function encode(): Sample
 	Buffer.take()
@@ -423,6 +443,10 @@ local function encode(): Sample
 
 		if roll < 0.1 then
 			Batch.writeHello(protocol.hash)
+		elseif roll < 0.13 then
+			--[[ The per-namespace digest, kind 3 (PLAN-M5 D-7): count, names and hashes, every byte
+			     of which is mutated like any other. ]]
+			Batch.writeDigest(protocol.namespaces)
 		elseif roll < 0.2 then
 			Batch.writeRequest(Asked, math.random(1, 16000), { n = math.random(0, 255) })
 		elseif roll < 0.25 then
@@ -435,7 +459,7 @@ local function encode(): Sample
 		end
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end
 
@@ -529,7 +553,7 @@ local mutations: { Mutation } = {
 			--[[ Fewer instances than the packets claim. The claim is provably a lie because the
 			     sidecar's length is known, and believing it would hand a packet another packet's
 			     Instance. ]]
-			local trimmed: { Instance } = {}
+			local trimmed: { unknown } = {}
 
 			for index = 1, math.max(0, #sample.instances - 1) do
 				trimmed[index] = sample.instances[index]
@@ -541,7 +565,7 @@ local mutations: { Mutation } = {
 	{
 		name = "sidecar padded",
 		apply = function(sample: Sample): Sample
-			local padded: { Instance } = table.clone(sample.instances)
+			local padded: { unknown } = table.clone(sample.instances)
 			table.insert(padded, part)
 
 			return { packed = sample.packed, instances = padded }
@@ -558,7 +582,7 @@ local mutations: { Mutation } = {
 				return sample
 			end
 
-			local replaced: { Instance } = table.clone(sample.instances)
+			local replaced: { unknown } = table.clone(sample.instances)
 			local slot = math.random(1, #replaced)
 			local junk: any = ({ {}, 12345, "text" })[math.random(1, 3)]
 			replaced[slot] = junk
@@ -624,7 +648,7 @@ local canary = (function(): Sample
 	Buffer.load(nil)
 	Batch.writePacket(Fixed, { a = 1, b = 2, c = 3 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end)()
 
@@ -644,7 +668,7 @@ for round = 1, ROUNDS do
 	exercised[mutation.name] += 1
 
 	local sample = mutation.apply(encode())
-	local before = delivered + reported + greeted + resynced
+	local before = delivered + reported + greeted + resynced + digested
 	local refusedBefore = reported
 
 	local survived = pcall(inbound.receive, sample.packed, sample.instances, mallory)
@@ -664,7 +688,7 @@ for round = 1, ROUNDS do
 		and that is correct. Counting a hello was the fix; loosening the invariant would not have
 		been.
 	]]
-	if buffer.len(sample.packed) > 1 and delivered + reported + greeted + resynced == before then
+	if buffer.len(sample.packed) > 1 and delivered + reported + greeted + resynced + digested == before then
 		silent += 1
 		--[[ The bytes, so a silence can be reproduced without re-running the seed to that round. ]]
 		local hex = {}
@@ -933,7 +957,7 @@ local function changes(): Sample
 		end
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end
 
@@ -946,7 +970,7 @@ local healthy = (function(): Sample
 
 	Batch.writeChange(Mirrored, 9000, nil, { n = 1, flag = true, maybe = 2, pos = { x = 3, y = 4 } })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end)()
 

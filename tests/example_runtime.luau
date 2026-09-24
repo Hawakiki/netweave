@@ -45,7 +45,9 @@ local alice: any = {
 	},
 }
 
-type Frame = { packed: buffer, instances: { Instance } }
+--[[ `{ unknown }` on the way in: a frame is queued on the send side and delivered on the receive
+     side, and the receive path is typed for what a peer may have put there (M4 report finding 50). ]]
+type Frame = { packed: buffer, instances: { unknown } }
 
 local toServer: { Frame } = {}
 local toClient: { Frame } = {}
@@ -54,11 +56,11 @@ local carried: { Frame } = {}
 local function linkInto(queue: { Frame }): Link.Link
 	return {
 		send = function(_reliable, _destination, packed, instances)
-			table.insert(queue, { packed = packed, instances = instances })
+			table.insert(queue, { packed = packed, instances = instances :: { unknown } })
 		end,
 
 		sendAll = function(_reliable, packed, instances)
-			table.insert(queue, { packed = packed, instances = instances })
+			table.insert(queue, { packed = packed, instances = instances :: { unknown } })
 		end,
 
 		receive = function() end,

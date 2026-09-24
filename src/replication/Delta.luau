@@ -123,6 +123,23 @@ local function sameFor(node: Node): (a: any, b: any) -> boolean
 		end
 	elseif kind == "optional" then
 		local sameInner = sameFor(node.inner :: Node)
+		local default = node.default
+
+		if default ~= nil then
+			--[[ Absent and the default are one value to the reader, so they are one value here: a
+			     game that leaves the field out and then sets it to the default has not moved it. ]]
+			return function(a: any, b: any): boolean
+				if a == nil then
+					a = default
+				end
+
+				if b == nil then
+					b = default
+				end
+
+				return a == b
+			end
+		end
 
 		return function(a: any, b: any): boolean
 			if a == nil or b == nil then
@@ -500,6 +517,21 @@ function Delta.build(state: Ir.Layout): Delta
 		reads[index] = READ_CHUNK[chunk.width]
 	end
 
+	--[[ Where the current call's flag bytes start. An upvalue rather than a local of `write`, so that
+	     `commit` below is built once here and not once per call: Luau caches a closure only when
+	     everything it captures is an upvalue or a module local, and `write` runs once per subject
+	     per recipient per frame, where a closure cost 112 B a call for nothing to hold
+	     (SECURITY-REPORT-M4 73; `bench/residue` rung 73). ]]
+	local flagsAt = 0
+
+	local function commit(): boolean
+		for index = 1, count do
+			patches[index](flagsAt + offsets[index], accumulator[index])
+		end
+
+		return true
+	end
+
 	return {
 		layout = layout,
 
@@ -508,18 +540,10 @@ function Delta.build(state: Ir.Layout): Delta
 			     the buffer exactly as it found it — the caller has not decided to send anything
 			     yet. `rollback` is the same rewind the send path uses for an encode that raised. ]]
 			local used, instances = Buffer.mark()
-			local base = Buffer.reserve(bytes)
+			flagsAt = Buffer.reserve(bytes)
 
 			for index = 1, count do
 				accumulator[index] = 0
-			end
-
-			local function commit(): boolean
-				for index = 1, count do
-					patches[index](base + offsets[index], accumulator[index])
-				end
-
-				return true
 			end
 
 			if new == nil then

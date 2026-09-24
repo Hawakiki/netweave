@@ -33,7 +33,7 @@ after that the class name says it.
 | Class | Goes | Declares | Server view | Client view | The handler receives |
 |---|---|---|---|---|---|
 | `command` | client → server | `data`, `rate`, `authorize` | `:listen(function(ctx, value))` | `:send(value)` | `Trusted<T>` |
-| `intent` | client → server | `data`, `rate`, `unreliable?` | `:listen(function(ctx, value))` | `:send(value)` | `T`, the newest per player per tick |
+| `intent` | client → server | `data`, `rate`, `unreliable?` | `:listen(function(ctx, value))` | `:send(value)` — the client holds the newest and sends at the declared rate | `T`, the newest per player per tick |
 | `signal` | client → server | `data`, `rate`, `unreliable?` | `:listen(function(ctx, value))` | `:send(value)` | `Untrusted<T>` |
 | `query` | client → server → client | `args`, `returns`, `rate`, `timeout`, `authorize` | `:handle(function(ctx, args) return answer end)` | `:invoke(args)` → `(answer?, reason?)`, yields | `Trusted<T>` |
 | `state` | server → client | `data`, `audience`, `unreliable?` | `:publish(subject, value)`, and `:broadcast(value)` only under `everyone` | `:listen(function(value))` | `T` |
@@ -43,7 +43,7 @@ after that the class name says it.
 Every inbound class may also declare `burst` and, where its payload has a length prefix, `maxBytes`.
 `ctx` is `player`, `channel`, `now`, `character`, `humanoid`; a policy check receives it typed, a
 handler receives `player` as `unknown` and casts. Schemas come from `t`, and the payload type of any
-schema is `t.PayloadOf<typeof(schema)>` — written by hand only in a policy's parameter, and Step 3
+schema is `t.PayloadOf<typeof(schema)>` — everywhere, policies included since `PLAN-M5`, and Step 3
 says why.
 
 Two rules that hold through all nine steps. Every namespace is declared before the first packet

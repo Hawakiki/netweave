@@ -31,7 +31,9 @@ fits four bytes and otherwise travel as an `f64` whose wholeness is checked on b
 ```lua
 t.boolean                                        -- one bit
 t.optional(t.u16)                                -- one presence bit, then the value if present
+t.optional(t.u8, 16)                             -- the same bit; absent reads as 16, and 16 is never sent
 t.enum({ primary = true, secondary = true, melee = true })   -- two bits: ceil(log2 3)
+t.literal("v3")                                  -- no bits, no bytes: the value is in the declaration
 t.union({ move = t.struct({ x = t.u8, y = t.u8 }), wait = t.u8 })
 ```
 
@@ -40,6 +42,13 @@ markers and enum tags accumulate into it, emitted as the fewest whole bytes that
 why netweave's flag payload in `bench/RESULTS.md` is 8 bytes on the wire against Blink's 10 or 20:
 Blink packs only when its author reaches for `set`, and netweave packs because there is no other
 spelling. An enum of one variant costs nothing; two cost one bit; three or four cost two.
+
+An optional with a default has the payload type of its inner type, not `T?`: the reader hands the
+default back where the bit is clear, and the writer clears the bit for the default too, so the
+common value costs a bit rather than its bytes. A literal is the one value both sides already
+know — a payload version, a union branch that carries a name and nothing else — and the writer
+refuses any other. Both reach the protocol hash, so two builds that disagree on a default or a
+literal are refused at the first packet rather than reading each other wrongly.
 
 A union carries a tag of `ceil(log2 n)` bits and then only the chosen branch. The branches' own
 flags share the same bit positions, because only one branch is ever present, so a union of two
@@ -71,19 +80,23 @@ than off `nw.types`; Step 9 has the one-line require that reaches it.
 
 ```lua
 t.string(0, 32)                                  -- length prefix, then 0..32 bytes
-t.string(1, 20, { utf8 = true, pattern = "[%w_]+" })
+t.string(1, 20, { utf8 = true, charset = "%w_" }) -- and only word characters
+t.string(1, 20, { pattern = "%a+%d?" })          -- or a shape, when a set is not enough
 t.array(t.u8, 0, 8)                              -- length prefix, then up to eight
 t.array(t.u8, 100)                               -- exactly a hundred: no prefix at all
 t.map(t.string(1, 16), t.u8)                     -- count, then key/value pairs
+t.set(t.string(1, 16))                           -- count, then the entries: { [string]: true }
 t.buffer(0, 900)                                 -- length prefix, then the bytes
 ```
 
 A length bound is not decoration. It is what gives the channel its byte ceiling, and an array with
 a fixed length has no length prefix at all, which is how the benchmark's array of a hundred structs
-lands at exactly 601 bytes. `utf8` and `pattern` write nothing and refuse on both sides. A pattern
-is refused at declaration when its worst case is unbounded — `"(.*)@(.*)%.(.*)"` against a 65,535
-byte string is a way for a client to spend the server's frame — and accepted when the number of
-steps it can take is bounded by the string's own length.
+lands at exactly 601 bytes. `utf8`, `charset` and `pattern` write nothing and refuse on both sides.
+A `charset` is what goes between the brackets of a Lua character class, and it is the option to
+reach for first: one class, one repetition, so the check is linear in the string whatever a client
+sends. A `pattern` says more, and is refused at declaration when its worst case is unbounded —
+`"(.*)@(.*)%.(.*)"` against a 65,535 byte string is a way for a client to spend the server's
+frame — and accepted when the number of steps it can take is bounded by the string's own length.
 
 ## Roblox datatypes
 

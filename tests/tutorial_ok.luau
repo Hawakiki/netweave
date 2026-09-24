@@ -64,26 +64,48 @@ local _player = t.player
 -- ---------------------------------------------------------------------------------------------
 
 --[[
-	Hand-written, not `t.PayloadOf<typeof(Equip)>`, for every type a policy's check names in its
-	parameter. Measured across ten spellings (2026-09-11): with the alias, `nw.all` refuses to compose
-	two policies in most shapes a module takes — policies kept as fields of a `local policy = {}`,
-	a factory that takes `config`, a check written with the `and ... or` idiom — reading "expected
-	Policy, got Policy" because one side's payload is `unknown`; the same shapes with a hand-written
-	type compose every time, which is what the README example does. `t.PayloadOf` stays right for
-	handlers, helpers and unions (steps 8 and 9). `PLAN-M5` phase 3 item 43.
+	~~Hand-written, not `t.PayloadOf<typeof(Equip)>`, for every type a policy's check names in its
+	parameter.~~ **`PLAN-M5` phase 1 closed that** (item 43): `Policy<T>` is an intersection now, so
+	a function type's contravariance applies and every spelling composes — the alias as the request
+	type, policies kept as fields of a `local policy = {}`, a factory that takes `config`, a check
+	written with the `and ... or` idiom. Re-measured at those ten spellings, zero diagnostics. So the
+	alias is what this file writes, like everywhere else.
 ]]
-type Equip = { slot: number }
+type Equip = t.PayloadOf<typeof(Equip)>
 
 local policy = {}
 
---[[ Where the two stages run: the factory at load on both sides, the check on the server only, so
-     a server-only dependency is reached through a seam the server fills. ]]
+--[[ Where the three pieces run: the factory at load on both sides, the check on the server per
+     request, and the server stage once at seal — which is where a server-only module is reached. ]]
 local Offer = t.struct({ to = t.player, gold = t.u32(0, 1_000_000) })
 type Offer = { to: Player, gold: number }
 
-local server = {} :: { wallet: { goldOf: (Player) -> number }? }
+type Wallet = { goldOf: (Player) -> number }
+
+local WalletModule: Wallet = {
+	goldOf = function(_player: Player)
+		return 0
+	end,
+}
 
 policy.canAfford = nw.policy(function()
+	local wallet: Wallet? = nil
+
+	return function(ctx: nw.Ctx, offer: Offer)
+		local balance = (wallet :: Wallet).goldOf(ctx.player)
+		return if balance < offer.gold
+			then nw.deny(`offers {offer.gold} gold, holds {balance}`)
+			else nw.allow()
+	end, function()
+		wallet = WalletModule
+	end
+end)
+
+--[[ The older spelling, a seam the server fills by hand, kept because a library before PLAN-M5
+     needs it: an empty table the shared file exports, read by the check, denying when empty. ]]
+local server = {} :: { wallet: Wallet? }
+
+policy.canAffordBySeam = nw.policy(function()
 	return function(ctx: nw.Ctx, offer: Offer)
 		local wallet = server.wallet
 
@@ -98,11 +120,7 @@ policy.canAfford = nw.policy(function()
 	end
 end)
 
-server.wallet = {
-	goldOf = function(_player: Player)
-		return 0
-	end,
-}
+server.wallet = WalletModule
 
 --[[ A policy that closes over game state. ]]
 local Decision = t.struct({ tradeId = t.u16, accept = t.boolean })
@@ -125,7 +143,7 @@ policy.party = nw.policy(function()
 end)
 
 policy.alive = nw.policy(function()
-	return function(ctx: nw.Ctx, _request: Equip)
+	return function(ctx: nw.Ctx, _request: unknown)
 		return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
 	end
 end)
@@ -133,21 +151,18 @@ end)
 --[[
 	A policy that reads no field of the request, written so it can go on any channel.
 
-	Measured (2026-09-11), each against `nw.all(alive, onlyB)` where `onlyB` is `Policy<B>`: a check
-	annotated `_request: Equip` is `Policy<Equip>` and cannot also be `Policy<Offer>`; unannotated
-	and `unknown` are "expected Policy, got Policy"; `any` reaches the class type function as
-	`*error-type*` and takes the whole namespace's views down with it; a generic helper with no
-	argument, `alive()`, is not inferred from its sibling. What works is a helper that takes the
-	schema as a witness, so `T` is inferred from the argument and each channel gets its own
-	instance. Step 3 says so; `PLAN-M5` phase 3 item 43 owns making `Policy<T>` composable.
+	~~What works is a helper that takes the schema as a witness, so `T` is inferred from the
+	argument and each channel gets its own instance.~~ **One word does it since `PLAN-M5` phase 1:**
+	write the request `unknown`. `Policy<T>` is `Configured<T> & ((config: any) -> Configured<T>)`,
+	and a function type is contravariant in its parameters, so a check taking `unknown` is usable
+	wherever one taking `Equip` is wanted and `nw.all(policy.alive, policy.ownsSlot)` composes.
+
+	`any` is the one spelling still to avoid **inside `nw.all`**, and that is Luau rather than
+	netweave. Measured while closing item 43 and D-8: as a channel's only policy it is clean now,
+	and composed through `nw.all` it still reaches the class type function as `*error-type*` — with
+	two healthy siblings in the same namespace, thirteen diagnostics, three of them the siblings'
+	own views. `unknown` is clean in both positions.
 ]]
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
-		end
-	end)
-end
 
 policy.ownsSlot = nw.policy(function(config)
 	local slots: number = config.slots or 3
@@ -213,7 +228,7 @@ local combat = nw.namespace("combat", {
 		returns = t.struct({ primary = t.u16, secondary = t.u16 }),
 		rate = 2,
 		timeout = 5,
-		authorize = alive(t.u8),
+		authorize = policy.alive,
 	}),
 
 	playerState = nw.state({
@@ -236,13 +251,13 @@ local combat = nw.namespace("combat", {
 	offer = nw.command({
 		data = Offer,
 		rate = 1,
-		authorize = nw.all(alive(Offer), policy.canAfford),
+		authorize = nw.all(policy.alive, policy.canAfford),
 	}),
 
 	decide = nw.command({
 		data = Decision,
 		rate = 2,
-		authorize = nw.all(alive(Decision), policy.party),
+		authorize = nw.all(policy.alive, policy.party),
 	}),
 
 	resolved = nw.event({
@@ -257,6 +272,28 @@ local combat = nw.namespace("combat", {
 })
 
 combat.server.resolved:publish(1, { tradeId = 1, accepted = true })
+
+--[[
+	Step 3's prototyping pattern. netweave ships no `nw.todo`, because a library name gets reached for
+	reflexively and a command authorized by a library constant is one a reviewer cannot tell from a
+	finished one (`PLAN-M5` non-goals). A game writes its own, with a name to grep for and the schema
+	it was meant for.
+]]
+local function todo(_schema: unknown)
+	return nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+end
+
+local prototype = nw.namespace("prototype", {
+	equip = nw.command({ data = Equip, rate = 5, authorize = todo(Equip) }),
+})
+
+prototype.server.equip:listen(function(_ctx, chosen)
+	local _slot: number = chosen.slot
+end)
 
 -- Step 4, server
 combat.server.equip:listen(function(ctx, chosen)
@@ -284,7 +321,7 @@ type Loadout = { primary: number, secondary: number }
 local loadouts: { [any]: { Loadout } } = {}
 
 combat.server.getLoadout:handle(function(ctx, slot)
-	local player = ctx.player :: Player
+	local player = ctx.player
 	return loadouts[player][slot + 1]
 end)
 
@@ -404,7 +441,11 @@ local _offset = t.u16(1000, 1255)
 local _normal = t.quantized(-1, 1, 2 / 254)
 local _heading = t.quantized(-180, 180, 0.25)
 local _three = t.enum({ primary = true, secondary = true, melee = true })
-local _named = t.string(1, 20, { utf8 = true, pattern = "[%w_]+" })
+local _defaulted = t.optional(t.u8, 16)
+local _version = t.literal("v3")
+local _entries = t.set(t.string(1, 16))
+local _named = t.string(1, 20, { utf8 = true, charset = "%w_" })
+local _shaped = t.string(1, 20, { pattern = "%a+%d?" })
 local _exact = t.array(t.u8, 100)
 local _bytes = t.buffer(0, 900)
 local _flat = t.vector2(t.i16(-1024, 1024))
@@ -437,7 +478,7 @@ local _cost: number = cost({ tag = "wait", value = 3 })
 local function equipFor(_player: Player, _chosen: nw.Trusted<Equip>) end
 
 combat.server.equip:listen(function(ctx, chosen)
-	equipFor(ctx.player :: Player, chosen)
+	equipFor(ctx.player, chosen)
 end)
 
 combat.server.openedMenu:listen(function(_ctx, opened)

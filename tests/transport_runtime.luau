@@ -24,11 +24,21 @@ local Inbound = require("../src/transport/Inbound")
 local Link = require("../src/transport/Link")
 local Observer = require("../src/api/Observer")
 local Outbound = require("../src/transport/Outbound")
+local Pacer = require("../src/transport/Pacer")
 local Recipients = require("../src/transport/Recipients")
 local Serdes = require("../src/codec/Serdes")
 local harness = require("./harness")
 local t = require("../src/types")
 
+--[[ What this endpoint just wrote, handed back the way a *peer's* sidecar arrives: `{ unknown }`,
+     because that is what the receive path is typed to check since M4 report finding 50. The cast is
+     the loopback itself — these entries really are instances, and the point is that the reader does
+     not get to assume it. ]]
+local function takeAsWire(): (buffer, { unknown })
+	local packed, instances = Buffer.take()
+
+	return packed, instances :: any
+end
 --[[
 	The sections below are tagged failure- or success-path, and the file declares a floor
 	(`PLAN-M3` D-10).
@@ -107,7 +117,7 @@ local sink: Batch.Sink = {
 		error("this sink handles no replicated channel")
 	end,
 
-	admit = function(channel: any, _bytes: number): (string?, string?)
+	admit = function(channel: any, _bytes: number): (string?, Observer.Stage?)
 		return denyOn[channel.qualified], "budget"
 	end,
 
@@ -441,7 +451,7 @@ do
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	equals("both instances are in the sidecar", #instances, 2)
 
 	Batch.read(packed, instances, sink)
@@ -464,7 +474,7 @@ do
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 
 	suite.failing()
 
@@ -499,7 +509,7 @@ do
 	Batch.writePacket(Maybe, { who = nil, n = 2 })
 	Batch.writePacket(Maybe, { who = present :: any, n = 3 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	equals("only the present ones are in the sidecar", #instances, 2)
 
 	Batch.read(packed, instances, sink)
@@ -533,7 +543,7 @@ do
 	Batch.writePacket(Maybe, { who = mine :: any, n = 1 })
 	Batch.writePacket(Maybe, { who = yours :: any, n = 2 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 
 	--[[
 		version, id, instances, payload. There is no length: an optional instance costs no bytes, so
@@ -1230,6 +1240,198 @@ end
 do
 	reset()
 
+	--[[
+		A handler that yields across another packet of the same player (`PLAN-M5` D-5, acceptance 8).
+
+		The record behind `ctx` is shared per player and refreshed by every `acquire`, so a handler
+		parked on a yield resumes holding a `ctx` that now describes a later request. Studio's guard
+		raises on the read; production used to hand over the other request's data with nothing said.
+		The transport compares the player's release count around the handler and reports at `handler`
+		when it moved — a constant reason, one integer compare, no allocation.
+
+		Driven with coroutines because that is what a yield is: the first receive runs on its own
+		thread and parks inside the handler; the second, on this thread, dispatches the same player's
+		next packet and releases; the first resumes and returns. Confirmed to fail on the pre-fix
+		tree: no report, and the resumed handler reading the second packet's channel.
+	]]
+	--[[ Guard off, as acceptance 8 says: this section is about what production does. With the
+	     Studio guard on the resumed handler's read raises instead, which is the guard doing its job
+	     and a second report beside this one — measured in the first Studio pass of the section. ]]
+	local guardWas = Context.guarded()
+	Context.setGuarded(false)
+
+	local channel = outboundChannel(96, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[96] = channel
+
+	local other = outboundChannel(97, t.struct({ a = t.u8 }), { class = "signal" })
+	byId[97] = other
+
+	local seenAfter: string? = nil
+	local resumed = false
+
+	channel.handler = function(ctx: any, _value: any)
+		coroutine.yield()
+		resumed = true
+		seenAfter = ctx.channel
+	end
+
+	other.handler = function(_ctx: any, _value: any) end
+
+	local inbound, reported = inboundOf(true, {})
+
+	--[[ `inboundOf` records stage and channel; the reason is what this section is about. ]]
+	local reasons: { string } = {}
+	local stop = Observer.observe(function(rejection)
+		table.insert(reasons, rejection.reason)
+	end)
+
+	Batch.writePacket(channel, { a = 1 })
+	local first = Buffer.take()
+
+	Batch.writePacket(other, { a = 2 })
+	local second = Buffer.take()
+
+	local parked = coroutine.create(function()
+		inbound.receive(first, nil, alice)
+	end)
+
+	check(
+		"the first receive parks inside its handler",
+		coroutine.resume(parked) and coroutine.status(parked) == "suspended"
+	)
+	equals("nothing is reported while it is parked", #reported, 0)
+
+	--[[ The same player's next packet, on this thread, while the first handler is parked. ]]
+	inbound.receive(second, nil, alice)
+	equals("the second packet is dispatched and reports nothing of its own", #reported, 0)
+
+	check(
+		"the parked handler resumes and finishes",
+		coroutine.resume(parked) and coroutine.status(parked) == "dead"
+	)
+	check("it ran to the end", resumed)
+
+	--[[ What the handler saw after the yield is the other request's channel: the corruption the
+	     report is for, shown rather than asserted away. With the guard off, that is production. ]]
+	equals("the ctx it held now describes the later packet", seenAfter, other.qualified)
+
+	equals("and exactly one report says so", #reported, 1)
+	check("at the handler stage", string.find(reported[1], "handler:", 1, true) ~= nil)
+	check("naming the yield", #reasons == 1 and string.find(reasons[1], "yielded", 1, true) ~= nil)
+	check(
+		"and the query class as the way to wait",
+		#reasons == 1 and string.find(reasons[1], "query", 1, true) ~= nil
+	)
+
+	--[[ A handler that yields with nobody else's packet in between is neither detected nor harmed. ]]
+	local alone = coroutine.create(function()
+		inbound.receive(first, nil, bob)
+	end)
+	coroutine.resume(alone)
+	coroutine.resume(alone)
+	equals("a yield with no packet in between is not a report", #reported, 1)
+
+	Context.setGuarded(guardWas)
+	stop()
+	channel.handler = nil
+	other.handler = nil
+	byId[96] = nil
+	byId[97] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
+	--[[
+		A client's intent sends, paced to the declared rate (`PLAN-M5` D-6, acceptance 9).
+
+		Sixty sends a second against `rate = 30` used to be thirty refusals a second at `budget` on
+		the server, invisible on the client, while the handler saw one value a tick anyway. The pacer
+		holds the newest value per channel and pushes it when the channel's bucket has a token — the
+		same bucket the server runs — so what goes on the wire is what the server would admit, nothing
+		is refused, nothing is reported, and the held value is superseded rather than lost.
+
+		Driven with an injected clock, and the bucket drained first: a fresh bucket admits a full
+		burst before the rate binds, on both sides, so the steady state is the second that follows.
+		Confirmed to fail on the pre-fix tree by absence: `Pacer` did not exist, and `Driver.send`
+		pushed every intent as it came.
+	]]
+	local at = 0
+	local pushed: { { channel: any, value: any } } = {}
+
+	local pacer = Pacer.new(function(channel: any, value: any)
+		table.insert(pushed, { channel = channel, value = value })
+	end, function()
+		return at
+	end)
+
+	local hover = outboundChannel(98, t.struct({ slot = t.u8 }), { class = "intent", rate = 30 })
+	byId[98] = hover
+
+	local reported = 0
+	local stop = Observer.observe(function()
+		reported += 1
+	end)
+
+	--[[ Drain the burst: thirty sends at once take the thirty tokens a fresh bucket holds. ]]
+	for slot = 1, 30 do
+		check("a send inside the burst goes out as it comes", pacer.send(hover, { slot = slot }))
+	end
+
+	equals("the burst went out", #pushed, 30)
+
+	--[[ Sixty sends across the next second, one every sixtieth: the bucket refills thirty tokens
+	     over that second, so every other send has one. ]]
+	local admitted = 0
+
+	for index = 1, 60 do
+		at = index / 60
+
+		if pacer.send(hover, { slot = 100 + index }) then
+			admitted += 1
+		end
+	end
+
+	check(`across a second, about the rate went out: {admitted}`, admitted >= 29 and admitted <= 31)
+	equals("and the rest were held, not refused", reported, 0)
+	equals(
+		"counted as paced, not as anything else",
+		Observer.diagnostics().paced[hover.qualified],
+		60 - admitted
+	)
+	equals("the newest value is the one waiting", (pacer.held(hover) :: any).slot, 160)
+
+	--[[ A tick with no token pushes nothing; a tick after the bucket has a token pushes the held
+	     value, and only it. ]]
+	local before = #pushed
+	pacer.tick()
+	equals("no token, nothing goes", #pushed, before)
+
+	at = 2
+	pacer.tick()
+	equals("with a token, the held value goes", #pushed, before + 1)
+	equals("and it is the newest", pushed[#pushed].value.slot, 160)
+	check("and nothing is held any more", pacer.held(hover) == nil)
+
+	--[[ A newer send while one is held replaces it, so the client never sends stale input behind
+	     fresh input. ]]
+	at = 2.001
+	for slot = 1, 31 do
+		pacer.send(hover, { slot = slot })
+	end
+	check("a value is held again", pacer.held(hover) ~= nil)
+	pacer.send(hover, { slot = 99 })
+	equals("a newer send replaces the held one", (pacer.held(hover) :: any).slot, 99)
+
+	stop()
+	byId[98] = nil
+	Observer.reset()
+end
+
+do
+	reset()
+
 	--[[ Refused before the payload is decoded, so a flood costs an id read and a seek rather than
 	     a deserialisation (`PLAN-M2` R-2). ]]
 	local channel = outboundChannel(43, t.struct({ a = t.u8 }), { class = "signal" })
@@ -1781,7 +1983,7 @@ do
 	Batch.writePacket(channel, { a = 2 })
 	Batch.writePacket(channel, { a = 3 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)
@@ -1848,7 +2050,7 @@ do
 
 		Batch.writePacket(channel, { a = 1 })
 
-		local packed, instances = Buffer.take()
+		local packed, instances = takeAsWire()
 		local survived = pcall(function()
 			inbound.receive(packed, instances, alice)
 		end)
@@ -1907,7 +2109,7 @@ do
 	local inbound = inboundOf(true, {})
 
 	Batch.writePacket(channel, { a = 1 })
-	local first, firstInstances = Buffer.take()
+	local first, firstInstances = takeAsWire()
 	pcall(function()
 		inbound.receive(first, firstInstances, alice)
 	end)
@@ -1916,7 +2118,7 @@ do
 
 	reset()
 	Batch.writePacket(channel, { a = 2 })
-	local second, secondInstances = Buffer.take()
+	local second, secondInstances = takeAsWire()
 	pcall(function()
 		inbound.receive(second, secondInstances, bob)
 	end)
@@ -1964,7 +2166,7 @@ do
 	Batch.writePacket(channel, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
 	Batch.writePacket(channel, { 3, 4 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)
@@ -2023,7 +2225,7 @@ do
 
 	Batch.writePacket(channel, full)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	inbound.receive(packed, instances, alice)
 
 	equals("a full array, which only the corrected ceiling admits, arrives", got, 1)
@@ -2072,7 +2274,7 @@ do
 		Batch.writePacket(channel, { a = index })
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)
@@ -2110,7 +2312,7 @@ do
 		Batch.writePacket(channel, { a = 1 })
 	end
 
-	local first, firstInstances = Buffer.take()
+	local first, firstInstances = takeAsWire()
 	inbound.receive(first, firstInstances, alice)
 
 	equals("the first batch delivered its bound", delivered, 2)
@@ -2121,7 +2323,7 @@ do
 		Batch.writePacket(channel, { a = 1 })
 	end
 
-	local second, secondInstances = Buffer.take()
+	local second, secondInstances = takeAsWire()
 	inbound.receive(second, secondInstances, alice)
 
 	equals("and the next batch starts fresh", delivered, 4)
@@ -2174,7 +2376,7 @@ do
 
 	Batch.writePacket(nested, wide)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)

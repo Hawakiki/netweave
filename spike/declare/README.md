@@ -15,6 +15,7 @@ FLAGS="--platform=roblox --definitions=tools/globalTypes.d.luau --flag:LuauSolve
 "$LSP" analyze $FLAGS spike/declare/views.luau       # expect 4
 "$LSP" analyze $FLAGS spike/declare/infer.luau       # expect 5
 "$LSP" analyze $FLAGS spike/declare/mod/use.luau     # expect 4, not 5
+"$LSP" analyze $FLAGS spike/declare/passed.luau      # expect 4; with the cast, 2
 ```
 
 Assertions are made by assignment. A line that should type-check produces no output; a line
@@ -105,3 +106,30 @@ vanished were exactly the direction and trust guarantees the file exists to test
 
 `src/api/View.luau` pins its two view mappers with the `Views<D>` alias, and `src/api/Trust.luau`
 pins its two brands with local aliases — each with a comment saying what deleting the line breaks.
+
+## Q6 — what does passing a namespace *bare* to a `nw.Views` parameter cost?
+
+**On a namespace big enough, the payload of a handler written earlier.** `passed.luau` is the
+reproduction: two lines in it are meant to error, and with the namespace cast at the call those two
+are the whole output. Passed bare, the count goes to four — the two intended, plus two on a handler
+written far above the call whose payload has become `unknown`.
+
+What it is not:
+
+| tried | result |
+|---|---|
+| the channel table as its own local, so the parameter's type never mentions the namespace | no change |
+| five channels, four handlers | does not reproduce |
+| nine channels, one handler doing arithmetic on a payload | reproduces |
+| the same shape with the cast at the call | the two intended diagnostics, nothing else |
+
+So it is neither a lost brand nor the `typeof(ns.channels)` self-reference, and there is nothing in
+`View` to fix: it is an inference-order effect that needs a namespace of some size. `tests/api_ok.luau`
+passes its own namespace bare and is fine because that namespace has one channel — which is why
+nothing there should be copied into a dense file.
+
+It cannot be pinned the way Q5's erasure is. A canary in `tests/api_reject.luau` needs the count to
+be stable, and this shape *adds* two diagnostics while removing others, so the file would have to
+declare a number that moves with the solver rather than with netweave. The guard is the cast, which
+`tests/tutorial_ok.luau` carries with the measurement beside it, and this file, which keeps the
+reproduction runnable (`PLAN-M5` phase 1).

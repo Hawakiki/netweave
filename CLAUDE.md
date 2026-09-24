@@ -68,6 +68,10 @@ docs/
     PLAN-M4-BUG.md            a sub-milestone that gates M4's close
     PLAN-M5.md
   SECURITY-REPORT*.md         external audits, one per milestone; the tracker for each is PLAN-M4 §9
+live/                         the multi-client probe: a place for Studio's "Clients and Servers" test mode,
+                              built by live.project.json. One channel of every class, the console as the
+                              measurement; the only thing that has ever run netweave on real remotes with
+                              two clients. Not under analyze (instance requires); checked by hand
 bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
@@ -225,12 +229,12 @@ check the manifest before assuming it is not installed.
 - `lune` — scripts, codegen, report generation, test runners
 - `stylua` — formatting; `stylua.toml` sets `syntax = "Luau"`, without which nested generics fail
   to parse. `.styluaignore` excludes vendored sources.
-- `selene` — linting; `netweave.toml` declares the `types` global that exists only inside a
-  `type function` body. ~~because selene has no scoped lint filters~~ Selene does have
-  `-- selene: allow(undefined_variable)` for the block it precedes (M4-1, measured); moving the
-  hand-kept global list to block allows is `PLAN-M5`. `roblox.yml` beside it is selene's generated
-  Roblox standard library and is load-bearing: renaming it takes `selene src tests` from 0 to 212
-  errors.
+- `selene` — linting. ~~`netweave.toml` declares the `types` global that exists only inside a
+  `type function` body, because selene has no scoped lint filters~~ Selene does have
+  `-- selene: allow(undefined_variable)` for the block it precedes (M4-1, measured), and since
+  `PLAN-M5` phase 6 every `type function` carries one on the line before it; `netweave.toml` is empty
+  but for the base and says why. `roblox.yml` beside it is selene's generated Roblox standard
+  library and is load-bearing: renaming it takes `selene src tests` from 0 to 212 errors.
 - `luau-lsp` — **type checking, which is part of the test suite**, not a convenience
 
 ### Checks
@@ -274,6 +278,9 @@ lune run tools/messages       # every error( in src/api names the fix, not the r
 lune run tools/exports        # every public type is written in an _ok file, or listed as a gap
 lune run bench/envelope        # the netweave batch envelope, without Studio
 lune run bench/check          # everything under bench/ parses
+lune run bench/pace           # the client pacer, against the server's bucket: 0 refusals
+lune run bench/residue        # the optimisation residue M4 found, one rung per finding, each gone
+lune run bench/crossover      # where a diff loses to a resend, in bytes, on the real writer
 stylua --check src tests analyze.luau bench spike
 selene src tests
 ```
@@ -308,7 +315,9 @@ The runner sits in `ReplicatedStorage` alongside the tests, and runs there **bec
 still mapped through `tests/` — that runs the whole suite twice.
 
 `analyze` requires `LuauSolverV2` and `tools/globalTypes.d.luau`. Both are set up for you; see
-`tools/README.md` if the definitions file is missing.
+`tools/README.md` if the definitions file is missing. It walks `src/` and `tests/` recursively, and
+since `PLAN-M5` phase 6 also `bench/*.luau`, `tools/*.luau` and itself, one level deep — the lune-side
+scripts, whose `@lune/*` requires resolve through the alias `lune setup` writes into `.luaurc`.
 
 ### Test convention
 

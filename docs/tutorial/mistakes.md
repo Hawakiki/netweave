@@ -4,7 +4,15 @@ Collected from a reader who built [the trade example](example-trade.md) after th
 and checked against the source. The order is frequency times silence: the ones at the top are the
 ones you make often and find late.
 
-## 1. Declaring a namespace in a server-only script
+**The order is the one M4 measured, and five of the ten no longer belong in it.** `PLAN-M5` gave
+1, 2, 3, 5 and 8 a mechanism, so each of those now fails where it is written or reports itself on
+the console, and each keeps its place with the old behaviour struck through — a page that renumbers
+itself loses the reason it was ranked that way. Read by silence today and the top three are **7**
+(writing into a replicated value), **6** (a state change declared as a signal) and **9** (a
+namespace passed without the cast, which *removes* diagnostics from handlers written earlier).
+Number 1 is now the loudest thing in the library.
+
+## 1. Declaring a namespace in a server-only script — ~~quiet~~ refused at its line since M5
 
 ```lua
 -- ServerScriptService/Admin.server.luau   ← the client never sees this file
@@ -13,17 +21,26 @@ local admin = nw.namespace("admin", {
 })
 ```
 
-**What happens.** The protocol hash is computed over *every* declaration on each side. The server's
-hash includes `admin`; the client's does not; every client that connects is refused at stage
-`protocol` on its first batch, and every batch after it. The whole game stops moving, and the only
-place that says why is the console line `refused at protocol from <player>: the peer is on protocol
-0x… and this peer is on 0x…`, or an observer.
+**What happened, until `PLAN-M5` phase 8.** The protocol hash is computed over *every* declaration
+on each side. The server's hash includes `admin`; the client's does not; every client that connects
+is refused at stage `protocol` on its first batch, and every batch after it. The whole game stops
+moving, and the only place that says why is the console line `refused at protocol from <player>: the
+peer is on protocol 0x… and this peer is on 0x…`, or an observer.
+
+**What happens now.** `nw.namespace` reads the declaring module's name and refuses one under
+`ServerScriptService` or `ServerStorage` at that line, before anything else, with the message
+naming the module and the fix. And for the disagreements that are a matter of degree — a stale
+client, a half-deployed build — every hello now travels with a per-namespace digest, and the
+refusing peer's reason names the namespace one side lacks or the one a channel differs in, on both
+consoles, instead of two hashes. This entry stays at the top because it is the one the list was
+ranked around, and because the ranking is M4's rather than today's; in behaviour it belongs with
+the immediate failures in §10, where it is listed again.
 
 **The fix.** Every namespace lives in a shared module under `ReplicatedStorage`, required by both
 sides. A policy that is server-only reaches its dependency through a seam (Step 3), and the
 declaration still ships to the client, where the policy never runs.
 
-## 2. Sending an intent every frame
+## 2. Sending an intent every frame — ~~quiet~~ paced by the client since M5
 
 ```lua
 RunService.RenderStepped:Connect(function()
@@ -35,10 +52,16 @@ end)
 refusals a second at stage `budget`, and the client is not told; the feature looks like it "mostly
 works", which is why this one lasts.
 
-**The fix.** Send at the rate you declared — a `Heartbeat` accumulator, as the example does — or
-declare the rate you send at.
+**What happens now** (`PLAN-M5` phase 7). The client view holds the newest value per intent channel
+and pushes it at the declared rate, through the same bucket the server runs: thirty packets a
+second on the wire, none refused, the handler seeing the newest each tick. `nw.diagnostics().paced`
+counts what was held. The `Heartbeat` accumulator in the example is no longer needed and does no
+harm.
 
-## 3. Requiring a server module inside a policy factory
+**The fix, before that.** Send at the rate you declared — a `Heartbeat` accumulator — or declare
+the rate you send at.
+
+## 3. Requiring a server module inside a policy factory — ~~by hand~~ the stage, since M5
 
 ```lua
 policy.canAfford = nw.policy(function()
@@ -51,10 +74,13 @@ end)
 whichever side is requiring it. The client crashes at startup with `Wallet is not a valid member of
 ServerStorage`.
 
-**The fix.** The seam: the shared file exports an empty `server` table, the server fills it before
-any traffic, and the check reads it and denies when it is empty. A `require` inside the check also
-works and is cached, but its first call runs the module body inside the receive loop, and a check
-must not yield.
+**The fix.** ~~The seam: the shared file exports an empty `server` table, the server fills it before
+any traffic, and the check reads it and denies when it is empty.~~ Since `PLAN-M5` phase 7 the
+factory returns a second function, the **server stage**, and does the `require` there: netweave runs
+it once on the server at seal, before any packet decodes, and never on the client, and a stage that
+raises fails the seal loudly. The seam still works for a library older than that. A `require`
+inside the check also works and is cached, but its first call runs the module body inside the
+receive loop, and a check must not yield.
 
 ## 4. Reusing a payload-agnostic policy, then "fixing" it with `any`
 
@@ -69,18 +95,22 @@ decide = nw.command({ data = Decision, authorize = nw.all(policy.alive, policy.p
 	return function(ctx: nw.Ctx, _: any) ... end
 ```
 
-**What happens.** `any` reaches the class's type function as an error type, and the whole
-namespace's views become `unknown` — every handler in the file loses its payload type to fix one
-diagnostic, and nothing says which channel did it.
+**What happens.** Composed through `nw.all`, `any` reaches the class's type function as an error
+type, and the whole namespace's views stop resolving — every handler in the file loses its payload
+type to fix one diagnostic, and nothing says which channel did it. Measured: one such channel beside
+two healthy ones is thirteen diagnostics, three of them on the healthy channels. As a channel's only
+policy `any` is harmless since `PLAN-M5` phase 1, which is not a reason to write it.
 
-**The fix.** The schema-witness helper, `alive(Offer)`, `alive(Decision)`, `alive(t.u16)`: each
-channel gets its own `Policy<T>`, and `nw.all` accepts it (Step 3).
+**The fix, since `PLAN-M5` phase 1.** Write the agnostic check's request `unknown`, and one policy
+goes on every channel — `Policy<T>` is an intersection, so contravariance applies (Step 3).
+~~The schema-witness helper, `alive(Offer)`, `alive(Decision)`, `alive(t.u16)`, so each channel gets
+its own `Policy<T>`.~~
 
-## 5. Yielding inside a `command` handler
+## 5. Yielding inside a `command` handler — ~~quiet~~ reported at `handler` since M5
 
 ```lua
 trade.server.decide:listen(function(ctx, d)
-	local profile = DataStore:GetAsync((ctx.player :: Player).UserId)   -- yields
+	local profile = DataStore:GetAsync(ctx.player.UserId)   -- yields
 	pending[d.tradeId].state = ...
 	trade.server.resolved:publish(d.tradeId, ...)
 end)
@@ -90,6 +120,13 @@ end)
 reason — but the `ctx` you are holding is not yours after the yield: the record is reused per
 player, so in Studio the next read raises and in production it hands you a later request's player.
 The write to `pending` after the yield races every packet that arrived in between.
+
+**What happens now** (`PLAN-M5` phase 7). When a handler or a policy check yields and another packet
+of the same player is dispatched before it resumes, the transport notices — one integer compare
+around the call — and reports it at stage `handler` or `authorize`, in production, with a reason
+that spells the fix. A yield with no packet of that player in between is neither detected nor
+harmed. The report comes *after* the damage, so the rest of this entry still applies; what changed
+is that it is no longer silent.
 
 **The fix.** Read values you already cached, or copy the fields you need and hand the rest to a
 `task.spawn`. If the client needs the answer, it was a `query`: `:handle` is the one handler that
@@ -101,7 +138,7 @@ may yield, on a thread and a context of its own.
 sell = nw.signal({ data = t.struct({ itemId = t.u16 }), rate = 5 }),   -- shortest thing to write
 
 trade.server.sell:listen(function(ctx, s)
-	Inventory.remove(ctx.player :: Player, s.itemId)   -- passes, if nothing is annotated
+	Inventory.remove(ctx.player, s.itemId)   -- passes, if nothing is annotated
 end)
 ```
 
@@ -127,7 +164,7 @@ wrong for the rest of the session with nothing on either side saying so — whic
 
 **The fix.** `table.clone` for a flat value; copy as deep as you write for a nested one.
 
-## 8. Keeping a `ctx` in an upvalue
+## 8. Keeping a `ctx` in an upvalue — reported the same way as 5 when a handler is the reader
 
 ```lua
 local lastCtx
@@ -140,7 +177,7 @@ task.delay(1, function() print(lastCtx.player) end)   -- a second later, a diffe
 **What happens.** The record is reused. In Studio the read raises with a message that says to copy
 the fields; in production it is whichever request is live at that moment.
 
-**The fix.** `local player = ctx.player :: Player` — copy the fields, keep the copies.
+**The fix.** `local player = ctx.player` — copy the fields, keep the copies.
 
 ## 9. Passing a namespace to a function without the cast
 
@@ -161,6 +198,8 @@ is on a later line, which is what makes it hard to find.
 ## 10. The small ones that fail immediately
 
 ```lua
+nw.namespace("admin", { … })        -- in a ServerScriptService module: refused at that line (§1)
+
 local t = nw.types
 type P = t.PayloadOf<typeof(X)>     -- a value table carries no types: require(…netweave.types)
 
@@ -179,7 +218,13 @@ end)
 pos = t.vector3,                    -- 1e38 passes on an intent: t.vector3(t.i16(-2048, 2048))
 ```
 
-The frightening one is the first on this page. It is common — everyone wants admin commands in a
-server-only script — its symptom is "nothing works", and its cause is one word in a console line
-that the default sink prints three times and then suppresses. Declare everything in shared
-modules, on both sides, before the first packet moves.
+~~The frightening one is the first on this page.~~ **It was**, and it is the one entry on this list
+that changed category rather than degree: a namespace under `ServerScriptService` used to stop the
+whole game with "nothing works" and one console word for a cause, and it is refused at its own line
+now, before anything else, with the module named. Declare everything in shared modules on both
+sides anyway — the refusal is a guard, not a reason to find out this way.
+
+The frightening ones today are the two that still say nothing: **7**, where a client writes into a
+value it does not own and the next patch lands on a table netweave no longer recognises, and **9**,
+where a call written *below* your handlers takes the payload types off them and the only symptom is
+an error you do not get.

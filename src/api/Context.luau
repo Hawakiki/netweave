@@ -276,6 +276,25 @@ end
 
 --[=[
 	@within Context
+	@function generation
+	@param player Player
+	@return number
+	@private
+
+	How many times this player's context has been released. The transport reads it before it runs a
+	handler or a policy and compares after: a value that moved means another packet of the same
+	player was dispatched while that code was parked on a yield, so the `ctx` it held was refreshed
+	under it — the case the Studio guard raises on, made reportable in production for the cost of
+	one integer compare (`PLAN-M5` D-5).
+]=]
+function Context.generation(player: any): number
+	local record = records[player]
+
+	return if record then record.generation else 0
+end
+
+--[=[
+	@within Context
 	@function detached
 	@param player Player
 	@param channel string -- the qualified channel name

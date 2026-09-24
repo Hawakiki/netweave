@@ -39,6 +39,9 @@
 ]]
 
 local Buffer = require("../codec/Buffer")
+--[[ For `Stage` alone. A leaf module with no requires of its own, and `Inbound` beside this one
+     already takes it for the severities (finding 48). ]]
+local Config = require("../api/Config")
 
 local Batch = {}
 
@@ -62,6 +65,28 @@ local TWO_BYTE_MAX = 16383
 --[[ Constant, because a peer chooses how often it is said. ]]
 local UNCONSUMED = "the payload does not end where its declared length says it does"
 
+--[[
+	One reason per ceiling, built on the first refusal and kept. The claim is the peer's to choose,
+	so a reason that quoted it was a distinct string per packet — past the observer's repeat
+	suppression, which keys on the reason, and onto the heap at a rate the peer controls, on the
+	one refusal that is supposed to cost the server nothing (SECURITY-REPORT-M4 74; `bench/residue`
+	rung 74). Keyed by the number rather than the channel because a query has two ceilings, and
+	channels with the same ceiling can share the sentence; the table is bounded by the number of
+	distinct ceilings a declaration has, not by anything a peer sends.
+]]
+local overCeiling: { [number]: string } = {}
+
+local function overCeilingReason(ceiling: number): string
+	local reason = overCeiling[ceiling]
+
+	if not reason then
+		reason = `payload claims a length over the {ceiling} bytes this channel can hold`
+		overCeiling[ceiling] = reason
+	end
+
+	return reason
+end
+
 --[=[
 	@interface Sink
 	@within Batch
@@ -71,7 +96,7 @@ local UNCONSUMED = "the payload does not end where its declared length says it d
 	.deliver (channel: any, value: any, bytes: number, call: number?) -> ()
 	.reply (channel: any, call: number, status: number, value: any?, bytes: number) -> ()
 	.hello (hash: number) -> () -- a peer's protocol hash, off a control packet
-	.refuse (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> ()
+	.refuse (channel: any?, stage: Stage, reason: string, bytes: number, call: number?) -> ()
 
 	What [Batch.read] calls as it walks a batch. Every member is resolved once by the caller and
 	held, so nothing here allocates per packet.
@@ -80,6 +105,9 @@ local UNCONSUMED = "the payload does not end where its declared length says it d
 	budget costs an id read and a seek rather than a full deserialisation, so refusing is cheaper
 	than accepting and a flood cannot be amplified into work (`PLAN-M2` R-2).
 ]=]
+--[[ The stage a refusal is reported at, from the module that names them as rules. ]]
+export type Stage = Config.Stage
+
 export type Sink = {
 	resolve: (id: number) -> any,
 	--[[ Whether a query packet arriving here is a **request**. True on the server, false on the
@@ -89,7 +117,7 @@ export type Sink = {
 	--[[ nil to decode the packet, or a reason and the stage to report it at. The stage is the
 	     sink's to choose because the same refusal point serves two of them: over the rate is
 	     `budget`, and a peer on a protocol this one does not share is `protocol`. ]]
-	admit: (channel: any, bytes: number) -> (string?, string?),
+	admit: (channel: any, bytes: number) -> (string?, Stage?),
 	deliver: (channel: any, value: any, bytes: number, call: number?) -> (),
 	--[[ A replicated subject's change. The subject has been read; the change itself has not,
 	     because folding it into a baseline needs one this module does not hold. The sink reads it
@@ -104,8 +132,21 @@ export type Sink = {
 	     The id is unresolved: this module reads control packets before it resolves anything, and
 	     the sink is where a channel that does not exist is refused rather than assumed. ]]
 	resync: (id: number, bytes: number) -> (),
-	refuse: (channel: any?, stage: string, reason: string, bytes: number, call: number?) -> (),
+	--[[ A peer's per-namespace digest, positioned and limited to its body but **not decoded**: the
+	     sink calls [Batch.readDigest] if it wants it, so a peer sending three hundred of them costs
+	     a table read each after the first (`PLAN-M5` D-7). Optional: a sink without one sees the
+	     kind reported as one this build does not read, like any other it lacks. ]]
+	digest: ((bytes: number) -> ())?,
+	refuse: (channel: any?, stage: Stage, reason: string, bytes: number, call: number?) -> (),
 }
+
+--[=[
+	@interface NamespaceDigest
+	@within Batch
+	.name string
+	.hash number -- FNV-1a over that namespace's channel signatures, in id order
+]=]
+export type NamespaceDigest = { name: string, hash: number }
 
 --[=[
 	@prop HELLO number
@@ -143,6 +184,22 @@ local HELLO = 1
 ]]
 local RESYNC = 2
 
+--[[
+	`DIGEST` is a peer saying which namespaces it declares and what each one hashes to, so that a
+	refusal at `protocol` can name the namespace the two builds disagree in rather than two hashes.
+
+	Written beside every hello — a client's first packet, and the server's answer to a mismatch —
+	so it costs once per session on the happy path and once per mismatched peer otherwise. Read only
+	by a peer that has already refused the sender and not yet named the reason (`PLAN-M5` D-7).
+]]
+local DIGEST = 3
+
+--[[ Bounds on what a digest body may claim, so decoding one is bounded by the declaration it
+     describes rather than by the peer: nobody declares a thousand namespaces or a name past a
+     line. Past either, the body is refused as malformed, which it is. ]]
+local DIGEST_MAX_NAMESPACES = 1024
+local DIGEST_MAX_NAME = 255
+
 --[[ The repeat of the reason above it, without the kind. Constant, so a batch packed with control
      kinds this build does not read allocates one string rather than one per packet. ]]
 local ANOTHER_CONTROL_KIND = "another control kind this build does not read, in the same batch"
@@ -153,6 +210,7 @@ local TRUNCATED_CONTROL_BODY = "a control packet's body ends before the value it
 
 Batch.HELLO = HELLO
 Batch.RESYNC = RESYNC
+Batch.DIGEST = DIGEST
 
 --[=[
 	@prop OK number
@@ -452,6 +510,92 @@ end
 	`PLAN-M4` D-2 expected a sequence number on the wire to find the gap. There is none, because the
 	gap does not have to be found: the endpoint that dropped the packet reported it at the time.
 ]=]
+--[[ How many bytes a varint takes, so a digest's length can be written ahead of its body rather
+     than patched behind it: a body of several hundred bytes needs a two-byte length, and the
+     one-byte reserve the resync uses would not hold it. ]]
+local function varintSize(value: number): number
+	local size = 1
+
+	while value >= 128 do
+		value = value // 128
+		size += 1
+	end
+
+	return size
+end
+
+--[=[
+	@within Batch
+	@function writeDigest
+	@param entries { NamespaceDigest } -- this peer's namespaces, sorted by name
+
+	"These are the namespaces I declare, and what each hashes to." Written beside a hello, on the
+	reserved control id, so the peer that refuses this one can say which namespace to look in.
+]=]
+function Batch.writeDigest(entries: { NamespaceDigest })
+	Batch.begin()
+	Buffer.discardBlock()
+	Buffer.writeVarint(0)
+	Buffer.writeU8(DIGEST)
+
+	local body = varintSize(#entries)
+
+	for _, entry in entries do
+		local length = #entry.name
+		body += varintSize(length) + length + 4
+	end
+
+	Buffer.writeVarint(body)
+	Buffer.writeVarint(#entries)
+
+	for _, entry in entries do
+		local length = #entry.name
+		Buffer.writeVarint(length)
+		Buffer.writeString(entry.name, length)
+		Buffer.writeU32(entry.hash)
+	end
+end
+
+--[=[
+	@within Batch
+	@function readDigest
+	@return { NamespaceDigest }? -- nil when the body is malformed or claims more than a declaration can hold
+
+	Decodes the digest the reader is positioned at. Called by a sink's `digest` handler, and only
+	when it wants the answer; the reader itself never decodes one, because a peer can send them
+	without limit and decoding allocates a table per namespace.
+]=]
+function Batch.readDigest(): { NamespaceDigest }?
+	local count = Buffer.readVarint()
+
+	if Buffer.rejected() or count > DIGEST_MAX_NAMESPACES then
+		return nil
+	end
+
+	--[[ `table.create` yields `{unknown}` and Luau arrays are invariant, so the cast is the only way
+	     to pre-size this rather than growing it entry by entry. ]]
+	local entries: { NamespaceDigest } = (table.create(count) :: any) :: { NamespaceDigest }
+
+	for index = 1, count do
+		local length = Buffer.readVarint()
+
+		if Buffer.rejected() or length > DIGEST_MAX_NAME then
+			return nil
+		end
+
+		local name = Buffer.readString(length)
+		local hash = Buffer.readU32()
+
+		if Buffer.rejected() then
+			return nil
+		end
+
+		entries[index] = { name = name, hash = hash }
+	end
+
+	return entries
+end
+
 function Batch.writeResync(id: number)
 	Batch.begin()
 	Buffer.discardBlock()
@@ -484,7 +628,7 @@ end
 	Nothing here raises. Every failure is a value handed to `sink.refuse`, because the bytes came
 	off the wire and a malicious client must not be able to abort the loop (`DESIGN-API.md` G4).
 ]=]
-function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
+function Batch.read(packed: buffer, instances: { unknown }?, sink: Sink)
 	local size = buffer.len(packed)
 
 	if size == 0 then
@@ -576,6 +720,13 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 				else
 					sink.refuse(nil, "parse", TRUNCATED_CONTROL_BODY, length)
 				end
+			elseif kind == DIGEST and sink.digest then
+				--[[ Positioned and limited, and handed over undecoded: whether the body is worth a
+				     table per namespace is the sink's call, and for every digest after the one that
+				     named a peer's mismatch the answer is no. The tail below seeks past it either
+				     way. ]]
+				Buffer.setLimit(bodyEnd)
+				sink.digest(size - packetStart)
 			else
 				--[[ Named once per batch, counted every time. Every unknown kind is still reported —
 				     `tests/fuzz_runtime.luau`'s invariant is that nothing vanishes — but a batch
@@ -748,7 +899,7 @@ function Batch.read(packed: buffer, instances: { Instance }?, sink: Sink)
 				floods.
 			]]
 			if not denial and ceiling and payloadLength > ceiling then
-				denial = `payload claims {payloadLength} bytes, over the {ceiling} this channel can hold`
+				denial = overCeilingReason(ceiling)
 			end
 
 			if denial then
