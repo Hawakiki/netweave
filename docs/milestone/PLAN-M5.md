@@ -625,8 +625,11 @@ payload type function at once:
 ## 9. Result
 
 Closed 2026-09-24 on `develop`. Every task is ticked except one, left open on purpose and named
-below. The Studio half ran green on `6aeff0e` (20 of 20 files) and the lune half is 28 green steps
-through `scripts/check.ps1` on every commit of the milestone, the pre-commit hook refusing the rest.
+below. The lune half is 28 green steps through `scripts/check.ps1`, run on every commit of the
+milestone with the pre-commit hook refusing the rest; the Studio half ran green on the closing tree —
+**19 runtime modules, 0 console errors**, which is the pass `CLAUDE.md` §9 asks for before a milestone
+is called green. (`6aeff0e`'s pass was recorded as "20 of 20" above and that was a miscount: there are
+eighteen lune modules and `roblox_runtime`.)
 
 ### What shipped
 
@@ -657,12 +660,20 @@ through `scripts/check.ps1` on every commit of the milestone, the pre-commit hoo
 | The instance reader's refusal | 1.40–1.52x | 1.09–1.11x |
 | The pending pool after 64 parked walks | 64 lists | 8 |
 | `bench/tick` `select-all` 50×500 | 3.43–3.47 ms | 3.16–3.24 ms |
-| `within` in Studio, one player | 693 ns a subject | 364 ns |
-| A roster-returning `select` in Studio | 355 ns a subject | 140 ns |
+| `within` in Studio, one player | 693 ns a subject | 348 ns |
+| A roster-returning `select` in Studio | 355 ns a subject | 159 ns |
 | A compact `t.cframe` | 24 bytes | 13, rotation within 6.1e-5 rad |
 | A set of two short strings | 9 bytes as `map(k, boolean)` | 7 |
 | The intent pacer | 180 on the wire, 61 refused | 119, 0 |
 | `types_reject` / `api_reject` | 11 / 24 | 24 / 36 |
+
+### One correction the closing pass produced
+
+The Studio measurement of `within` and of a roster-returning `select` was one timed pass, and it moved
+**364 → 650 ns** and **142 → 220** across three sessions — the same instability `bench/residue`'s two
+timing rungs were corrected for mid-milestone. It takes the fastest of seven passes now, for the reason
+`bench/tick` gives: the work is deterministic, so noise only ever adds. Re-measured on the closing
+tree, 348 and 159 ns a subject, which is what the table above quotes.
 
 ### The one task left open
 
