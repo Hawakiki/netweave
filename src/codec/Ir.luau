@@ -1328,7 +1328,22 @@ function Ir.patch(layout: Layout): Layout
 		fixedSize = fixedSize,
 		maxSize = flagBytes + ceiling(root),
 		instances = root.instances,
-		framing = if fixedSize then "static" else "counted",
+
+		--[[
+			**Always `counted`, whatever the sizes say.**
+
+			~~`if fixedSize then "static" else "counted"`~~, copied from `lower` — and wrong here, for
+			a reason `lower` has no way to know: the same channel emits a *removal*, which is the flag
+			bytes and nothing else, and a change carrying values. Where a refused one ends cannot be
+			known from the schema, so the length prefix earns its byte (`docs/WIRE-FORMAT.md` §2,
+			`Batch.writeChange`).
+
+			`t.struct({ a = t.boolean, b = t.enum{x,y} })` patched reported `static` at one byte, and
+			`Channel.make` hardcoded `"counted"` beside it — so nothing read this and nothing was
+			broken, which is exactly how the next reader of `delta.layout.framing` gets an answer the
+			wire format contradicts (M4 report finding 42).
+		]]
+		framing = "counted",
 	}
 end
 

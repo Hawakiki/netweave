@@ -693,6 +693,25 @@ do
 		carried[field.name] = field.node.inner :: Ir.Node
 	end
 
+	--[[
+		**A patch layout is always `counted`.** `Ir.patch` copied `lower`'s rule — static when the
+		size is fixed — which is wrong for a reason `lower` cannot know: the same channel emits a
+		removal, which is the flag bytes and nothing else, and a change carrying values, so where a
+		refused one ends is not knowable from the schema. `Channel.make` hardcoded `"counted"` beside
+		it, so nothing read this and nothing broke; the next reader of `delta.layout.framing` would
+		have got an answer the wire format contradicts (M4 report finding 42).
+	]]
+	equals("a patch is counted", patch.framing, "counted")
+
+	--[[ The case that was wrong: a struct of nothing but flags is *statically* framed as state, and
+	     its patch reported the same — one byte, no length. ]]
+	local flags = Ir.lower(t.struct({ a = t.boolean, b = t.enum({ x = true, y = true }) }))
+	local flagPatch = Ir.patch(flags)
+
+	equals("a struct of flags is static as state", flags.framing, "static")
+	equals("and counted as a patch", flagPatch.framing, "counted")
+	check("even though its size is fixed", flagPatch.fixedSize ~= nil)
+
 	equals("a quantised field keeps its step through the derivation", carried.normal.step, 2 / 254)
 	equals("and its offset", carried.normal.offset, -1)
 	check("a u53 keeps its wholeness", carried.owner.whole == true)
