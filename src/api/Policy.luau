@@ -120,10 +120,27 @@ export type Factory<T> = (config: any) -> (Check<T>, ...Stage?)
 
 	Bare, it already is the per-request check. Called, it produces a differently configured one.
 ]=]
-export type Policy<T> = typeof(setmetatable(
-	{} :: { __nwCheck: (ctx: Context.Ctx, payload: T) -> Verdict, __nwStages: { Stage } },
-	{} :: { __call: (self: any, config: any) -> Policy<T> }
-))
+--[[
+	Two aliases rather than one recursive intersection.
+
+	`Policy<T>` used to be a `typeof(setmetatable(…))` alias, which enforces the argument *count* of a
+	reconfiguration and nothing about variance — so `nw.all(alive, ownsSlot)`, one payload-agnostic
+	policy composed with one that names its request, was refused in every spelling (M4 report finding
+	43; `PLAN-M5` phase 3). An intersection fixes that, because a function type is contravariant in
+	its parameters and `Check<any>` is then usable where `Check<Equip>` is wanted.
+
+	Written recursively — `Record<T> & ((config: any) -> Policy<T>)` — it takes `Channel`'s type
+	functions down with `type functions do not currently support types of the form '*error-type*'`,
+	measured. So the call returns the record: a *reconfigured* policy is a `Configured<T>`, which is
+	what everything here accepts, and `Policy<T>` is that record plus the one call that produces one.
+	Calling a configured policy again was never a shape anyone wrote.
+]]
+export type Configured<T> = {
+	__nwCheck: (ctx: Context.Ctx, payload: T) -> Verdict,
+	__nwStages: { Stage },
+}
+
+export type Policy<T> = Configured<T> & ((config: any) -> Configured<T>)
 
 --[[
 	One record for every verdict in the process. A policy returns it, the caller reads `ok`,
@@ -219,7 +236,7 @@ local function callable<T>(check: Check<T>, factory: Factory<T>?, stages: { Stag
 
 	return (
 		setmetatable(self, {
-			__call = function(_, config: any): Policy<T>
+			__call = function(_, config: any): Configured<T>
 				if not factory then
 					error(
 						"this policy takes no configuration, so calling it with a table does nothing "
@@ -316,7 +333,7 @@ end
 --[=[
 	@within Policy
 	@function all
-	@param ... Policy<T> -- evaluated left to right
+	@param ... Configured<T> -- a policy, bare or reconfigured; evaluated left to right
 	@return Policy<T>
 
 	Every policy must allow. The first denial wins and the rest do not run.
@@ -334,7 +351,7 @@ end
 	cost of the channel.
 	:::
 ]=]
-function Policy.all<T>(...: Policy<T>): Policy<T>
+function Policy.all<T>(...: Configured<T>): Policy<T>
 	local count = select("#", ...)
 
 	if count == 0 then
@@ -400,21 +417,21 @@ end
 --[=[
 	@within Policy
 	@function stagesOf
-	@param policy Policy<T>
+	@param policy Configured<T>
 	@return { Stage }
 	@private
 
 	The server stages a policy carries — its own, or for a composed one its members'. Read by the
 	channel at declaration and run by `Namespace.runStages`, once per distinct function.
 ]=]
-function Policy.stagesOf<T>(policy: Policy<T>): { Stage }
+function Policy.stagesOf<T>(policy: Configured<T>): { Stage }
 	return (policy :: any).__nwStages
 end
 
 --[=[
 	@within Policy
 	@function checkOf
-	@param policy Policy<T>
+	@param policy Configured<T>
 	@return Check<T>
 	@private
 
@@ -422,7 +439,7 @@ end
 	reaches for this is running authorization somewhere other than the declaration, which is the
 	thing this design exists to prevent.
 ]=]
-function Policy.checkOf<T>(policy: Policy<T>): Check<T>
+function Policy.checkOf<T>(policy: Configured<T>): Check<T>
 	return (policy :: any).__nwCheck
 end
 

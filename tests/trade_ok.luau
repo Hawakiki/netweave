@@ -37,8 +37,8 @@ local Pending = t.struct({
 	state = t.enum({ offered = true, accepted = true, declined = true }),
 })
 
-type Offer = { to: Player, items: { number }, gold: number }
-type Decision = { tradeId: number, accept: boolean }
+type Offer = t.PayloadOf<typeof(Offer)>
+type Decision = t.PayloadOf<typeof(Decision)>
 type Pending = t.PayloadOf<typeof(Pending)>
 
 type Wallet = { goldOf: (Player) -> number, transfer: (number, number, number) -> () }
@@ -71,13 +71,11 @@ local function playersOf(p: Pending): { Player }
 	return out
 end
 
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return if ctx.humanoid ~= nil then nw.allow() else nw.deny("dead")
-		end
-	end)
-end
+local alive = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: unknown)
+		return if ctx.humanoid ~= nil then nw.allow() else nw.deny("dead")
+	end
+end)
 
 local policy = {}
 
@@ -112,12 +110,12 @@ local trade = nw.namespace("trade", {
 	offer = nw.command({
 		data = Offer,
 		rate = 1,
-		authorize = nw.all(alive(Offer), policy.notSelf, policy.canAfford),
+		authorize = nw.all(alive, policy.notSelf, policy.canAfford),
 	}),
 	decide = nw.command({
 		data = Decision,
 		rate = 2,
-		authorize = nw.all(alive(Decision), policy.party),
+		authorize = nw.all(alive, policy.party),
 	}),
 	hover = nw.intent({
 		data = t.struct({ slot = t.u8(0, 7) }),
@@ -133,7 +131,7 @@ local trade = nw.namespace("trade", {
 		returns = t.u32(0, 1_000_000),
 		rate = 5,
 		timeout = 5,
-		authorize = alive(t.u16),
+		authorize = alive,
 	}),
 
 	incoming = nw.event({

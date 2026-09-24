@@ -296,7 +296,19 @@ payload type function at once:
       pair still read "expected Policy, got Policy … not exactly", because a `typeof(setmetatable(…))`
       type is compared exactly through its `__call` return and variance never enters. So 43 is not a
       field-modifier fix; it is the callable shape, which is phase 1's D-1 (`Base & ((config) -> …)`),
-      and it runs after phase 1 rather than before it. Run order item 6 is therefore behind item 9
+      and it runs after phase 1 rather than before it. Run order item 6 is therefore behind item 9.
+      **Closed, and phase 1's D-1 was the whole of it.** `Policy<T>` is
+      `Configured<T> & ((config: any) -> Configured<T>)`: two aliases rather than one recursive
+      intersection, because writing the call's return as `Policy<T>` takes `Channel`'s type functions
+      down with `type functions do not currently support types of the form '*error-type*'` — measured.
+      A reconfigured policy is a `Configured<T>`, which is what `all`, `stagesOf` and `checkOf` take, so
+      a bare and a configured policy compose alike. Re-measured at the ten spellings the tutorial was
+      written against: zero diagnostics, the `t.PayloadOf` alias included. The one spelling still to
+      avoid is `any` as the request type — eleven diagnostics on a single channel, because it reaches
+      the class type function as `*error-type*`, which is Luau's behaviour and not netweave's. `unknown`
+      is the word a payload-agnostic check wants anyway. The schema-witness helper is gone from
+      `tutorial_ok`, `trade_ok`, step 3, step 7, `example-trade.md`, `mistakes.md` 4 and the vocabulary
+      card, and every policy request type in the tutorial is a `t.PayloadOf` alias now
 
 ### Phase 4 — optimisation residue
 - [x] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe. The

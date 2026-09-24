@@ -18,7 +18,7 @@ local nw = require(ReplicatedStorage.netweave.netweave)
 local t = require(ReplicatedStorage.netweave.types)
 
 local Equip = t.struct({ slot = t.u8(0, 9) })
-type Equip = { slot: number }   -- by hand here, and Step 3 says why; elsewhere t.PayloadOf derives it
+type Equip = t.PayloadOf<typeof(Equip)>   -- derived from the schema, so the two cannot drift
 
 --[[ A policy that allows everything, until Step 3 writes a real one. ]]
 local allow = nw.policy(function()

@@ -43,7 +43,7 @@ after that the class name says it.
 Every inbound class may also declare `burst` and, where its payload has a length prefix, `maxBytes`.
 `ctx` is `player`, `channel`, `now`, `character`, `humanoid`; a policy check receives it typed, a
 handler receives `player` as `unknown` and casts. Schemas come from `t`, and the payload type of any
-schema is `t.PayloadOf<typeof(schema)>` — written by hand only in a policy's parameter, and Step 3
+schema is `t.PayloadOf<typeof(schema)>` — everywhere, policies included since `PLAN-M5`, and Step 3
 says why.
 
 Two rules that hold through all nine steps. Every namespace is declared before the first packet
