@@ -883,7 +883,7 @@ function Inbound.new(config: Config): Inbound
 		     reads replies, and neither ever reads the other (`src/transport/Batch.luau`). ]]
 		answers = isServer,
 
-		admit = function(channel: any, bytes: number): (string?, string?)
+		admit = function(channel: any, bytes: number): (string?, Observer.Stage?)
 			--[[ Once the pending set is full the rest of the batch is refused here, before decode,
 			     rather than decoded and then dropped. Refusing has to stay cheaper than accepting or
 			     the limit becomes the amplifier. ]]
@@ -1239,8 +1239,8 @@ function Inbound.new(config: Config): Inbound
 
 		reply = holdReply,
 
-		refuse = function(channel: any?, stage: string, reason: string, bytes: number, id: number?)
-			report(channel, sender, stage :: Observer.Stage, reason, bytes)
+		refuse = function(channel: any?, stage: Observer.Stage, reason: string, bytes: number, id: number?)
+			report(channel, sender, stage, reason, bytes)
 
 			--[[ Any refusal of a replicated packet is a change this endpoint will never see, and
 			     every change after it is relative to one it does not have. The stage does not

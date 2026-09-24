@@ -507,7 +507,7 @@ local function sinkOf(record: { Record }): Batch.Sink
 			error("protocol_runtime declares no replicated channel")
 		end,
 
-		admit = function(): (string?, string?)
+		admit = function(): (string?, Observer.Stage?)
 			return nil, "budget"
 		end,
 

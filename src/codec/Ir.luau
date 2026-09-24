@@ -40,7 +40,10 @@ local Ir = {}
 local MAX_CHUNK_BITS = 32
 local CHUNK_WIDTHS = { 4, 2, 1 }
 
-local ENCODING_SIZE: { [string]: number } = {
+--[[ Keyed by `Encoding` rather than `string`, so `ENCODING_SIZE[node.storage]` is `number?` and a
+     ninth encoding added to `Types.Encoding` and not to this table is a diagnostic rather than a
+     runtime nil (M4 report finding 47; `CLAUDE.md` §9, the hand-kept list). ]]
+local ENCODING_SIZE: { [Encoding]: number } = {
 	u8 = 1,
 	u16 = 2,
 	u32 = 4,
