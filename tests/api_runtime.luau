@@ -832,6 +832,39 @@ do
 	end
 end
 
+--[[
+	**The declaration table is a frozen copy** (M4 report finding 6).
+
+	It was the caller's own table, kept by reference, so a key declared after `nw.namespace` and
+	before the seal was numbered too — a channel whose `qualified` was `""`, refused later with a
+	message about a different mistake. The views are built from this table, so a key added to it
+	afterwards would have a view and no id.
+]]
+do
+	Namespace.reset()
+
+	local declared = { fire = nw.signal({ data = t.struct({ x = t.u8 }), rate = 10 }) }
+	local ns = nw.namespace("frozen", declared)
+
+	check("the namespace does not hand back the table it was given", ns.channels ~= declared)
+	check("and what it hands back is frozen", table.isfrozen(ns.channels :: any))
+
+	local late = nw.signal({ data = t.struct({ y = t.u8 }), rate = 10 })
+	local added = pcall(function()
+		(ns.channels :: any).late = late
+	end)
+
+	check("a key added after declaration is refused", not added)
+
+	--[[ And the caller's own table stays writable, which is what makes the copy the fix rather than
+	     freezing what was passed in: a game may keep its declaration table for its own reasons. ]]
+	local theirs = declared :: any
+	theirs.own = late
+	check("while the caller's table is still theirs", theirs.own ~= nil)
+
+	Namespace.reset()
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- validate
 -- ---------------------------------------------------------------------------------------------

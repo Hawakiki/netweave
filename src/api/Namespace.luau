@@ -221,11 +221,24 @@ function Namespace.declare(name: string, channels: { [string]: any }, source: st
 		)
 	end
 
+	--[[
+		A copy, frozen. The caller's table was kept by reference, so a key declared *after*
+		`nw.namespace` and before the seal was numbered too — a channel whose `qualified` is `""`,
+		refused later with a message about something else (M4 report finding 6). Frozen rather than
+		only copied, because the views are built from this table and a key added to it afterwards
+		would have a view and no id.
+
+		The records inside are not frozen, and `Channel.Channel` says at length why: `handler` is
+		written after declaration by `:listen`, sealing is triggered by the first packet, and the
+		typed route is closed by every field of that type being `read`.
+	]]
+	local declared = table.freeze(table.clone(channels))
+
 	local namespace: Namespace = {
 		name = name,
-		channels = channels,
-		server = View.build(channels, "server"),
-		client = View.build(channels, "client"),
+		channels = declared,
+		server = View.build(declared, "server"),
+		client = View.build(declared, "client"),
 	}
 
 	namespaces[name] = namespace

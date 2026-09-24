@@ -134,9 +134,13 @@ local trickle = queryOf(5, {
 
 --[[ Not a query. It shares the batch with one, to pin that a yielding handler does not hold up the
      packets behind it. ]]
+--[[ Through `any`: every field of a channel record is `read` since `PLAN-M5` phase 3 (M4 report
+     finding 6), and a rig standing in for the namespace and the registry is exactly the caller that
+     has to say so out loud. ]]
 local ping = nw.signal({ data = t.struct({ seq = t.u8 }), rate = 100 })
-ping.id = 6
-ping.qualified = "test.ping"
+local pingRecord = ping :: any
+pingRecord.id = 6
+pingRecord.qualified = "test.ping"
 
 local byId: { [number]: any } = {}
 
@@ -805,7 +809,7 @@ do
 
 	local pings: { number } = {}
 
-	ping.handler = function(_ctx, value)
+	pingRecord.handler = function(_ctx, value)
 		table.insert(pings, value.seq)
 	end
 
@@ -990,7 +994,7 @@ do
 		return { primary = 1, secondary = 2 }
 	end
 
-	ping.handler = function(_ctx, value)
+	pingRecord.handler = function(_ctx, value)
 		table.insert(pings, value.seq)
 	end
 

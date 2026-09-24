@@ -87,32 +87,49 @@ export type Primitive = "AuthorizedInbound" | "UntrustedInbound" | "Outbound"
 	last three are filled in by the namespace and the registry, because an id depends on every
 	other channel in the program (`WIRE-FORMAT.md` §3).
 ]=]
+--[[
+	**Every field is `read`**, because the transport reads each of them per packet and a game that
+	writes one has switched a guarantee off.
+
+	`ns.channels.equip.authorize = nil`, `.rate = 1e9` and `.maxBytes = 1e9` all type-checked with no
+	cast, and `Inbound` treats a nil `authorize` as allow — so G1 and G2 came off in one typed line
+	that a reviewer grepping for `:: any` would not find (M4 report finding 6). They need the cast
+	now, which is the whole point: *a forgery you have to write is one a reviewer sees*.
+
+	~~And the record is frozen at seal.~~ **Deliberately not, and here is the cost that decided it.**
+	`handler` is written *after* declaration by `:listen`, and sealing is triggered by the first
+	packet or by `nw.protocol()` — so a game that prints its signature early and attaches a handler
+	afterwards would be raising on a legal sequence. Moving the handler to a side table removes that,
+	and costs a lookup on the per-packet dispatch path plus 94 assignments across six test rigs that
+	own their own channel tables. The typed route is the one the finding is about, and it is closed;
+	`Namespace.declare` freezes the `channels` *table* so a late key cannot be added either.
+]]
 export type Channel<C, A, T, R, U> = {
-	__class: C,
-	__audience: A,
-	__payload: T,
-	__response: R,
+	read __class: C,
+	read __audience: A,
+	read __payload: T,
+	read __response: R,
 	--[[ What a `replicate` channel names its subjects with, and `nil` for every other class — the
 	     only one that puts a subject on the wire is the only one whose listener is handed one. ]]
-	__subject: U,
+	read __subject: U,
 
-	class: Class,
-	primitive: Primitive,
-	rate: number?,
-	burst: number?,
-	maxBytes: number?,
-	timeout: number?,
-	authorize: Policy.Check<T>?,
-	audience: Audience.Audience<A>?,
-	data: Types.Descriptor,
-	returns: Types.Descriptor?,
-	codec: Serdes.Codec,
-	responseCodec: Serdes.Codec?,
+	read class: Class,
+	read primitive: Primitive,
+	read rate: number?,
+	read burst: number?,
+	read maxBytes: number?,
+	read timeout: number?,
+	read authorize: Policy.Check<T>?,
+	read audience: Audience.Audience<A>?,
+	read data: Types.Descriptor,
+	read returns: Types.Descriptor?,
+	read codec: Serdes.Codec,
+	read responseCodec: Serdes.Codec?,
 
-	key: string,
-	qualified: string,
-	id: number,
-	handler: any,
+	read key: string,
+	read qualified: string,
+	read id: number,
+	read handler: any,
 }
 
 --[[

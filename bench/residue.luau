@@ -429,7 +429,9 @@ local function rung76()
 		audience = Audience.everyone,
 		unreliable = true,
 	})
-	marker.id = 1
+	--[[ Through `any`, like `bench/pace`: the fields are `read` and this rig is the registry. ]]
+	local markerRecord = marker :: any
+	markerRecord.id = 1
 	local value = { tag = 1, body = buffer.create(UNRELIABLE - 3) }
 	local destination = { name = "player" }
 
@@ -611,7 +613,8 @@ local function rungBudget()
 	--[[ A bucket as deep as one run, at an ordinary rate: the admitted column is the burst being
 	     drained, and the refused column is what comes after. ]]
 	local channel = Channel.signal({ data = t.struct({ n = t.u8 }), rate = 30, burst = CALLS })
-	channel.qualified = "residue.signal"
+	local record = channel :: any
+	record.qualified = "residue.signal"
 	local sender = { name = "sender" }
 
 	local function stopped(): number

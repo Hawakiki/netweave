@@ -29,7 +29,11 @@ local FRAMES = 60
 local SECONDS = 3
 
 local hover = Channel.intent({ data = t.struct({ slot = t.u8 }), rate = RATE })
-hover.qualified = "bench.hover"
+
+--[[ Through `any`: a channel record's fields are `read`, and this file stands in for the namespace
+     that would have assigned them (`PLAN-M5` phase 3). ]]
+local hoverRecord = hover :: any
+hoverRecord.qualified = "bench.hover"
 
 local client = { name = "client" }
 
