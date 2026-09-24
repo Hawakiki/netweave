@@ -871,6 +871,39 @@ do
 	refuses("validating against something that is not a schema", function()
 		(nw.validate :: any)({ volume = 1 }, 1)
 	end, "netweave type")
+
+	--[[
+		**What comes back is a copy, holding exactly the keys the schema names** (M4 report finding 5).
+
+		The encoder ignores the rest, so returning the caller's own table handed back a `Trusted<T>`
+		with `isAdmin` still inside it, typed as though it were not there. `validate` writes the value
+		and reads it back, so the result is the decode of what the encoder wrote and cannot carry
+		anything the schema did not. Confirmed to fail on the pre-fix tree: `same table` was true and
+		`isAdmin rides` was true.
+	]]
+	local source = { volume = 40, name = "vaxze", muted = false, isAdmin = true }
+	local copied = nw.validate(Settings, source)
+
+	check("a validated value is not the table that was passed in", copied ~= nil and copied :: any ~= source)
+	equals("the schema's keys are there", (copied :: any).volume, 40)
+	equals("and the name", (copied :: any).name, "vaxze")
+	equals("a key the schema does not name does not ride along", (copied :: any).isAdmin, nil)
+
+	--[[ And the original is untouched, so a caller who keeps both sees two values rather than one
+	     aliased twice. ]]
+	equals("the caller's table keeps its own extra key", source.isAdmin, true)
+
+	source.volume = 7
+	equals("and mutating it afterwards cannot reach the validated copy", (copied :: any).volume, 40)
+
+	--[[ A nested table is copied too, for the same reason: the decode builds it. ]]
+	local Nested = t.struct({ inner = t.struct({ n = t.u8 }) })
+	local nestedSource = { inner = { n = 3, extra = 1 } }
+	local nested = nw.validate(Nested, nestedSource)
+
+	check("a nested table is a copy as well", nested ~= nil and (nested :: any).inner ~= nestedSource.inner)
+	equals("with only the named field", (nested :: any).inner.extra, nil)
+	equals("and the field itself", (nested :: any).inner.n, 3)
 end
 
 --[[ The encoder is shared between `validate` and a channel's codec, so a validation must not
@@ -889,6 +922,40 @@ do
 	equals("a validation between two writes leaves the buffer alone", buffer.len(packed), 4)
 	equals("first byte", buffer.readu8(packed, 0), 1)
 	equals("fourth byte", buffer.readu8(packed, 3), 4)
+end
+
+--[[
+	And the read side, which is the half that arrived with the copy: `validate` decodes now, so a
+	`validate` called from inside a `:listen` would move the cursor of the batch being read and every
+	packet behind it would decode from the wrong offset. Confirmed to fail with the `saveRead` pair
+	removed: the second read came back `a = 0, b = 0`.
+]]
+do
+	local Buffer = require("../src/codec/Buffer")
+	local Serdes = require("../src/codec/Serdes")
+
+	local codec = Serdes.fromSchema(t.struct({ a = t.u8, b = t.u8 }))
+
+	Buffer.load(nil)
+	codec.write({ a = 1, b = 2 })
+	codec.write({ a = 3, b = 4 })
+	local packed = Buffer.take()
+
+	Buffer.beginRead(packed, {})
+	local first = codec.read()
+	nw.validate(t.struct({ x = t.u32, y = t.u32 }), { x = 9, y = 9 })
+	local second = codec.read()
+
+	--[[ Asked before the fields are read: with the read parking removed the second packet decodes as
+	     nil, and indexing that aborts the file instead of failing the case — the `NO_REPORT` shape
+	     from `hostile_runtime`, one section over. ]]
+	local behind = (second :: any) or { a = -1, b = -1 }
+
+	equals("the packet before a validation reads", (first :: any).a, 1)
+	check("the one behind a validation still decodes", second ~= nil)
+	equals("and is not disturbed", behind.a, 3)
+	equals("to its last byte", behind.b, 4)
+	equals("with nothing left over", Buffer.remaining(), 0)
 end
 
 -- ---------------------------------------------------------------------------------------------

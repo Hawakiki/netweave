@@ -636,6 +636,25 @@ misdescribed the entire value and allocated one per packet.
 `tests/api_ok.luau`. Deliberately a cast rather than an `nw.trust()` helper, for the same reason
 there is no `nw.untrust`: a function gets reached for reflexively and a cast does not.
 
+### `nw.validate` is still a way to launder the brand, and that is open
+
+`nw.validate(Schema, value)` produces `Trusted<T>`, and `value` is typed `any` — so
+`nw.validate(Schema, untrusted)` is the `nw.untrust` this section refused to ship, spelled as a call
+rather than a cast, and a reviewer grepping for `:: nw.Trusted` does not find it (M4 report
+finding 5).
+
+Two halves. The one about *keys* is closed: `validate` round-trips the value through the codec, so
+what comes back is a schema-shaped copy and a field the schema does not name cannot ride inside a
+`Trusted<T>` whose type says it is not there. The one about the *brand* is open, and the fix was
+written and reverted rather than skipped: an `Unbranded<V>` type function on the value parameter,
+walking an intersection for `__nwUntrusted` and `__nwTrusted`, makes `tests/api_ok.luau` report
+**"Code is too complex to typecheck"** with 709 diagnostics behind it, because every call site then
+solves a free generic and feeds it to a second type function beside `TrustedPayload`. The measurement
+is in `src/api/Trust.luau` beside the code.
+
+So: **do not pass a channel payload to `nw.validate`.** It arrived with its schema already run, and
+its type already says what it is. Narrow it with a policy on the channel instead.
+
 ### The limits, stated plainly
 
 **A scalar payload is unbranded.** `Trusted<number>` *is* `number`, and the type says so rather

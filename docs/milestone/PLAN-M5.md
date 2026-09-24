@@ -290,7 +290,7 @@ payload type function at once:
 
 ### Phase 3 — the M4 report's type-layer residue
 - [ ] items 5, 6, 7, 42, 43, 45, 46, 47, 48, 50 of `docs/SECURITY-REPORT-M4.md`, each its own commit
-- [ ] for 43, the measurement from the tutorial (2026-09-11): a payload-agnostic policy cannot be composed
+- [x] for 43, the measurement from the tutorial (2026-09-11): a payload-agnostic policy cannot be composed
       onto two payloads through `nw.all` in any spelling — `Policy<Equip>` is not `Policy<Offer>`,
       unannotated and `unknown` mismatch the same way, `any` reaches `CommandPayload` as `*error-type*`
       and drops the namespace's views, and `read __nwCheck` on the `Policy<T>` field changes nothing
@@ -390,7 +390,7 @@ payload type function at once:
       answer. The diff loses for a one-field subject (by two bytes) and when every field moved (by its
       flags and length prefix, two to six bytes); level at two fields; wins from three; zero bytes when
       nothing moved, which the resend cannot say. `bench/RESULTS.md`, "The delta crossover, in bytes"
-- [ ] the nice-to-have types, each with an `_ok`/`_reject` pair
+- [x] the nice-to-have types, each with an `_ok`/`_reject` pair
   - [x] `t.literal(value)` — zero bits, zero bytes, in the hash with its type; a bounded generic
         (`V & (string | boolean | number)`) keeps the string and boolean singletons where a bare one
         widened `"v3"` to `string` (`spike/additions`). `t.set(element)` — a map to the literal `true`,

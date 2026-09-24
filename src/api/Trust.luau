@@ -61,6 +61,7 @@
 	changing one side alone.
 ]]
 
+local Buffer = require("../codec/Buffer")
 local Serdes = require("../codec/Serdes")
 local Types = require("../types")
 
@@ -252,6 +253,22 @@ export type function TrustedPayload(schema)
 end
 
 --[[
+	**The other half of finding 5 is open, and was measured rather than dropped.**
+
+	`nw.validate(Schema, untrusted)` is the `nw.untrust` that `DESIGN-API` §6 refused to ship, spelled
+	as a call: the value arrived on a signal, its type says `Untrusted<T>`, and this hands back
+	`Trusted<T>`. The type-level fix is available and was written — an `Unbranded<V>` type function on
+	the value parameter, walking an intersection for `__nwUntrusted` and `__nwTrusted` and erroring
+	with the advice — and it costs more than it buys: with it, `tests/api_ok.luau` reports **"Code is
+	too complex to typecheck"** and 709 diagnostics behind it, because every call site then has to
+	solve a free generic and feed it to a second type function beside `TrustedPayload`. Reverted, the
+	tree is clean.
+
+	So the laundering route stays open, and the copy below closes the half that leaked keys.
+	`DESIGN-API` §6 says so where a reader would look for it.
+]]
+
+--[[
 	One codec per descriptor, built on first use and kept. Building one walks the schema and
 	synthesises closures; doing that per `validate` call would make the honest path the expensive
 	one, which is how a safety feature gets switched off.
@@ -278,7 +295,7 @@ end
 	@function validate
 	@param schema S -- any type from `nw.types`
 	@param value any -- typically from outside netweave entirely
-	@return T? -- the value, branded `Trusted<T>`, or nil
+	@return T? -- a schema-shaped **copy**, branded `Trusted<T>`, or nil
 	@return string? -- why it was refused
 
 	The third and last producer of `Trusted<T>`: check an arbitrary value against a schema.
@@ -297,8 +314,16 @@ end
 	already validated by its codec, and validating it twice buys nothing.
 
 	:::caution
-	This runs the encoder against `value` to decide, so it costs a real serialisation. It is an
-	escape hatch, not a hot path.
+	This round-trips `value` through the codec, so it costs a real serialisation **and** a decode. It
+	is an escape hatch, not a hot path.
+	:::
+
+	:::note
+	**What comes back is a copy, and it holds exactly the keys the schema names.** The encoder ignores
+	the rest, so returning the caller's own table handed back a `Trusted<T>` with
+	`{ isAdmin = true }` still inside it, typed as though it were not there (M4 report finding 5). The
+	copy is the decode of what the encoder wrote, so it cannot carry anything the schema did not — and
+	mutating the original afterwards cannot reach into what was validated.
 	:::
 
 	:::caution
@@ -320,13 +345,46 @@ function Trust.validate<S>(schema: S, value: any): (TrustedPayload<S>?, string?)
 		)
 	end
 
-	local failure = codecFor(schema :: any).check(value)
+	local codec = codecFor(schema :: any)
 
-	if failure then
-		return nil, failure
+	--[[
+		Written and read back, rather than checked in place.
+
+		`check` alone answers whether the value conforms and hands the caller's own table back, so a
+		key the schema does not name rode inside a `Trusted<T>` whose type said it was not there
+		(M4 report finding 5). The decode of what the encoder wrote cannot contain one.
+
+		Both sides of the buffer are parked first. The write side because a `validate` from inside a
+		`:publish` would otherwise land in the middle of somebody's batch; the read side because a
+		`validate` from inside a `:listen` would move the cursor of the batch being read, and every
+		packet behind it would decode from the wrong offset — measured, `a = 0, b = 0` for the packet
+		behind it with the read parking removed.
+	]]
+	local parkedWrite = Buffer.save()
+	local parkedRead = Buffer.saveRead()
+
+	Buffer.load(nil)
+	local wrote, failure = pcall(codec.write, value)
+	local bytes, instances = Buffer.take()
+	Buffer.load(parkedWrite)
+
+	if not wrote then
+		Buffer.loadRead(parkedRead)
+
+		--[[ `error()` prefixes a script position; the caller wants the reason, not the line. ]]
+		local reason = tostring(failure)
+		return nil, (string.gsub(reason, "^.-:%d+: ", "", 1))
 	end
 
-	return (value :: any) :: TrustedPayload<S>, nil
+	Buffer.beginRead(bytes, instances)
+	local copy, refused = codec.read()
+	Buffer.loadRead(parkedRead)
+
+	if refused then
+		return nil, refused
+	end
+
+	return (copy :: any) :: TrustedPayload<S>, nil
 end
 
 return Trust
