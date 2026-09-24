@@ -577,7 +577,7 @@ payload type function at once:
 
 ## 7. Acceptance criteria
 
-1. `t.u8(0, "b")`, `t.string(0, 5, { utf8 = 1 })`, `t.vector3(t.boolean)`, `t.cframe(t.boolean)`, `t.instance(5)` each produce a diagnostic, and `types_reject` marks the line and the text. (`t.cframe` became `Componented` in phase 5, and its bad-component case is measured to produce nothing today for the same reason as the vector's.)
+1. `t.u8(0, "b")`, `t.string(0, 5, { utf8 = 1 })`, `t.vector3(t.boolean)`, `t.cframe(t.boolean)`, `t.instance(5)` each produce a diagnostic, and `types_reject` marks the line and the text. (`t.cframe` became `Componented` in phase 5. ~~Its bad-component case is measured to produce nothing today for the same reason as the vector's.~~ That was measured *before* phase 1: an intersection checks the argument's type, so both produce a diagnostic and `types_reject` marks both.)
 2. `local policy: nw.Policy<Equip>`, `local snapshot: nw.Snapshot`, `local observer: nw.Observer` analyse in an `_ok` file with a negative control each.
 3. `tools/exports` fails when a public value family gains a member with no nameable type.
 4. `nw.validate` returns a table the caller did not pass in; ~~a channel record raises on write after seal~~ **every field of a channel's type is `read`, so the write needs a cast, and the declaration table is a frozen copy**; `nw.command({ store = {} })` is refused at declaration. The runtime freeze of each record is not done and the reason is measured rather than asserted: `handler` is written after declaration by `:listen` and sealing is triggered by the first packet, so freezing at seal would raise on a legal sequence, and moving the handler to a side table costs a lookup on the per-packet dispatch path plus 94 assignments across six test rigs. `src/api/Channel.luau` carries the note beside the type.
@@ -588,7 +588,7 @@ payload type function at once:
 9. `bench/tick`: 60 intent sends a second against `rate = 30` — `budget` refusals 0, packets on the wire at most 30 a second, the handler sees the newest value each tick; `BEFORE` on the parent tree shows the 30 refusals.
 10. A namespace declared from a module under `ServerScriptService` raises at that line in Studio with `ReplicatedStorage` in the message, and one from `ReplicatedStorage` does not; `roblox_runtime` carries both.
 11. Two peers that differ by one namespace: the `protocol` reason names it, on both peers, in `protocol_runtime`.
-12. A namespace of three channels, one declared with a `Policy<any>`: `api_reject` counts that channel's diagnostic at its own line and `api_ok` keeps the other two handlers' payloads typed.
+12. ~~A namespace of three channels, one declared with a `Policy<any>`: `api_reject` counts that channel's diagnostic at its own line and `api_ok` keeps the other two handlers' payloads typed.~~ **Not met, and the shape it describes no longer exists.** Measured on the intersection: a channel whose *only* policy takes `any` produces **no** diagnostic at all now and its siblings are untouched, so there is nothing for `api_reject` to count; composed through `nw.all`, `any` still reaches the class type function as an error type and takes the siblings' views with it — thirteen diagnostics beside two healthy channels, three of them the healthy ones'. D-8 closed on the finding that the view mappers cannot localise that, and phase 3 item 43 removed the reason a game would write `any` in the first place. `mistakes.md` 4 and `DESIGN-API` §7 carry what is left.
 
 ## 8. Risks
 
@@ -621,3 +621,74 @@ payload type function at once:
   Mitigation: each is an allocation the game asks for by name or a table sized by the declaration, and
   the hot-path criterion (`PLAN-M1` acceptance 7) is re-run on the flood probe after phase 7 the way
   phase 4 re-runs its `BEFORE`.
+
+## 9. Result
+
+Closed 2026-09-24 on `develop`. Every task is ticked except one, left open on purpose and named
+below. The Studio half ran green on `6aeff0e` (20 of 20 files) and the lune half is 28 green steps
+through `scripts/check.ps1` on every commit of the milestone, the pre-commit hook refusing the rest.
+
+### What shipped
+
+| Phase | What is true now that was not |
+|---|---|
+| 1 | A constructor's arguments are checked by **type**: `t.u8(0, "b")`, `t.vector3(t.boolean)`, `t.cframe(t.boolean)`, `t.instance(5)` are diagnostics where only the argument *count* was enforced. One private `carrierOf` per module looks through the intersection; `types_reject` went 11 → 24 |
+| 1 | A handler's `ctx` is `nw.Ctx`. `ctx.player.UserId` type-checks, and every `ctx.player :: Player` is gone from the tutorial, the worked example and the tests — a type function cannot *name* a Roblox class but can be *handed* one |
+| 2 | Every public value family has a nameable type through `nw`, and `tools/exports` fails when one gains a member without one |
+| 3 | `nw.validate` returns a schema-shaped copy; a channel's fields are `read` and its declaration table a frozen copy; a descriptor is branded by construction; a misspelt spec key is refused with the class's key list beside it; `Policy<T>` composes across payloads; one `Stage`; the sidecar is `{ unknown }` where it is wire data |
+| 4 | Seven optimisation findings closed with a probe each, in `bench/residue`: 112 B a call → 0, 50 distinct refusal strings → 1, a parked buffer that regrew every frame → kept, `GetPlayers` per subject → once a tick, a refusal at 2.8x an admission → 1.2x, an unbounded pool → 8 |
+| 5 | `t.string`'s `charset`; `t.literal`, `t.set`, `t.optional(x, default)`, a compact `t.cframe`; recipient sets and positions read once per tick; the delta crossover measured in bytes |
+| 6 | `analyze` walks `bench/`, `tools/` and itself; selene's global list is gone, replaced by 30 block-scoped allows |
+| 7 | A policy's **server stage**, run once at seal; a yield across a `ctx` reported at `handler`/`authorize`; an intent paced by the client at its declared rate |
+| 8 | A namespace declared under `ServerScriptService` refused at its line; a per-namespace digest, so a protocol disagreement names the namespace on both consoles |
+| 9 | The tutorial, the worked example, `mistakes.md`, `DESIGN-API` and both READMEs moved with the above, corrections struck rather than rewritten |
+
+### The measurements, in one place
+
+| What | Before | After |
+|---|---|---|
+| `Delta.write` | 112 B a call, both paths | 0 in all 64 windows |
+| `Batch.read` oversize refusals | 50 distinct strings for 500 claims | 1 |
+| A 1.5 KB frame's buffer | 64 → 2048 → 64, a new object each frame | 64 → 2048 → 2048, the same object; 5,696 → 1,600 B a frame |
+| An unreliable 200 B packet | 768 B | 256 B |
+| `Namespace.replicated()` | a fresh array per ask | one frozen list |
+| `within`, per subject | `GetPlayers()` per subject | the frame's list, handed down |
+| `Budget.admit` refusal | 2.84–2.87x an admission | 1.19–1.25x |
+| The instance reader's refusal | 1.40–1.52x | 1.09–1.11x |
+| The pending pool after 64 parked walks | 64 lists | 8 |
+| `bench/tick` `select-all` 50×500 | 3.43–3.47 ms | 3.16–3.24 ms |
+| `within` in Studio, one player | 693 ns a subject | 364 ns |
+| A roster-returning `select` in Studio | 355 ns a subject | 140 ns |
+| A compact `t.cframe` | 24 bytes | 13, rotation within 6.1e-5 rad |
+| A set of two short strings | 9 bytes as `map(k, boolean)` | 7 |
+| The intent pacer | 180 on the wire, 61 refused | 119, 0 |
+| `types_reject` / `api_reject` | 11 / 24 | 24 / 36 |
+
+### The one task left open
+
+The `ArrayHeavy` Down cell's outlier (§6 phase 4). It needs the bench place built from a worktree at
+`0cb731d`, that matrix run, and the current tree's matrix in the same Studio session — twenty minutes
+for a question about the instrument rather than about netweave. `bench/RESULTS.md` says so where the
+cell is, and nothing in the library waits on it.
+
+### What was measured and deliberately not done
+
+Each of these is a decision with a number behind it, not an omission:
+
+- **`nw.validate` still launders a brand.** The type-level refusal was written: an `Unbranded<V>` on
+  the value parameter makes `api_ok` report "Code is too complex to typecheck" with 709 diagnostics
+  behind it. `DESIGN-API` §6 tells a game not to pass a channel payload to `validate`, and why.
+- **A channel record is not frozen at seal.** `handler` is written after declaration by `:listen` and
+  sealing is triggered by the first packet, so freezing would raise on a legal sequence; moving the
+  handler to a side table costs a per-packet lookup and 94 assignments across six rigs. The typed
+  route is closed instead, which is the one the finding is about.
+- **`channel: any` stands across the transport.** Six modules each read a different handful of a
+  channel's fields and six rigs build partial channel tables; a full record makes every rig a cast. A
+  per-module structural type is the shape that would not, and it is a module-by-module job.
+- **The view mappers cannot localise a bad channel** (D-8). `ServerView` is one type function over the
+  whole declaration table, and an `error()` inside a channel's payload function leaves the application
+  stuck, so the body never runs. Unsticking it means the payload functions returning `unknown`, which
+  trades away the analysis-time half of G2 and G3.
+- **The bare-namespace erasure has no canary.** `spike/declare/passed.luau` reproduces it and Q6
+  records the bisect; it cannot be pinned in `api_reject`, because the shape *adds* diagnostics while
+  removing others. The guard is the cast at the call, in `DESIGN-API` §7 and the tutorial.

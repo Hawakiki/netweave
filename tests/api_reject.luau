@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 33
+-- netweave:expect 36
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -275,6 +275,16 @@ end)
 	the wrong instrument for it, because a case added anywhere else moves it too, which is what
 	happened when the channel record's fields became `read`.
 ]]
+--[[
+	**The negative controls for the three types `PLAN-M5` phase 2 added** (acceptance 2). `api_ok`
+	annotates `nw.Policy<Kit>`, `nw.Snapshot` and `nw.Observer` and uses each; these are the same
+	three annotations given something that is not one, because a type that accepts everything is a
+	name rather than a type.
+]]
+local _notAPolicy: nw.Policy<{ x: number }> = function() end -- netweave:reject Configured<{ x: number }>
+local _notASnapshot: nw.Snapshot = { rules = "quiet", limits = {} } -- netweave:reject but got 'string'
+local _notAnObserver: nw.Observer = function(_rejection: number) end -- netweave:reject '(Rejection) -> ()'
+
 --[[
 	**A misspelt key is refused, and so is a key of the wrong type** (M4 report finding 45).
 
