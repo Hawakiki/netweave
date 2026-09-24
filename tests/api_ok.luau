@@ -312,6 +312,10 @@ local function attach(namespace: nw.Views<typeof(shots.channels)>)
 	end)
 end
 
+--[[ Bare, and safe *here*: this namespace has one channel. On a namespace of about nine, passing it
+     bare makes the payload of a handler written earlier `unknown` — `spike/declare/passed.luau`, and
+     `tests/tutorial_ok.luau` casts at the call for that reason. Do not copy this line into a dense
+     file (`PLAN-M5` phase 1). ]]
 attach(shots)
 
 --[[ A cast, and `typeof` — the two spellings for a local. Both keep the views typed; the cast is

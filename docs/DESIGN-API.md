@@ -765,6 +765,17 @@ pinned as a canary in `tests/api_reject.luau`, and the type is documented in `sr
 rather than removed, because a game that has already written the annotation would otherwise lose
 its type outright.
 
+**Cast the namespace where you pass it.** A module that takes the namespace as a parameter —
+`function wire(ns: nw.Views<typeof(combat.channels)>)` — has to be called
+`wire(combat :: nw.Views<typeof(combat.channels)>)` rather than `wire(combat)`. Passed bare, on a
+namespace of about nine channels, the payload of a handler written *earlier in the file* becomes
+`unknown`: a handler that was typed stops being typed because of a call written later
+(`spike/declare/passed.luau`, Q6; `PLAN-M5` phase 1). It is not the brand and not the
+self-reference in the parameter's type — typing the parameter by the channel table's own local
+changes nothing, and a five-channel namespace does not reproduce it — so there is nothing in
+`View` to fix; it is an inference-order effect with a size threshold. The cast is one token and it
+holds, which is why the tutorial writes it.
+
 ### The condition attached
 
 `type function` requires **`LuauSolverV2`**. The stock solver rejects the syntax outright.
