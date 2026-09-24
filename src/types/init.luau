@@ -163,6 +163,36 @@ export type Type<T> = {
 	__payload: T,
 }
 
+--[[
+	A callable type's table half.
+
+	`Ranged<T>`, `Text`, `Componented<T>` and `Classed` are `Type<T> & ((…) -> Type<T>)`: an
+	intersection, because that is the only spelling that checks the **types** of the arguments and
+	still lets the value be used bare. A `typeof(setmetatable(…))` alias enforced the argument count
+	alone, so `t.u8(0, "b")` and `t.instance(5)` were accepted and the wrong storage was declared
+	(M4-1; `PLAN-M5` D-1).
+
+	The cost is this function. To a `type function` an intersection is not a table, so
+	`readproperty("__payload")` on one answers nothing — every payload extraction below has to take
+	the table half out first. Private, because nothing outside needs the shape; the two other
+	modules that read a schema's payload carry their own copy, since a `type function` cannot
+	reference an outer local and calling across a `require` needs the name exported.
+]]
+-- selene: allow(undefined_variable)
+type function carrierOf(ty)
+	if not ty:is("intersection") then
+		return ty
+	end
+
+	for _, part in ty:components() do
+		if part:is("table") and part:readproperty(types.singleton("__payload")) then
+			return part
+		end
+	end
+
+	return ty
+end
+
 --[=[
 	@type PayloadOf<T> T
 	@within Types
@@ -175,6 +205,8 @@ export type Type<T> = {
 ]=]
 -- selene: allow(undefined_variable)
 export type function PayloadOf(ty)
+	ty = carrierOf(ty)
+
 	--[[ Asked before `readproperty`, which raises its own message on a non-table — `type.readproperty:
 	     expected self to be either a table, but got number instead` — printed verbatim at the call
 	     site in a game's declaration file, where nothing about it names netweave or the fix. ]]
@@ -243,6 +275,8 @@ export type function OptionalPayload(inner, default)
 	if inner:is("any") then
 		return types.any
 	end
+
+	inner = carrierOf(inner)
 
 	local advice = "t.optional takes a netweave type, as in t.optional(t.u16) or t.optional(Entity). "
 		.. "What was passed carries no payload, so it did not come from t.u8, t.struct, t.enum or "
@@ -327,6 +361,8 @@ export type function ArrayPayload(element)
 		return types.newtable(nil, { index = types.number, readresult = types.any, writeresult = types.any })
 	end
 
+	element = carrierOf(element)
+
 	local advice = "t.array takes a netweave element type, as in t.array(t.u8) or t.array(Entity, 100). "
 		.. "What was passed carries no payload, so it did not come from t.u8, t.struct, t.enum or "
 		.. "another constructor"
@@ -363,6 +399,8 @@ export type function MapPayload(key, value)
 		if carrier:is("any") then
 			return types.any
 		end
+
+		carrier = carrierOf(carrier)
 
 		if not carrier:is("table") then
 			error(advice)
@@ -402,7 +440,10 @@ export type function StructPayload(fields)
 	local result = types.newtable()
 
 	for key, property in fields:properties() do
-		local field = property.read
+		--[[ Through `carrierOf` before the shape test, not after: a callable constructor is an
+		     intersection and `is("table")` is false for one, so the guard would refuse every
+		     `t.u8` in a struct (`PLAN-M5` D-1). ]]
+		local field = if property.read then carrierOf(property.read) else nil
 
 		if not field or not field:is("table") then
 			error("a struct field is not a netweave type")
@@ -454,7 +495,8 @@ export type function UnionPayload(branches)
 	local result = nil
 
 	for key, property in branches:properties() do
-		local branch = property.read
+		--[[ `carrierOf` first, for the reason `StructPayload` gives. ]]
+		local branch = if property.read then carrierOf(property.read) else nil
 
 		if not branch or not branch:is("table") then
 			error("a union branch is not a netweave type")
@@ -509,10 +551,7 @@ end
 
 	The pair means a **value** range for numbers and a **length** range for strings and buffers.
 ]=]
-export type Ranged<T> = typeof(setmetatable(
-	{} :: Type<T>,
-	{} :: { __call: (self: any, min: number, max: number) -> Type<T> }
-))
+export type Ranged<T> = Type<T> & ((min: number, max: number) -> Type<T>)
 
 --[=[
 	@interface TextOptions
@@ -553,10 +592,7 @@ export type TextOptions = {
 	one class and one repetition, so it is never refused for cost.
 	:::
 ]=]
-export type Text = typeof(setmetatable(
-	{} :: Type<string>,
-	{} :: { __call: (self: any, min: number, max: number, options: TextOptions?) -> Type<string> }
-))
+export type Text = Type<string> & ((min: number, max: number, options: TextOptions?) -> Type<string>)
 
 --[=[
 	@type Componented<T> Type<T>
@@ -570,10 +606,7 @@ export type Text = typeof(setmetatable(
 	t.unitVector3(t.quantized(-1, 1, 2 / 254))  -- three u8, three
 	```
 ]=]
-export type Componented<T> = typeof(setmetatable(
-	{} :: Type<T>,
-	{} :: { __call: (self: any, component: Type<number>) -> Type<T> }
-))
+export type Componented<T> = Type<T> & ((component: Type<number>) -> Type<T>)
 
 --[=[
 	@interface InstanceOptions
@@ -598,10 +631,7 @@ export type InstanceOptions = {
 	t.instance("BasePart", { descendantOf = workspace })
 	```
 ]=]
-export type Classed = typeof(setmetatable(
-	{} :: Type<Instance>,
-	{} :: { __call: (self: any, className: string, options: InstanceOptions?) -> Type<Instance> }
-))
+export type Classed = Type<Instance> & ((className: string, options: InstanceOptions?) -> Type<Instance>)
 
 --[[
 	~~`f32` is `-2^24..2^24` and `f64` is `-2^53..2^53`.~~ **Those were the spans in which each

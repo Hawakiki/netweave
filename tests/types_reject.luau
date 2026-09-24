@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 17
+-- netweave:expect 24
 
 --[[
 	Every assignment here must be rejected. `lune run analyze` fails if the count on line 1 stops
@@ -94,5 +94,22 @@ local _wrongDefault = t.optional(t.u8, "fast") -- netweave:reject default of the
 --[[ 17. And a table field takes no default at all: a table default would be a fresh table on every
      read and no two of them equal. ]]
 local _tableDefault = t.optional(t.struct({ x = t.u8 }), 5) -- netweave:reject takes a default only for
+
+--[[
+	18-24. **A constructor's arguments are checked by type, not only by count** (`PLAN-M5` D-1).
+
+	`Ranged<T>`, `Text`, `Componented<T>` and `Classed` were `typeof(setmetatable(…))` aliases,
+	which enforce how many arguments a call passes and nothing about what they are: `t.u8(0, "b")`
+	was accepted and declared a storage nobody asked for, and `t.vector3(t.boolean)` produced no
+	diagnostic at all (M4-1). They are intersections now — `Type<T> & ((…) -> Type<T>)` — which
+	checks both halves and is still usable bare, the bare spellings being in `types_ok`.
+]]
+local _wrongBound = t.u8(0, "b") -- netweave:reject Expected this to be 'number', but got 'string'
+local _wrongLow = t.u8("a", 3) -- netweave:reject Expected this to be 'number', but got 'string'
+local _wrongLength = t.buffer(0, "x") -- netweave:reject Expected this to be 'number', but got 'string'
+local _wrongOption = t.string(0, 5, { utf8 = 1 }) -- netweave:reject Expected this to be 'boolean?', but got 'number'
+local _wrongComponent = t.vector3(t.boolean) -- netweave:reject 'Type<boolean>'
+local _wrongPose = t.cframe(t.boolean) -- netweave:reject 'Type<boolean>'
+local _wrongClass = t.instance(5) -- netweave:reject Expected this to be 'string', but got 'number'
 
 return nil

@@ -217,10 +217,24 @@ payload type function at once:
 10. phase 9's remaining documents, re-ranked as each mechanism lands rather than at the end
 
 ### Phase 1 — the callable shape
-- [ ] `Ranged<T>`, `Text`, `Componented<T>`, `Classed` as `Type<T> & ((…) -> Type<T>)`
-- [ ] `PayloadOf`, `StructPayload`, `UnionPayload`, `MapPayload`, `OptionalPayload`, `ArrayPayload` look through an intersection
-- [ ] every `readproperty` site in `Trust`, `Channel`, `View` does the same
-- [ ] `types_reject` gains a case per constructor for a wrong-typed argument; Q5 re-run
+- [x] `Ranged<T>`, `Text`, `Componented<T>`, `Classed` as `Type<T> & ((…) -> Type<T>)`
+- [x] `PayloadOf`, `StructPayload`, `UnionPayload`, `MapPayload`, `OptionalPayload`, `ArrayPayload` look through an intersection
+      — one private `carrierOf` type function, called by all six. A type function may call another in
+      its own module (measured), so the six do not each need a copy; and a private one still reduces
+      across a `require` as long as the module references the exported caller (Q5's rule, re-measured).
+      `StructPayload` and `UnionPayload` needed the call placed *before* their `is("table")` guard, not
+      after — with it after, every `t.u8` in a struct was "not a netweave type": 1,352 diagnostics
+- [x] every `readproperty` site in `Trust`, `Channel`, `View` does the same — `Channel.payloadOf` and
+      `Trust.TrustedPayload` carry their own copy of the walk, because a type function cannot reference
+      an outer local and calling one across a `require` needs it exported, which would put a helper on
+      the public surface. `View`'s five sites read a *channel* record built by `Channel`'s own type
+      functions, never a schema, so they need nothing
+- [x] `types_reject` gains a case per constructor for a wrong-typed argument (18-24, count 17 → 24),
+      each with its accepted twin in `types_ok`; Q5 re-run — `spike/declare`'s five files still report
+      3, 3, 4, 5, 4, and `api_reject` still 24, which is what would drop if a mapper became `any`.
+      One gap measured and not closed: `t.unitVector3(t.string)` produces nothing, because the argument
+      is itself an intersection and Luau's subtyping of one against `Type<number>` lets it through —
+      `t.vector3(t.boolean)`, a plain table type, is refused. The runtime refuses both
 - [ ] the fifth `nw.Views` spelling, measured writing the tutorial (2026-09-10): passing a namespace
       *bare* to a parameter typed `nw.Views<typeof(ns.channels)>` or `typeof(ns)` turns the payloads of
       the handlers already written on that namespace into `unknown`, retroactively; the cast at the call
