@@ -116,6 +116,79 @@ local function nothing(label: string, weighed: Weighed)
 	)
 end
 
+--[[
+	Two paths through the same call, timed against each other.
+
+	The rungs below are about a refusal costing more than it has to, and a refusal that builds no
+	string is not observably different from one that builds an interned one — the heap instrument
+	above reads zero for both, because a short string is interned and a long one is collected
+	inside the window (measured). So these two have to use a clock, and a clock on this machine
+	moved a ratio from 1.1 to 1.5 between two runs with the Studio pass in between.
+
+	Two things make it survive re-running (`CLAUDE.md` §9). The columns are timed **in the same
+	pass**, alternating, so a busy window lands on both rather than on one; and the statistic is the
+	**fastest** pass, for the reason `bench/tick` gives — the work is deterministic, so noise only
+	ever adds. The median and the slowest are printed beside it so that claim can be checked.
+]]
+local RACE_REPEATS = 21
+
+type Timed = { fastest: number, median: number, slowest: number }
+
+local function summarise(samples: { number }): Timed
+	table.sort(samples)
+
+	return {
+		fastest = samples[1],
+		median = samples[math.ceil(#samples / 2)],
+		slowest = samples[#samples],
+	}
+end
+
+local function race(calls: number, admitted: () -> (), refused: () -> ()): (Timed, Timed)
+	local admittedSamples: { number } = {}
+	local refusedSamples: { number } = {}
+
+	for _ = 1, RACE_REPEATS do
+		for _, pair in { { admittedSamples, admitted }, { refusedSamples, refused } } do
+			local samples = pair[1] :: { number }
+			local body = pair[2] :: () -> ()
+
+			local started = os.clock()
+			body()
+			table.insert(samples, (os.clock() - started) * 1e9 / calls)
+		end
+	end
+
+	return summarise(admittedSamples), summarise(refusedSamples)
+end
+
+local function ratio(label: string, admitted: Timed, refused: Timed, calls: number, ceiling: number): number
+	local measured = refused.fastest / admitted.fastest
+
+	print(
+		string.format(
+			"        %-44s admitted %4.0f ns [%4.0f–%4.0f]  refused %4.0f ns [%4.0f–%4.0f]  ratio %.2f  n = %d x %d",
+			label,
+			admitted.fastest,
+			admitted.median,
+			admitted.slowest,
+			refused.fastest,
+			refused.median,
+			refused.slowest,
+			measured,
+			RACE_REPEATS,
+			calls
+		)
+	)
+
+	expect(
+		measured < ceiling,
+		`{label}: expected a refusal under {ceiling}x an admission, got {string.format("%.2f", measured)}x`
+	)
+
+	return measured
+end
+
 -- -------------------------------------------------------------------------------------------
 -- 73 — Delta.write's commit closure
 -- -------------------------------------------------------------------------------------------
@@ -521,75 +594,55 @@ rung77()
 	interpolated string, so a refusal cost 2.4x an admission — 191 ns against 80 — for a sentence
 	whose one variable, the rate, is fixed per channel. Not an allocation: Luau interns short
 	strings, so the same sentence built again is the same object and M4-1 measured +0 KB over 10⁶
-	refusals. Time only, which is why this rung has to weigh. Each column is the median over
-	repeats of a run of calls under an injected clock, with the spread; the clock never moves, so
-	the admitted column drains the bucket once and the refused column is every call after.
+	refusals. Time only, which is why this rung races the two paths rather than weighing one; see
+	`race` above for what makes a clock survive re-running here. The clock the budget is given never
+	moves, so a fresh bucket admits its whole burst and a drained one refuses everything after.
 
-	BEFORE (78689c7): admitted 67 ns [66–73], refused 186 ns [183–193], ratio 2.8.
-	AFTER: admitted 67 ns [65–71], refused 84 ns [81–94], ratio 1.3.
+	BEFORE, the cache reverted in place on `6aeff0e`: refused 186–187 ns against 65–66 admitted,
+	ratio 2.84 .. 2.87 over three runs — and the rung goes red, which is the §9 half of it.
+	AFTER: refused 79–81 ns, ratio 1.19 .. 1.25. The ceiling of 2.0 sits between the two with room
+	on both sides, which a ratio measured off a clock has to have.
 ]]
 local function rungBudget()
 	print("M4-1    Budget.admit, admitted against refused")
 
-	local REPEATS = 21
 	local CALLS = 100000
 
 	--[[ A bucket as deep as one run, at an ordinary rate: the admitted column is the burst being
-	     drained, and the refused column is what comes after with the clock stopped. ]]
+	     drained, and the refused column is what comes after. ]]
 	local channel = Channel.signal({ data = t.struct({ n = t.u8 }), rate = 30, burst = CALLS })
 	channel.qualified = "residue.signal"
 	local sender = { name = "sender" }
 
-	local function time(refusing: boolean): (number, number, number)
-		local samples: { number } = {}
-
-		for _ = 1, REPEATS do
-			local budget = Budget.new(function()
-				return 0
-			end)
-			local admit = budget.admit
-
-			if refusing then
-				--[[ Drain the bucket first, so every timed call is a refusal. ]]
-				for _ = 1, CALLS do
-					admit(channel, sender, 1)
-				end
-			end
-
-			local started = os.clock()
-			for _ = 1, CALLS do
-				admit(channel, sender, 1)
-			end
-			table.insert(samples, (os.clock() - started) * 1e9 / CALLS)
-		end
-
-		table.sort(samples)
-		return samples[math.ceil(REPEATS / 2)], samples[1], samples[REPEATS]
+	local function stopped(): number
+		return 0
 	end
 
-	local admitted, admittedLow, admittedHigh = time(false)
-	local refused, refusedLow, refusedHigh = time(true)
-	local ratio = refused / admitted
+	--[[ Built outside the timed body, because `Budget.new` allocates and the two columns have to
+	     differ by the refusal alone. The admitted column's bucket is refilled by hand rather than
+	     rebuilt: a fresh record is what `admit` writes on its first call for a sender, and that
+	     first call is not the path under test. ]]
+	local admittedBudget = Budget.new(stopped)
+	local refusedBudget = Budget.new(stopped)
 
-	print(
-		string.format(
-			"        %-44s admitted %4.0f ns [%3.0f–%3.0f]  refused %4.0f ns [%3.0f–%3.0f]  ratio %.1f  n = %d x %d",
-			"one sender, one channel, the clock stopped",
-			admitted,
-			admittedLow,
-			admittedHigh,
-			refused,
-			refusedLow,
-			refusedHigh,
-			ratio,
-			REPEATS,
-			CALLS
-		)
-	)
-	expect(
-		ratio < 1.5,
-		`Budget.admit: expected a refusal under 1.5x an admission, got {string.format("%.1f", ratio)}x`
-	)
+	for _ = 1, CALLS do
+		refusedBudget.admit(channel, sender, 1)
+	end
+
+	local admit = admittedBudget.admit
+	local refuse = refusedBudget.admit
+
+	local admitted, refused = race(CALLS, function()
+		for _ = 1, CALLS do
+			admit(channel, sender, 1)
+		end
+	end, function()
+		for _ = 1, CALLS do
+			refuse(channel, sender, 1)
+		end
+	end)
+
+	ratio("one sender, one channel, the clock stopped", admitted, refused, CALLS, 2.0)
 end
 
 rungBudget()
@@ -606,13 +659,14 @@ rungBudget()
 	columns read the same sidecar slot through the same reader: one holds an instance of the
 	declared class, the other one of another class.
 
-	BEFORE (78689c7): admitted 111 ns [109–125], refused 159 ns [158–174], ratio 1.4.
-	AFTER: admitted 112 ns [109–118], refused 125 ns [124–141], ratio 1.1.
+	BEFORE, the concatenation restored in place on `6aeff0e`: refused 152–167 ns against 107–110
+	admitted, ratio 1.40 .. 1.52 over three runs, and the rung goes red.
+	AFTER: refused 119–121 ns, ratio 1.09 .. 1.11. The ceiling is 1.3; this is the narrower of the
+	two margins, and the fastest-pass statistic is what makes it hold.
 ]]
 local function rungInstance()
 	print("M4-1    the instance reader, admitted against refused")
 
-	local REPEATS = 21
 	local CALLS = 100000
 
 	--[[ The lune stand-in the codec suite uses: a table answering `IsA`, which is what the reader
@@ -630,49 +684,26 @@ local function rungInstance()
 	local read = codec.read
 	local empty = buffer.create(0)
 
-	local function time(value: any): (number, number, number)
-		local samples: { number } = {}
-		local sidecar = { value }
+	--[[ One sidecar per column, held outside the timed body: what differs between the two is the
+	     class of the instance in it, which is the branch under test. ]]
+	local sound = { standIn("Sound") }
+	local part = { standIn("Part") }
 
-		for _ = 1, REPEATS do
+	local function reading(sidecar: { any }): () -> ()
+		return function()
 			Buffer.beginRead(empty, sidecar)
 
-			local started = os.clock()
 			for _ = 1, CALLS do
 				Buffer.seekInstances(0)
 				Buffer.clearRejection()
 				read()
 			end
-			table.insert(samples, (os.clock() - started) * 1e9 / CALLS)
 		end
-
-		table.sort(samples)
-		return samples[math.ceil(REPEATS / 2)], samples[1], samples[REPEATS]
 	end
 
-	local admitted, admittedLow, admittedHigh = time(standIn("Sound"))
-	local refused, refusedLow, refusedHigh = time(standIn("Part"))
-	local ratio = refused / admitted
+	local admitted, refused = race(CALLS, reading(sound), reading(part))
 
-	print(
-		string.format(
-			"        %-44s admitted %4.0f ns [%3.0f–%3.0f]  refused %4.0f ns [%3.0f–%3.0f]  ratio %.1f  n = %d x %d",
-			't.instance("Sound") handed a Sound, then a Part',
-			admitted,
-			admittedLow,
-			admittedHigh,
-			refused,
-			refusedLow,
-			refusedHigh,
-			ratio,
-			REPEATS,
-			CALLS
-		)
-	)
-	expect(
-		ratio < 1.25,
-		`instance reader: expected a refusal under 1.25x an admission, got {string.format("%.1f", ratio)}x`
-	)
+	ratio('t.instance("Sound") handed a Sound, then a Part', admitted, refused, CALLS, 1.3)
 end
 
 rungInstance()

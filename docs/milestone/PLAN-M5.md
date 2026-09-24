@@ -291,8 +291,14 @@ payload type function at once:
         100, 1 left. `roblox_runtime` asserts `within` reads the list it is given, not the engine.
   - [x] M4-1 minors, the two refusal strings — `Budget.admit`'s sentence is one per rate, built on
         the first refusal; the instance reader's two are built with the closure. Time only, since
-        Luau interns short strings: BEFORE on `78689c7` a refusal at 2.8x an admission (186 against
-        67 ns) and 1.4x (159 against 111); AFTER 1.3x (84) and 1.1x (125), n = 21 × 100,000.
+        Luau interns short strings (and a long one is collected inside a `gcinfo` window, measured —
+        the heap instrument reads zero for both). ~~BEFORE on `78689c7` a refusal at 2.8x an admission
+        (186 against 67 ns) and 1.4x (159 against 111); AFTER 1.3x (84) and 1.1x (125).~~ Those two
+        columns were timed in separate passes and read from the median, and the instance ratio moved
+        1.1 → 1.5 between two runs with a Studio pass in between, failing its own assertion. The rung
+        races the two paths in one alternating pass and takes the fastest, per `bench/tick`'s reason:
+        BEFORE, reverted in place on `6aeff0e`, 2.84–2.87x and 1.40–1.52x over three runs each, both
+        red; AFTER 1.19–1.25x and 1.09–1.11x, ceilings 2.0 and 1.3.
   - [x] M4-1 minor, the free list — `Inbound.pooled()` counts it, since lune cannot force a
         collection; the pool keeps at most 8 lists on the way back in. BEFORE on `5214fd1`: 64
         walks parked inside a yielding handler, 64 lists pooled after; AFTER: 8.
@@ -344,8 +350,11 @@ payload type function at once:
         (`spike/additions/f_quaternion.luau`, five runs of 200,000 rotations: angle error 6.1e-5 to
         6.4e-5 rad), and that run corrected the reader — the three kept squares sum to at most **3/4**,
         not 1, because the dropped component is the largest. `types_ok`, `types_runtime`, `ir_runtime`,
-        `protocol_runtime`; the wire half is `roblox_runtime` and **needs the Studio pass** before the
-        milestone closes.
+        `protocol_runtime`; the wire half is `roblox_runtime`, and the Studio pass ran green on
+        `6aeff0e` — 20 of 20 files, the compact cframe at 13 bytes for a narrowed position and 19 for a
+        float one, a quarter and a wide turn about each axis, the packing just over 3/4 refused and the
+        one exactly on it accepted. The `within` numbers reproduced in the same run: 346 and 142 ns a
+        subject against 364 and 140.
 
 ### Phase 6 — the tooling
 - [x] selene block allows replace the global list in `netweave.toml`: `-- selene: allow(undefined_variable)`
