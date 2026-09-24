@@ -303,7 +303,7 @@ type Loadout = { primary: number, secondary: number }
 local loadouts: { [any]: { Loadout } } = {}
 
 combat.server.getLoadout:handle(function(ctx, slot)
-	local player = ctx.player :: Player
+	local player = ctx.player
 	return loadouts[player][slot + 1]
 end)
 
@@ -460,7 +460,7 @@ local _cost: number = cost({ tag = "wait", value = 3 })
 local function equipFor(_player: Player, _chosen: nw.Trusted<Equip>) end
 
 combat.server.equip:listen(function(ctx, chosen)
-	equipFor(ctx.player :: Player, chosen)
+	equipFor(ctx.player, chosen)
 end)
 
 combat.server.openedMenu:listen(function(_ctx, opened)

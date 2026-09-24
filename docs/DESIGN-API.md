@@ -808,17 +808,19 @@ check that depends on a tool's default is a check that changes when the tool doe
 `ctx` reaches every policy and every handler, so it must not be allocated per packet — that
 would break the zero-hot-path-allocation criterion on day one (`RESEARCH §3.6-A4`, `§3.6-B4`).
 
-### What a handler sees, and the one field that is `unknown`
+### What a handler sees
 
-A `:listen` handler's `ctx` is a table the view builds, so `ctx.now` is a `number`, `ctx.channel` a
-`string`, and `ctx.playr` is a typo the analyser catches. `player`, `character` and `humanoid` are
-`unknown`, because a `type function` body has only the `types` library and no way to reach `Player`,
-`Model` or `Humanoid`. They pass anywhere `unknown` is accepted — `publish(ctx.player, ...)` is the
-common case and works — and take a cast anywhere it is not:
+A `:listen` handler's `ctx` is `nw.Ctx`, the same type a policy takes:
 
 ```lua
-local player = ctx.player :: Player
+combat.server.equip:listen(function(ctx, chosen)
+    Inventory.equip(ctx.player, chosen.slot)   -- ctx.player is a Player
+    local pivot = ctx.character and ctx.character:GetPivot()
+end)
 ```
+
+So `ctx.player.UserId` type-checks, `ctx.character` narrows from `Model?`, and `ctx.playr` is a
+typo the analyser catches.
 
 ~~The whole context was `unknown`.~~ **Until M3 phase 7**, which is worse than it sounds: a handler
 could neither read through it nor annotate it, because `Ctx` is not a supertype of `unknown` and
@@ -826,9 +828,14 @@ could neither read through it nor annotate it, because `Ctx` is not a supertype 
 suite was written `function(_ctx, ...)` and none of them wanted the context. Writing the worked
 example is what found it — `ctx.player` is the first thing a real handler reaches for.
 
-A **policy** is a plain function typed `(ctx: Ctx, value: T) -> Verdict`, so `nw.Ctx` annotates
-normally there, and the example above does. The asymmetry is not a design; it is what a type
-function can and cannot name.
+~~`player`, `character` and `humanoid` stay `unknown`, because a `type function` body has only the
+`types` library and no way to reach `Player`, `Model` or `Humanoid`, so they take a cast wherever
+`unknown` is not accepted.~~ **Corrected in `PLAN-M5` phase 1: a type function cannot *name* a
+Roblox class, but it can be *handed* one.** A type function's arguments are types, so `Views<D>`
+instantiates the two view mappers with `Context.Ctx` and the shape arrives with its real classes.
+That route was already in the codebase, unnoticed: `nw.policy`'s own signature is how
+`{ player: Player, character: Model? }` reaches `Channel`'s type functions. The casts the worked
+example carried are gone.
 
 **One `ctx` per player, fields refreshed in place, valid only for the synchronous duration of
 the handler.** Retaining it is a defect:
