@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 24
+-- netweave:expect 27
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -269,10 +269,28 @@ end)
 	and because nothing in `tests/` had ever written `Views<` — the erasure removes diagnostics, so
 	no rejection count could see it and no `_ok` file could either.
 
-	**If the count moves to 25, the hazard is gone**: delete this section, raise the header, and take
-	the caution off `View.Views` and `DESIGN-API.md` §7. That is the only way this file is allowed to
-	hold code that does not error.
+	**If the two statements below start erroring, the hazard is gone**: delete this section, lower the
+	header by two, and take the caution off `View.Views` and `DESIGN-API.md` §7. That is the only way
+	this file is allowed to hold code that does not error. ~~If the count moves to 25~~ — the count is
+	the wrong instrument for it, because a case added anywhere else moves it too, which is what
+	happened when the channel record's fields became `read`.
 ]]
+--[[
+	**A channel's fields are `read`, so switching a guarantee off takes a cast** (M4 report finding 6).
+
+	`Inbound` reads `authorize`, `rate` and `maxBytes` per packet and treats a nil `authorize` as
+	allow, so each of these was one typed line that took G1 or G2 off — and a reviewer grepping for
+	`:: any` found nothing, because none was needed. The three below are the three the transport
+	reads; `Channel.Channel` says why the record itself is not frozen at seal.
+]]
+local guarded = nw.namespace("guarded", {
+	fire = nw.command({ data = t.struct({ x = t.u8 }), rate = 10, authorize = allow }),
+})
+
+guarded.channels.fire.authorize = nil -- netweave:reject Property authorize of table 'Channel<"command", "none", { x: number }, nil, nil>' is read-only
+guarded.channels.fire.rate = 1000000000 -- netweave:reject Property rate of table 'Channel<"command", "none", { x: number }, nil, nil>' is read-only
+guarded.channels.fire.maxBytes = 1000000000 -- netweave:reject Property maxBytes of table 'Channel<"command", "none", { x: number }, nil, nil>' is read-only
+
 local canary = nw.namespace("canary", {
 	fire = nw.command({ data = t.struct({ x = t.u8 }), rate = 10, authorize = allow }),
 })
