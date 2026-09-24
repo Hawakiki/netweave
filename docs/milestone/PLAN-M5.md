@@ -337,7 +337,15 @@ payload type function at once:
         to the differ, in the hash with its type; an absent second argument reaches the type function
         as `unknown`, measured. `types_ok`, `types_reject` (17), `types_runtime`, `serdes_runtime`,
         `delta_runtime`, `protocol_runtime`, WIRE-FORMAT §5, tutorial step 8.
-  - [ ] compact `t.cframe`
+  - [x] compact `t.cframe` — `t.cframe(component)`, the position as three of the component and the
+        rotation as a quaternion with its largest component dropped: three `i16` and a two-bit index
+        where an enum's tag goes. 13 bytes for a narrowed position against the bare 24, 19 with an
+        `f32` one. `CFrame` is Roblox's, so the arithmetic is verified separately under lune
+        (`spike/additions/f_quaternion.luau`, five runs of 200,000 rotations: angle error 6.1e-5 to
+        6.4e-5 rad), and that run corrected the reader — the three kept squares sum to at most **3/4**,
+        not 1, because the dropped component is the largest. `types_ok`, `types_runtime`, `ir_runtime`,
+        `protocol_runtime`; the wire half is `roblox_runtime` and **needs the Studio pass** before the
+        milestone closes.
 
 ### Phase 6 — the tooling
 - [x] selene block allows replace the global list in `netweave.toml`: `-- selene: allow(undefined_variable)`
@@ -456,7 +464,7 @@ payload type function at once:
 
 ## 7. Acceptance criteria
 
-1. `t.u8(0, "b")`, `t.string(0, 5, { utf8 = 1 })`, `t.vector3(t.boolean)`, `t.instance(5)` each produce a diagnostic, and `types_reject` marks the line and the text.
+1. `t.u8(0, "b")`, `t.string(0, 5, { utf8 = 1 })`, `t.vector3(t.boolean)`, `t.cframe(t.boolean)`, `t.instance(5)` each produce a diagnostic, and `types_reject` marks the line and the text. (`t.cframe` became `Componented` in phase 5, and its bad-component case is measured to produce nothing today for the same reason as the vector's.)
 2. `local policy: nw.Policy<Equip>`, `local snapshot: nw.Snapshot`, `local observer: nw.Observer` analyse in an `_ok` file with a negative control each.
 3. `tools/exports` fails when a public value family gains a member with no nameable type.
 4. `nw.validate` returns a table the caller did not pass in; a channel record raises on write after seal; `nw.command({ store = {} })` is refused at declaration.
