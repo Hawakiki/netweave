@@ -498,6 +498,21 @@ check(
 check("and a float over exactly -1..1", t.unitVector3(t.f32(-1, 1)).unit == true)
 check("while a position keeps any number it likes", t.vector3(t.quantized(0, 1, 0.5)).kind == "vector3")
 
+--[[ A cframe takes a component the same way, for its position; the rotation compacts with it
+     (`PLAN-M5` phase 5). ]]
+local posed = t.cframe(t.i16(-2048, 2048))
+check("a cframe keeps its component", (posed.element :: any).encoding == "i16")
+check("and is still a cframe", posed.kind == "cframe")
+check("bare has none", t.cframe.element == nil)
+
+rejects("a cframe with a component that is not a number", function()
+	(t.cframe :: any)(t.boolean)
+end)
+
+rejects("a cframe with two arguments", function()
+	(t.cframe :: any)(t.i16, t.i16)
+end)
+
 rejects("a component and then something else", function()
 	(t.vector3 :: any)(t.f32, "extra")
 end)

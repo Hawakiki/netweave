@@ -1421,11 +1421,24 @@ t.unitVector3 = vectored({
 }, "unitVector3", 3) :: Componented<Vector3>
 
 --[=[
-	@prop cframe Type<CFrame>
+	@prop cframe Componented<CFrame>
 	@within Types
-	Position and rotation.
+
+	Position and rotation: twenty-four bytes bare, and callable with the schema the **position** is
+	carried at, which also makes the rotation compact.
+
+	```lua
+	pose = t.cframe,                          -- three f32 and an axis-angle vector, 24 bytes
+	pose = t.cframe(t.i16(-2048, 2048)),      -- six bytes of position, six of rotation, two bits
+	```
+
+	Named, the rotation travels as a quaternion with its largest component dropped: three `i16`
+	and a two-bit index in the enclosing bitfield, against twelve bytes of axis-angle. The rotation
+	comes back within 1e-4 radians of what was sent — five runs of 200,000 random rotations measured
+	6.1e-5 to 6.4e-5, `spike/additions/f_quaternion.luau` — and the position is whatever the
+	component says, refused off the map like a vector's.
 ]=]
-t.cframe = descriptor({ kind = "cframe" :: Kind }) :: Type<CFrame>
+t.cframe = vectored({ kind = "cframe" :: Kind }, "cframe", 3) :: Componented<CFrame>
 
 --[=[
 	@prop color3 Type<Color3>

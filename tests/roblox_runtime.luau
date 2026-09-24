@@ -311,6 +311,82 @@ do
 	rejects("a cframe carrying NaN", t.cframe, hostile)
 end
 
+--[[
+	The compact cframe (`PLAN-M5` phase 5): the position as three of the component, the rotation as
+	a quaternion with its largest component dropped — three `i16` and a two-bit index. Thirteen
+	bytes for a narrowed position against twenty-four, and a rotation within 5e-5 radians of what
+	was sent, which the tolerance in `cframesMatch` is well above.
+]]
+do
+	local posed = t.cframe(t.i16(-2048, 2048))
+
+	local value, failure, size = roundTrip(posed, CFrame.identity)
+	equals("a compact cframe is thirteen bytes", size, 13)
+	equals("the identity decodes", failure, nil)
+	check("and round trips", cframesMatch(value, CFrame.identity))
+
+	local translated = roundTrip(posed, CFrame.new(10, -20, 30))
+	check("a translation round trips", cframesMatch(translated, CFrame.new(10, -20, 30)))
+
+	local rotated = CFrame.new(1, 2, 3) * CFrame.Angles(0.4, -1.2, 2.9)
+	check("a rotation round trips", cframesMatch(roundTrip(posed, rotated), rotated))
+
+	local extreme = CFrame.fromAxisAngle(Vector3.new(0, 1, 0), math.pi - 1e-3)
+	check("a rotation near pi round trips", cframesMatch(roundTrip(posed, extreme), extreme))
+
+	--[[ Every axis as the largest component, so all four index values are exercised. ]]
+	for _, axis in { Vector3.xAxis, Vector3.yAxis, Vector3.zAxis } do
+		local quarter = CFrame.fromAxisAngle(axis, math.pi / 2)
+		check(`a quarter turn about {axis} round trips`, cframesMatch(roundTrip(posed, quarter), quarter))
+		local most = CFrame.fromAxisAngle(axis, 3)
+		check(`and a wide turn about {axis}`, cframesMatch(roundTrip(posed, most), most))
+	end
+
+	--[[ Off the map is refused like a vector's position. ]]
+	local far = buffer.create(13)
+	buffer.writeu16(far, 1, 65535)
+	rejects("a compact cframe off the map", posed, far)
+
+	--[[ Three kept components whose squares sum past 3/4 were never a rotation: the component that
+	     was dropped is the largest, so it is at least 1/2 and these three carry at most 3/4. Both
+	     the gross case and one just over the bound, because the reader was written against 1 and
+	     the spike measured the true limit (`spike/additions/f_quaternion.luau`). ]]
+	local function bentBy(component: number): buffer
+		local bent = buffer.create(13)
+		buffer.writeu16(bent, 1, 2048)
+		buffer.writeu16(bent, 3, 2048)
+		buffer.writeu16(bent, 5, 2048)
+		buffer.writei16(bent, 7, component)
+		buffer.writei16(bent, 9, component)
+		buffer.writei16(bent, 11, component)
+		return bent
+	end
+
+	rejects("a compact cframe whose rotation is not a unit quaternion", posed, bentBy(32767))
+
+	--[[ Each component sqrt(0.3), so the sum is 0.9: inside the old bound of 1, outside the real
+	     one. 0.5477 * 32767 * sqrt(2) = 25383. ]]
+	rejects("and one whose dropped component was not the largest", posed, bentBy(25383))
+
+	--[[ The bound itself has to stay reachable: all four components 1/2 is a legal rotation whose
+	     sum is exactly 3/4, and 0.5 * 32767 * sqrt(2) = 23170. ]]
+	local onTheBound = buffer.create(13)
+	buffer.writeu16(onTheBound, 1, 2048)
+	buffer.writeu16(onTheBound, 3, 2048)
+	buffer.writeu16(onTheBound, 5, 2048)
+	buffer.writei16(onTheBound, 7, 23170)
+	buffer.writei16(onTheBound, 9, 23170)
+	buffer.writei16(onTheBound, 11, 23170)
+
+	local _, atBound = decode(Serdes.fromSchema(posed), onTheBound, {})
+	equals("while a rotation whose four components are all 1/2 is accepted", atBound, nil)
+
+	--[[ And the float spelling, for a position with no map. ]]
+	local _, _, floatSize = roundTrip(t.cframe(t.f32), rotated)
+	equals("a float-positioned compact cframe is nineteen bytes", floatSize, 19)
+	check("and round trips the same", cframesMatch(roundTrip(t.cframe(t.f32), rotated), rotated))
+end
+
 -- ---------------------------------------------------------------------------------------------
 -- Instances
 -- ---------------------------------------------------------------------------------------------

@@ -668,10 +668,30 @@ function lower(descriptor: Descriptor): Node
 	elseif kind == "color3" then
 		return { kind = kind, bits = 0, fixedSize = 3, instances = 0 }
 	elseif kind == "cframe" then
+		local component = descriptor.element
+
+		if component then
+			--[[
+				The position as three of the component, like a vector; the rotation as a quaternion
+				with its largest component dropped — three `i16` and a two-bit index saying which,
+				in the enclosing bitfield where an enum's tag would go. Seven bytes of rotation
+				become six and two bits, against the twelve of the axis-angle vector below
+				(`PLAN-M5` phase 5; the M4 report's "compact cframe" row).
+			]]
+			local element = lower(component)
+
+			return {
+				kind = kind,
+				bits = 2,
+				fixedSize = (element.fixedSize :: number) * 3 + 6,
+				instances = 0,
+				element = element,
+			}
+		end
+
 		--[[
 			Position plus an axis-angle vector. Zap keeps a table of 24 common rotations and spends
-			one byte when a CFrame matches one; that is a real saving and a later optimisation, not
-			a correctness matter.
+			one byte when a CFrame matches one; the componented form above is the compact spelling.
 		]]
 		return { kind = kind, bits = 0, fixedSize = 24, instances = 0 }
 	elseif kind == "instance" then
@@ -817,7 +837,8 @@ local function assignBits(node: Node, scope: Scope, next: number): number
 	if kind == "boolean" then
 		node.chunkIndex, node.mask = locate(scope, next)
 		return next + 1
-	elseif kind == "enum" then
+	elseif kind == "enum" or kind == "cframe" then
+		--[[ A compact cframe's two index bits live where an enum's tag does. ]]
 		local chunks: { number } = sized(node.bits)
 		local masks: { number } = sized(node.bits)
 

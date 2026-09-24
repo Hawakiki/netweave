@@ -272,6 +272,8 @@ local _componented: t.Componented<Vector3> = t.vector3
 local _narrowVector: t.Type<Vector3> = _componented(t.i16(-2048, 2048))
 local _flatVector: t.Type<Vector2> = t.vector2(t.i16(-1024, 1024))
 local _direction: t.Type<Vector3> = t.unitVector3(t.quantized(-1, 1, 2 / 254))
+local _posed: t.Componented<CFrame> = t.cframe
+local _pose: t.Type<CFrame> = _posed(t.i16(-2048, 2048))
 
 --[[ `t.player` is the payload type Luau cannot get from a class name — `t.instance("Player")` is
      `Type<Instance>`, and `UserId` is what says these are not the same annotation. ]]

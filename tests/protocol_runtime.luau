@@ -381,6 +381,22 @@ do
 		default = 16,
 	}
 
+	--[[ The compact cframe reaches the hash through `bits`, `fixedSize` and the component walk, so
+	     it needs no attribute of its own: the two declarations differ on all three. ]]
+	differs(
+		"a compact cframe is not a bare one",
+		Protocol.signatureOf({
+			qualified = "probe.s",
+			class = "signal",
+			codec = { layout = Ir.lower(t.cframe(t.i16(-2048, 2048))) },
+		}),
+		Protocol.signatureOf({
+			qualified = "probe.s",
+			class = "signal",
+			codec = { layout = Ir.lower(t.cframe) },
+		})
+	)
+
 	local function channelWith(mutate: ((Ir.Node) -> ())?): any
 		local layout = Ir.lower(t.struct({ n = t.u8, s = t.string(0, 32) }))
 
