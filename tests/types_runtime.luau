@@ -716,6 +716,58 @@ rejects("a default on an array", function()
 end)
 
 -- ---------------------------------------------------------------------------------------------
+-- A hand-built table is not a schema (M4 report finding 7)
+-- ---------------------------------------------------------------------------------------------
+
+--[[
+	`isType` was a shape test — a table with a string `kind` — so every invariant the constructors
+	enforce was advisory. Measured for five shapes: `order = {"a","a"}` double-encodes, a `max` of
+	2^31 gives a 2 GB ceiling the `maxBytes` policy is then measured against, `variants = {}` lowers
+	to zero bits, and `nw.validate(bogus, 5)` minted a `Trusted`. It asks a weak set of what this
+	module built instead, and a set cannot be entered by copying a field.
+]]
+local forged: any = { kind = "number", encoding = "u8", min = 0, max = 2 ^ 31 }
+
+check("a hand-built table is not a netweave type", not t.isType(forged))
+check("while a real one is", t.isType(t.u8))
+check("including a callable used bare", t.isType(t.string) and t.isType(t.vector3) and t.isType(t.instance))
+check("and one it produced", t.isType(t.u8(0, 5)) and t.isType(t.instance("Sound")))
+
+--[[ The shape the set exists for: a clone carries every field and is still not one of ours. ]]
+check("a clone of a real descriptor is not one", not t.isType(table.clone(t.u8 :: any)))
+
+for name, build in
+	{
+		optional = function()
+			local _ = t.optional(forged)
+		end,
+		array = function()
+			local _ = t.array(forged)
+		end,
+		["map key"] = function()
+			local _ = t.map(forged, t.u8)
+		end,
+		["map value"] = function()
+			local _ = t.map(t.u8, forged)
+		end,
+		set = function()
+			local _ = t.set(forged)
+		end,
+		--[[ Through `any`, because the analyser refuses these two on its own — `StructPayload` and
+		     `UnionPayload` say "not a netweave type" at the call — and this section is about the
+		     *runtime* half, which a game reaching them through a table built at runtime gets. ]]
+		struct = function()
+			local _ = (t.struct :: any)({ n = forged })
+		end,
+		union = function()
+			local _ = (t.union :: any)({ a = forged })
+		end,
+	} :: { [string]: () -> () }
+do
+	rejects(`a forged descriptor inside t.{name}`, build)
+end
+
+-- ---------------------------------------------------------------------------------------------
 
 if failures > 0 then
 	error(`{failures} runtime type assertions failed`)

@@ -336,7 +336,7 @@ end
 	:::
 ]=]
 function Trust.validate<S>(schema: S, value: any): (TrustedPayload<S>?, string?)
-	if type(schema) ~= "table" or type((schema :: any).kind) ~= "string" then
+	if not Types.isType(schema) then
 		error(
 			`nw.validate takes a netweave type as its first argument and the value as its second, `
 				.. `got {typeof(schema)}. Write it as nw.validate(t.struct(...), value); a policy is `

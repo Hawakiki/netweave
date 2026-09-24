@@ -833,6 +833,41 @@ do
 end
 
 --[[
+	**A hand-built table reaches neither a channel nor `nw.validate`** (M4 report finding 7).
+
+	Both asked the same shape test — a table with a string `kind` — so a forged descriptor declared a
+	channel whose ceiling the `maxBytes` policy was then measured against, and minted a `Trusted<T>`
+	out of nothing. Both ask the type library's own set now. `types_runtime` has the constructors'
+	half and the reason.
+]]
+do
+	local forged: any = { kind = "number", encoding = "u8", min = 0, max = 2 ^ 31 }
+
+	refuses("a channel declared with a forged schema", function()
+		(nw.signal :: any)({ data = forged, rate = 10 })
+	end, "netweave type")
+
+	local passes = nw.policy(function()
+		return function()
+			return nw.allow()
+		end
+	end)
+
+	refuses("a query whose returns is forged", function()
+		(nw.query :: any)({ args = t.u8, returns = forged, rate = 10, timeout = 5, authorize = passes })
+	end, "netweave type")
+
+	refuses("validating against a forged schema", function()
+		(nw.validate :: any)(forged, 5)
+	end, "netweave type")
+
+	--[[ And a clone of a real one, which is the shape a field-based brand would have let through. ]]
+	refuses("a channel declared with a clone of a real schema", function()
+		(nw.signal :: any)({ data = table.clone(t.u8 :: any), rate = 10 })
+	end, "netweave type")
+end
+
+--[[
 	**The declaration table is a frozen copy** (M4 report finding 6).
 
 	It was the caller's own table, kept by reference, so a key declared after `nw.namespace` and
