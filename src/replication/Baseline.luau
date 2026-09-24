@@ -62,20 +62,33 @@ type Channels = { [any]: Subjects }
 --[=[
 	@interface Baseline
 	@within Baseline
-	.of (who: any, channel: any, subject: any) -> any -- what they have, or nil
-	.keep (who: any, channel: any, subject: any, value: any) -> boolean -- false when the limit refused it
-	.drop (who: any, channel: any, subject: any) -> ()
-	.desync (who: any, channel: any) -> () -- everything this client had on this channel is gone
+	.of (who: any, channel: Named, subject: any) -> any -- what they have, or nil
+	.keep (who: any, channel: Named, subject: any, value: any) -> boolean -- false when the limit refused it
+	.drop (who: any, channel: Named, subject: any) -> ()
+	.desync (who: any, channel: Named) -> () -- everything this client had on this channel is gone
 	.forget (who: any) -> () -- they left
 	.held (who: any) -> number
 	.each (who: any, channel: any, visit: (subject: any, value: any) -> ()) -> () -- every subject they hold on this channel
 	.reset () -> ()
 ]=]
+--[=[
+	@type Named { qualified: string }
+	@within Baseline
+
+	What this module needs a channel to be: a key, and a name to report against.
+
+	It was `any`, and `keep` dereferences `qualified` when the per-client limit refuses a subject —
+	so a channel value without one raised inside the tick, and nothing said so until it did (M4
+	report finding 46). Naming the two fields rather than taking the whole `Channel` record keeps the
+	rigs that stand one in honest without making them build one.
+]=]
+export type Named = { qualified: string }
+
 export type Baseline = {
-	of: (who: any, channel: any, subject: any) -> any,
-	keep: (who: any, channel: any, subject: any, value: any) -> boolean,
-	drop: (who: any, channel: any, subject: any) -> (),
-	desync: (who: any, channel: any) -> (),
+	of: (who: any, channel: Named, subject: any) -> any,
+	keep: (who: any, channel: Named, subject: any, value: any) -> boolean,
+	drop: (who: any, channel: Named, subject: any) -> (),
+	desync: (who: any, channel: Named) -> (),
 	forget: (who: any) -> (),
 	held: (who: any) -> number,
 	each: (who: any, channel: any, visit: (subject: any, value: any) -> ()) -> (),

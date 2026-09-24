@@ -308,6 +308,16 @@ payload type function at once:
   - [x] 48 — one `Stage`, in `Config` where the rules are named, re-exported by `Observer`; `Sink`
         carries it and `Inbound`'s cast is gone. `config_runtime` asserts every member is a rule and
         names `rateUnbounded` as the one rule that is not a stage
+  - [x] 46, in part — `Tick.Config` names `Outbound.Outbound` and `Baseline.Baseline` where it said
+        `any`, and `Baseline` names what it needs a channel to be (`{ qualified: string }`, the field
+        `keep` dereferences when the limit refuses). The `store.changed` and `Store.charm(subscribe)`
+        halves of the finding are stale — both were removed in M4. **`channel: any` across the transport
+        is not done**, and the reason is measured rather than assumed: `Batch`, `Inbound`, `Outbound`,
+        `Budget`, `Query` and `Recipients` each read a different handful of a channel's fields, and six
+        test rigs build partial channel tables with exactly the fields their section needs. A full
+        `Channel` record at the boundary makes every one of those a cast; a per-module structural type
+        is the shape that would not, and it is a module-by-module job rather than one commit. Carried
+        with that note rather than closed by omission
   - [x] 50 — the sidecar is `{ unknown }` from `Buffer.beginRead` outward, so `Serdes.isInstance` is
         the narrowing rather than a contradiction of the signature. Four suites take it back through a
         `takeAsWire` helper that names the loopback, and the fuzzer's mutators say `{ unknown }` too —

@@ -32,8 +32,10 @@
 	costs 1.63 ms and has nothing left to win.
 ]]
 
+local Baseline = require("./Baseline")
 local Ir = require("../codec/Ir")
 local Observer = require("../api/Observer")
+local Outbound = require("../transport/Outbound")
 local Recipients = require("../transport/Recipients")
 
 local Tick = {}
@@ -67,9 +69,15 @@ type Slot = {
 	.roster Roster
 	.channels () -> { any } -- the replicated channels, read late because ids are assigned late
 ]=]
+--[[
+	The three collaborators were `any`, so a renamed method or a wrong argument order was not a
+	diagnostic and `lune run analyze` was clean because there was nothing to check (M4 report
+	finding 46). `channels` stays `{ any }`: a channel record is `any` across the whole transport
+	boundary and typing it here alone would be a fence with one post.
+]]
 export type Config = {
-	outbound: any,
-	baselines: any,
+	outbound: Outbound.Outbound,
+	baselines: Baseline.Baseline,
 	roster: Recipients.Roster,
 	channels: () -> { any },
 }
