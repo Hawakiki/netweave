@@ -27,6 +27,15 @@ local Recipients = require("../src/transport/Recipients")
 local nw = require("../src/netweave")
 local t = require("../src/types")
 
+--[[ What this endpoint just wrote, handed back the way a *peer's* sidecar arrives: `{ unknown }`,
+     because that is what the receive path is typed to check since M4 report finding 50. The cast is
+     the loopback itself — these entries really are instances, and the point is that the reader does
+     not get to assume it. ]]
+local function takeAsWire(): (buffer, { unknown })
+	local packed, instances = Buffer.take()
+
+	return packed, instances :: any
+end
 local failures = 0
 
 local function fail(message: string)
@@ -689,7 +698,7 @@ do
 	Batch.writeRequest(getLoadout, 2, 1)
 	Batch.writeRequest(getLoadout, 3, 1)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	serverIn.receive(packed, instances, bob)
 
 	equals("the server took two", #held, 2)
@@ -728,7 +737,7 @@ do
 	Batch.writeRequest(getLoadout, 7, 1)
 	Batch.writeRequest(getLoadout, 7, 1)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	serverIn.receive(packed, instances, bob)
 
 	equals("only the first was served", #held, 1)
@@ -757,7 +766,7 @@ do
 	Buffer.load(nil)
 	Batch.writeRequest(getLoadout, 3, 1)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	serverIn.receive(packed, instances, bob)
 
 	equals("the call is in flight", serverQuery.inflight(bob), 1)
@@ -813,7 +822,7 @@ do
 		table.insert(pings, value.seq)
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	serverIn.receive(packed, instances, bob)
 
 	equals("the packet behind the refusal decoded", #answered, 1)
@@ -935,7 +944,7 @@ do
 	Buffer.load(nil)
 	Batch.writeRequest(getLoadout, 5000, 2)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local before = #toClient
 
 	serverIn.receive(packed, instances, bob)
@@ -1002,7 +1011,7 @@ do
 	Batch.writeRequest(getLoadout, 1, 1)
 	Batch.writePacket(ping, { seq = 42 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	serverIn.receive(packed, instances, bob)
 
 	check("the query handler is still parked", parked ~= nil)

@@ -30,6 +30,15 @@ local Serdes = require("../src/codec/Serdes")
 local harness = require("./harness")
 local t = require("../src/types")
 
+--[[ What this endpoint just wrote, handed back the way a *peer's* sidecar arrives: `{ unknown }`,
+     because that is what the receive path is typed to check since M4 report finding 50. The cast is
+     the loopback itself — these entries really are instances, and the point is that the reader does
+     not get to assume it. ]]
+local function takeAsWire(): (buffer, { unknown })
+	local packed, instances = Buffer.take()
+
+	return packed, instances :: any
+end
 --[[
 	The sections below are tagged failure- or success-path, and the file declares a floor
 	(`PLAN-M3` D-10).
@@ -442,7 +451,7 @@ do
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	equals("both instances are in the sidecar", #instances, 2)
 
 	Batch.read(packed, instances, sink)
@@ -465,7 +474,7 @@ do
 	Batch.writePacket(WithInstance, { who = first :: any, n = 1 })
 	Batch.writePacket(WithInstance, { who = second :: any, n = 2 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 
 	suite.failing()
 
@@ -500,7 +509,7 @@ do
 	Batch.writePacket(Maybe, { who = nil, n = 2 })
 	Batch.writePacket(Maybe, { who = present :: any, n = 3 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	equals("only the present ones are in the sidecar", #instances, 2)
 
 	Batch.read(packed, instances, sink)
@@ -534,7 +543,7 @@ do
 	Batch.writePacket(Maybe, { who = mine :: any, n = 1 })
 	Batch.writePacket(Maybe, { who = yours :: any, n = 2 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 
 	--[[
 		version, id, instances, payload. There is no length: an optional instance costs no bytes, so
@@ -1974,7 +1983,7 @@ do
 	Batch.writePacket(channel, { a = 2 })
 	Batch.writePacket(channel, { a = 3 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)
@@ -2041,7 +2050,7 @@ do
 
 		Batch.writePacket(channel, { a = 1 })
 
-		local packed, instances = Buffer.take()
+		local packed, instances = takeAsWire()
 		local survived = pcall(function()
 			inbound.receive(packed, instances, alice)
 		end)
@@ -2100,7 +2109,7 @@ do
 	local inbound = inboundOf(true, {})
 
 	Batch.writePacket(channel, { a = 1 })
-	local first, firstInstances = Buffer.take()
+	local first, firstInstances = takeAsWire()
 	pcall(function()
 		inbound.receive(first, firstInstances, alice)
 	end)
@@ -2109,7 +2118,7 @@ do
 
 	reset()
 	Batch.writePacket(channel, { a = 2 })
-	local second, secondInstances = Buffer.take()
+	local second, secondInstances = takeAsWire()
 	pcall(function()
 		inbound.receive(second, secondInstances, bob)
 	end)
@@ -2157,7 +2166,7 @@ do
 	Batch.writePacket(channel, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 })
 	Batch.writePacket(channel, { 3, 4 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)
@@ -2216,7 +2225,7 @@ do
 
 	Batch.writePacket(channel, full)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	inbound.receive(packed, instances, alice)
 
 	equals("a full array, which only the corrected ceiling admits, arrives", got, 1)
@@ -2265,7 +2274,7 @@ do
 		Batch.writePacket(channel, { a = index })
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)
@@ -2303,7 +2312,7 @@ do
 		Batch.writePacket(channel, { a = 1 })
 	end
 
-	local first, firstInstances = Buffer.take()
+	local first, firstInstances = takeAsWire()
 	inbound.receive(first, firstInstances, alice)
 
 	equals("the first batch delivered its bound", delivered, 2)
@@ -2314,7 +2323,7 @@ do
 		Batch.writePacket(channel, { a = 1 })
 	end
 
-	local second, secondInstances = Buffer.take()
+	local second, secondInstances = takeAsWire()
 	inbound.receive(second, secondInstances, alice)
 
 	equals("and the next batch starts fresh", delivered, 4)
@@ -2367,7 +2376,7 @@ do
 
 	Batch.writePacket(nested, wide)
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	local survived = pcall(function()
 		inbound.receive(packed, instances, alice)
 	end)

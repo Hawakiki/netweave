@@ -55,7 +55,11 @@ local incomingCursor = 0
 --[[ The end of the *packet*, not of the batch. A corrupt inner length must not read into the
      next packet's bytes, let alone off the end of the buffer. ]]
 local incomingLimit = 0
-local incomingInstances: { Instance } = {}
+--[[ `{ unknown }`, not `{ Instance }`: this is the sidecar a peer sent, and what it holds is what
+     the read phase exists to check. `FireServer(buffer, { {} })` puts a table in it, and an
+     annotation asserting otherwise made `Serdes.isInstance` read as a contradiction of the signature
+     rather than as the narrowing it is (M4 report finding 50). ]]
+local incomingInstances: { unknown } = {}
 local incomingInstanceCursor = 0
 local rejection: string? = nil
 
@@ -833,7 +837,8 @@ export type Read = {
 	buffer: buffer,
 	cursor: number,
 	limit: number,
-	instances: { Instance },
+	--[[ Wire data, so `{ unknown }`; see `incomingInstances`. ]]
+	instances: { unknown },
 	instanceCursor: number,
 	rejection: string?,
 }
@@ -887,7 +892,7 @@ end
 
 	Points the reader at a freshly arrived batch and clears any previous rejection.
 ]=]
-function Codec.beginRead(source: buffer, instances: { Instance }?)
+function Codec.beginRead(source: buffer, instances: { unknown }?)
 	incoming = source
 	incomingCursor = 0
 	incomingLimit = buffer.len(source)
@@ -1228,12 +1233,20 @@ end
 --[=[
 	@within CodecBuffer
 	@function readInstance
-	@return Instance? -- nil when the sidecar is exhausted
+	@return unknown -- nil when the sidecar is exhausted, and whatever the peer put there otherwise
 
-	Consumes the next instance in write order. A packet that is skipped must skip its instances
-	too, or every later packet reads the wrong ones.
+	Consumes the next entry in write order. A packet that is skipped must skip its instances too, or
+	every later packet reads the wrong ones.
+
+	:::caution
+	**`unknown`, not `Instance?`.** A sidecar entry is a client argument like any other:
+	`FireServer(buffer, { {} })` puts a table there, and `value:IsA(class)` on a table raises on the
+	receive path, which is guarantee G4 broken by the one piece of wire data that does not travel in
+	the buffer. `Serdes` checks it with `isInstance` before asking anything else, and this type is
+	what makes that check the narrowing rather than a contradiction (M4 report finding 50).
+	:::
 ]=]
-function Codec.readInstance(): Instance?
+function Codec.readInstance(): unknown
 	incomingInstanceCursor += 1
 	return incomingInstances[incomingInstanceCursor]
 end

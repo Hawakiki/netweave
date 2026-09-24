@@ -39,6 +39,15 @@ local harness = require("./harness")
 local nw = require("../src/netweave")
 local t = require("../src/types")
 
+--[[ What this endpoint just wrote, handed back the way a *peer's* sidecar arrives: `{ unknown }`,
+     because that is what the receive path is typed to check since M4 report finding 50. The cast is
+     the loopback itself — these entries really are instances, and the point is that the reader does
+     not get to assume it. ]]
+local function takeAsWire(): (buffer, { unknown })
+	local packed, instances = Buffer.take()
+
+	return packed, instances :: any
+end
 --[[
 	~~0.9~~ **0.25, which is the honest share of assertions.** The floor was met by counting the nine
 	"was exercised" self-checks and the run-shape checks as refusals (M4-1); tagged honestly, the failure
@@ -421,7 +430,7 @@ end
 
 --[[ The sidecar is typed `{ Instance }` all the way down, and under lune there are no instances —
      these tables stand in, the same way `tests/transport_runtime.luau` does it. ]]
-type Sample = { packed: buffer, instances: { Instance } }
+type Sample = { packed: buffer, instances: { unknown } }
 
 local function encode(): Sample
 	Buffer.take()
@@ -450,7 +459,7 @@ local function encode(): Sample
 		end
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end
 
@@ -544,7 +553,7 @@ local mutations: { Mutation } = {
 			--[[ Fewer instances than the packets claim. The claim is provably a lie because the
 			     sidecar's length is known, and believing it would hand a packet another packet's
 			     Instance. ]]
-			local trimmed: { Instance } = {}
+			local trimmed: { unknown } = {}
 
 			for index = 1, math.max(0, #sample.instances - 1) do
 				trimmed[index] = sample.instances[index]
@@ -556,7 +565,7 @@ local mutations: { Mutation } = {
 	{
 		name = "sidecar padded",
 		apply = function(sample: Sample): Sample
-			local padded: { Instance } = table.clone(sample.instances)
+			local padded: { unknown } = table.clone(sample.instances)
 			table.insert(padded, part)
 
 			return { packed = sample.packed, instances = padded }
@@ -573,7 +582,7 @@ local mutations: { Mutation } = {
 				return sample
 			end
 
-			local replaced: { Instance } = table.clone(sample.instances)
+			local replaced: { unknown } = table.clone(sample.instances)
 			local slot = math.random(1, #replaced)
 			local junk: any = ({ {}, 12345, "text" })[math.random(1, 3)]
 			replaced[slot] = junk
@@ -639,7 +648,7 @@ local canary = (function(): Sample
 	Buffer.load(nil)
 	Batch.writePacket(Fixed, { a = 1, b = 2, c = 3 })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end)()
 
@@ -948,7 +957,7 @@ local function changes(): Sample
 		end
 	end
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end
 
@@ -961,7 +970,7 @@ local healthy = (function(): Sample
 
 	Batch.writeChange(Mirrored, 9000, nil, { n = 1, flag = true, maybe = 2, pos = { x = 3, y = 4 } })
 
-	local packed, instances = Buffer.take()
+	local packed, instances = takeAsWire()
 	return { packed = packed, instances = instances }
 end)()
 

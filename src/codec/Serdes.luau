@@ -2420,7 +2420,12 @@ function buildReader(node: Node): Reader
 				return nil
 			end
 
-			if notClass and not value:IsA(class :: string) then
+			--[[ The cast says what `isInstance` has just established: the sidecar arrives as
+			     `{ unknown }` since M4 report finding 50, and a `boolean`-returning check does not
+			     narrow it. Same shape as `Recipients.positionOf` one module over. ]]
+			local instance = value :: Instance
+
+			if notClass and not instance:IsA(class :: string) then
 				reject(notClass)
 				return nil
 			end
@@ -2436,12 +2441,12 @@ function buildReader(node: Node): Reader
 				mean the same thing and hold different objects, and a hash that moved for it would
 				force a client redeploy for a server-side edit.
 			]]
-			if notInside and not value:IsDescendantOf(root :: Instance) then
+			if notInside and not instance:IsDescendantOf(root :: Instance) then
 				reject(notInside)
 				return nil
 			end
 
-			return value
+			return instance
 		end
 	elseif kind == "enum" then
 		return enumReader(node)

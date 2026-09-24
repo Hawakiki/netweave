@@ -94,7 +94,7 @@ local function encode(codec: Serdes.Codec, value: any): (buffer, { Instance })
 	return Buffer.take()
 end
 
-local function decode(codec: Serdes.Codec, bytes: buffer, instances: { Instance }?): (any, string?)
+local function decode(codec: Serdes.Codec, bytes: buffer, instances: { unknown }?): (any, string?)
 	Buffer.beginRead(bytes, instances)
 	return codec.read()
 end
@@ -118,7 +118,7 @@ local function trip(name: string, descriptor: any, value: any, bytes: number?)
 		fail(`{name}: expected {bytes} bytes, got {size}`)
 	end
 
-	local decoded, failure = decode(codec, packed :: buffer, instances :: { Instance })
+	local decoded, failure = decode(codec, packed :: buffer, instances :: { unknown })
 
 	if failure then
 		fail(`{name}: decode rejected with "{failure}"`)
@@ -507,7 +507,7 @@ do
 	equals("instances take no buffer bytes", buffer.len(packed), 0)
 	equals("and travel in the sidecar", #instances, 2)
 
-	local decoded = decode(codec, packed, instances)
+	local decoded = decode(codec, packed, instances :: { unknown })
 	check("the first instance survives", decoded.a == first)
 	check("the second instance survives", decoded.b == second)
 end
