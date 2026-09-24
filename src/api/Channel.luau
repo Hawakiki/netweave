@@ -138,9 +138,37 @@ export type Channel<C, A, T, R, U> = {
 	A type function body sees only the `types` library — not this module's locals — so the reasons
 	live inside `forbid` rather than in a constant table beside it.
 ]]
+--[[
+	A callable constructor's table half.
+
+	`t.u8`, `t.string`, `t.vector3` and `t.instance` are `Type<T> & ((…) -> Type<T>)` since
+	`PLAN-M5` phase 1 — an intersection, because that is the only spelling that checks the argument
+	*types* rather than only their count. To a `type function` an intersection is not a table, so
+	anything reading `__payload` off a schema has to take the table half out first.
+
+	`src/types/init.luau` carries the same walk. A `type function` cannot reference an outer local
+	and calling one across a `require` needs it exported, so the copy is the cheaper of the two
+	costs — and the two are tested by the same `_ok` files, which annotate a payload projected
+	through both.
+]]
+-- selene: allow(undefined_variable)
+type function carrierOf(ty)
+	if not ty:is("intersection") then
+		return ty
+	end
+
+	for _, part in ty:components() do
+		if part:is("table") and part:readproperty(types.singleton("__payload")) then
+			return part
+		end
+	end
+
+	return ty
+end
+
 -- selene: allow(undefined_variable)
 type function payloadOf(descriptor, field)
-	local schema = types.copy(descriptor)
+	local schema = carrierOf(types.copy(descriptor))
 	local name = field:value()
 
 	--[[ The same sentence twice, because the two failures are the same mistake seen from either

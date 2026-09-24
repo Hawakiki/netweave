@@ -198,9 +198,37 @@ type _instantiateUntrusted = Untrusted<{ probe: boolean }>
 	back as `unknown?`. Inferring the schema type and projecting the payload out of it is the shape
 	`src/types/init.luau` already had to use for `t.struct`, for the same reason.
 ]]
+--[[
+	A callable constructor's table half.
+
+	`t.u8`, `t.string`, `t.vector3` and `t.instance` are `Type<T> & ((…) -> Type<T>)` since
+	`PLAN-M5` phase 1 — an intersection, because that is the only spelling that checks the argument
+	*types* rather than only their count. To a `type function` an intersection is not a table, so
+	anything reading `__payload` off a schema has to take the table half out first.
+
+	`src/types/init.luau` carries the same walk. A `type function` cannot reference an outer local
+	and calling one across a `require` needs it exported, so the copy is the cheaper of the two
+	costs — and the two are tested by the same `_ok` files, which annotate a payload projected
+	through both.
+]]
+-- selene: allow(undefined_variable)
+type function carrierOf(ty)
+	if not ty:is("intersection") then
+		return ty
+	end
+
+	for _, part in ty:components() do
+		if part:is("table") and part:readproperty(types.singleton("__payload")) then
+			return part
+		end
+	end
+
+	return ty
+end
+
 -- selene: allow(undefined_variable)
 export type function TrustedPayload(schema)
-	local descriptor = types.copy(schema)
+	local descriptor = carrierOf(types.copy(schema))
 
 	--[[ One sentence, two failures: something that is not a table, and a table that is not a
 	     netweave type. Both are the same mistake at the call site. ]]

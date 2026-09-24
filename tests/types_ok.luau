@@ -275,6 +275,29 @@ local _direction: t.Type<Vector3> = t.unitVector3(t.quantized(-1, 1, 2 / 254))
 local _posed: t.Componented<CFrame> = t.cframe
 local _pose: t.Type<CFrame> = _posed(t.i16(-2048, 2048))
 
+--[[
+	The accepted twin of every `types_reject` case 18-24. A callable constructor is
+	`Type<T> & ((…) -> Type<T>)` since `PLAN-M5` phase 1, so a call with the wrong argument *type* is
+	a diagnostic where it used to be accepted — and this is the half that says the checking did not
+	simply refuse everything. Both spellings of each: called, and bare.
+]]
+local _goodBound: t.Type<number> = t.u8(0, 5)
+local _goodLength: t.Type<buffer> = t.buffer(0, 8)
+local _goodOption: t.Type<string> = t.string(0, 5, { utf8 = true })
+local _goodComponent: t.Type<Vector3> = t.vector3(t.i16(-2048, 2048))
+local _goodPose: t.Type<CFrame> = t.cframe(t.f32)
+local _goodClass: t.Type<Instance> = t.instance("Sound")
+local _goodContained: t.Type<Instance> = t.instance("BasePart", { descendantOf = workspace })
+
+--[[ And a payload projected *through* the intersection, which is what the look-through in
+     `src/types/init.luau`, `src/api/Channel.luau` and `src/api/Trust.luau` is for: three copies of
+     one walk, and this line is what fails if any of them is deleted. ]]
+local _throughRanged: t.PayloadOf<typeof(t.u8)> = 5
+local _throughText: t.PayloadOf<typeof(t.string)> = "x"
+local _throughComponented: t.PayloadOf<typeof(t.vector3)> = Vector3.zero
+local _throughClassed: t.PayloadOf<typeof(t.instance)> = workspace
+local _insideStruct: t.PayloadOf<typeof(t.struct({ n = t.u8, s = t.string }))> = { n = 1, s = "x" }
+
 --[[ `t.player` is the payload type Luau cannot get from a class name — `t.instance("Player")` is
      `Type<Instance>`, and `UserId` is what says these are not the same annotation. ]]
 local _player: t.Type<Player> = t.player
