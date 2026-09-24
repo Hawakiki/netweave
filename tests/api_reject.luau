@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 27
+-- netweave:expect 33
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -275,6 +275,26 @@ end)
 	the wrong instrument for it, because a case added anywhere else moves it too, which is what
 	happened when the channel record's fields became `read`.
 ]]
+--[[
+	**A misspelt key is refused, and so is a key of the wrong type** (M4 report finding 45).
+
+	Each class used to forbid a hand-picked list of keys belonging to *other* classes and check nothing
+	else, so `maxbytes = 4`, `bursts = 50`, `authorise`, `Rate`, `timeOut` and `rate_` all compiled —
+	the runtime ignored the key and the author believed a ceiling or a depth was set. Twenty-two such
+	declarations produced one diagnostic in the M4 probe; they produce fifteen now. Each class passes
+	the keys it takes and the walk reports the rest: a key of another class keeps that class's reason,
+	anything else is a spelling and the message lists what the class does take.
+]]
+local _typoKey = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow, maxbytes = 4 }) -- netweave:reject has no `maxbytes`
+local _wrongClassKey =
+	nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow, store = nw.store.of({}) }) -- netweave:reject forbids `store`
+local _typoValue = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = allow, maxBytes = "4" }) -- netweave:reject takes `maxBytes` as a number
+local _typoBurst = nw.intent({ data = t.struct({ x = t.u8 }), rate = 60, burst = "60" }) -- netweave:reject takes `burst` as a number
+local _typoUnreliable =
+	nw.event({ data = t.struct({ x = t.u8 }), audience = nw.audience.everyone, unreliable = "yes" }) -- netweave:reject takes `unreliable` as a boolean
+local _typoOnEvent =
+	nw.event({ data = t.struct({ x = t.u8 }), audience = nw.audience.everyone, ratelimit = 5 }) -- netweave:reject has no `ratelimit`
+
 --[[
 	**A channel's fields are `read`, so switching a guarantee off takes a cast** (M4 report finding 6).
 
