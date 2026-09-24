@@ -327,6 +327,41 @@ attach(shots)
 	instantiates the mappers with `Context.Ctx`. What that buys is below: the fields read at their
 	real types, the whole `ctx` assignable to `nw.Ctx`, and a typo still caught.
 ]]
+--[[
+	**A payload-agnostic policy composes onto any channel** (M4 report finding 43, closed in
+	`PLAN-M5` phase 3 by phase 1's callable shape).
+
+	`Policy<T>` was a `typeof(setmetatable(…))` alias, which fixes the argument count of a
+	reconfiguration and says nothing about variance, so `nw.all(alive, ownsSlot)` was refused in
+	every spelling — including the ones a policy module actually takes. It is
+	`Configured<T> & ((config: any) -> Configured<T>)` now, and a function type is contravariant in
+	its parameters, so a check taking `unknown` is usable wherever one taking the payload is.
+
+	Both halves are here: the composition, and the assignment that shows the direction.
+]]
+local agnostic = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: unknown)
+		return ctx.character and nw.allow() or nw.deny("no character")
+	end
+end)
+
+local ownsSlot = nw.policy(function()
+	return function(_ctx: nw.Ctx, request: { x: number })
+		return request.x < 3 and nw.allow() or nw.deny("no slot")
+	end
+end)
+
+local composed = nw.namespace("composed", {
+	fired = nw.command({ data = t.struct({ x = t.u8 }), rate = 20, authorize = nw.all(agnostic, ownsSlot) }),
+})
+
+composed.server.fired:listen(function(_ctx, payload)
+	local _x: number = payload.x
+end)
+
+--[[ The direction on its own: an agnostic check where a narrower one is wanted, never the reverse. ]]
+local _asNarrow: nw.Policy<{ x: number }> = agnostic
+
 local function whoFor(_player: Player, _slot: number) end
 
 local function pivotOf(ctx: nw.Ctx): CFrame?

@@ -64,15 +64,14 @@ local _player = t.player
 -- ---------------------------------------------------------------------------------------------
 
 --[[
-	Hand-written, not `t.PayloadOf<typeof(Equip)>`, for every type a policy's check names in its
-	parameter. Measured across ten spellings (2026-09-11): with the alias, `nw.all` refuses to compose
-	two policies in most shapes a module takes — policies kept as fields of a `local policy = {}`,
-	a factory that takes `config`, a check written with the `and ... or` idiom — reading "expected
-	Policy, got Policy" because one side's payload is `unknown`; the same shapes with a hand-written
-	type compose every time, which is what the README example does. `t.PayloadOf` stays right for
-	handlers, helpers and unions (steps 8 and 9). `PLAN-M5` phase 3 item 43.
+	~~Hand-written, not `t.PayloadOf<typeof(Equip)>`, for every type a policy's check names in its
+	parameter.~~ **`PLAN-M5` phase 1 closed that** (item 43): `Policy<T>` is an intersection now, so
+	a function type's contravariance applies and every spelling composes — the alias as the request
+	type, policies kept as fields of a `local policy = {}`, a factory that takes `config`, a check
+	written with the `and ... or` idiom. Re-measured at those ten spellings, zero diagnostics. So the
+	alias is what this file writes, like everywhere else.
 ]]
-type Equip = { slot: number }
+type Equip = t.PayloadOf<typeof(Equip)>
 
 local policy = {}
 
@@ -144,7 +143,7 @@ policy.party = nw.policy(function()
 end)
 
 policy.alive = nw.policy(function()
-	return function(ctx: nw.Ctx, _request: Equip)
+	return function(ctx: nw.Ctx, _request: unknown)
 		return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
 	end
 end)
@@ -152,21 +151,17 @@ end)
 --[[
 	A policy that reads no field of the request, written so it can go on any channel.
 
-	Measured (2026-09-11), each against `nw.all(alive, onlyB)` where `onlyB` is `Policy<B>`: a check
-	annotated `_request: Equip` is `Policy<Equip>` and cannot also be `Policy<Offer>`; unannotated
-	and `unknown` are "expected Policy, got Policy"; `any` reaches the class type function as
-	`*error-type*` and takes the whole namespace's views down with it; a generic helper with no
-	argument, `alive()`, is not inferred from its sibling. What works is a helper that takes the
-	schema as a witness, so `T` is inferred from the argument and each channel gets its own
-	instance. Step 3 says so; `PLAN-M5` phase 3 item 43 owns making `Policy<T>` composable.
+	~~What works is a helper that takes the schema as a witness, so `T` is inferred from the
+	argument and each channel gets its own instance.~~ **One word does it since `PLAN-M5` phase 1:**
+	write the request `unknown`. `Policy<T>` is `Configured<T> & ((config: any) -> Configured<T>)`,
+	and a function type is contravariant in its parameters, so a check taking `unknown` is usable
+	wherever one taking `Equip` is wanted and `nw.all(policy.alive, policy.ownsSlot)` composes.
+
+	`any` is the one spelling still to avoid, and that is Luau rather than netweave: it reaches the
+	class type function as `*error-type*` and takes the namespace's views down with it. Measured
+	again while closing item 43 — three spellings against the same channel, `unknown` clean, a cast
+	clean, `any` eleven diagnostics.
 ]]
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
-		end
-	end)
-end
 
 policy.ownsSlot = nw.policy(function(config)
 	local slots: number = config.slots or 3
@@ -232,7 +227,7 @@ local combat = nw.namespace("combat", {
 		returns = t.struct({ primary = t.u16, secondary = t.u16 }),
 		rate = 2,
 		timeout = 5,
-		authorize = alive(t.u8),
+		authorize = policy.alive,
 	}),
 
 	playerState = nw.state({
@@ -255,13 +250,13 @@ local combat = nw.namespace("combat", {
 	offer = nw.command({
 		data = Offer,
 		rate = 1,
-		authorize = nw.all(alive(Offer), policy.canAfford),
+		authorize = nw.all(policy.alive, policy.canAfford),
 	}),
 
 	decide = nw.command({
 		data = Decision,
 		rate = 2,
-		authorize = nw.all(alive(Decision), policy.party),
+		authorize = nw.all(policy.alive, policy.party),
 	}),
 
 	resolved = nw.event({

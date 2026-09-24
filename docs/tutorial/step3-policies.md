@@ -18,7 +18,7 @@ local nw = require(ReplicatedStorage.netweave.netweave)
 local t = require(ReplicatedStorage.netweave.types)
 
 local Equip = t.struct({ slot = t.u8(0, 9) })
-type Equip = { slot: number }
+type Equip = t.PayloadOf<typeof(Equip)>
 
 local policy = {}
 
@@ -42,15 +42,17 @@ end)
 return policy
 ```
 
-`type Equip = { slot: number }` is written by hand here, and it is the one place in this tutorial
-where the schema's type is. `nw.all` composes two policies only when their payload types are
-*identical*, and a `t.PayloadOf<typeof(Equip)>` alias is not reliably identical to itself across
-two closures: measured across ten spellings while this step was written, the alias fails to compose
-in most shapes a policy module takes — policies kept as fields of a table, a factory that takes
-`config`, a check written with the `and … or` idiom — with a diagnostic that reads "expected Policy,
-got Policy" because one side has become `Policy<unknown>`. The same shapes with a hand-written type
-compose every time. So: derive payload types with `t.PayloadOf` everywhere else (Steps 8 and 9), and
-write a policy's request type by hand. Making the alias compose is `PLAN-M5` phase 3, item 43.
+A policy's request type is derived like every other, `t.PayloadOf<typeof(Equip)>`, so the check and
+the wire cannot drift.
+
+~~It used to be written by hand here, the one place in this tutorial where a schema's type was.~~
+`nw.all` composes two policies only when their payload types are *identical*, and an alias was not
+reliably identical to itself across two closures: measured across ten spellings, it failed to
+compose in most shapes a policy module takes — policies kept as fields of a table, a factory that
+takes `config`, a check written with the `and … or` idiom — reading "expected Policy, got Policy"
+because one side had become `Policy<unknown>`. `PLAN-M5` phase 1 fixed it at the root: `Policy<T>` is
+an intersection rather than a `typeof(setmetatable(…))` alias, so a function type's contravariance
+applies. Re-measured at the same ten spellings: zero diagnostics.
 
 A check returns a verdict: `nw.allow(value)` or `nw.deny(reason)`. `nw.allow()` with no value
 passes the request through as it was; `nw.allow(request)` with a value hands that value on, so a
@@ -177,32 +179,32 @@ which is the one thing this library asks you to give up.
 
 ## A policy that ignores the payload
 
-`policy.alive` above reads no field of the request, and it is still annotated `_request: Equip`,
-which makes it `Policy<Equip>` and nothing else: composed with a `Policy<Offer>` through `nw.all`
-it is a type error, "expected Policy, got Policy". That is the first thing a second channel runs
-into, and the spellings that look like the fix do not work today — an unannotated `_request` and
-`unknown` fail the same way, and `any` reaches the class's type function as an error type and takes
-the whole namespace's views down with it. All four were measured writing this step.
-
-What works is to write the payload-agnostic policy as a helper that takes the schema as a witness,
-so the type is inferred from the argument and each channel gets its own instance:
+A policy that reads no field of the request goes on any channel, and the way to say so is one
+word — write the request `unknown`:
 
 ```lua
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
-		end
-	end)
-end
+policy.alive = nw.policy(function()
+    return function(ctx: nw.Ctx, _request: unknown)
+        return ctx.humanoid ~= nil and nw.allow() or nw.deny("dead")
+    end
+end)
 
-offer = nw.command({ data = Offer, rate = 1, authorize = nw.all(alive(Offer), policy.canAfford) }),
-decide = nw.command({ data = Decision, rate = 2, authorize = nw.all(alive(Decision), policy.party) }),
-priceOf = nw.query({ args = t.u16, returns = t.u32, rate = 5, timeout = 5, authorize = alive(t.u16) }),
+offer = nw.command({ data = Offer, rate = 1, authorize = nw.all(policy.alive, policy.canAfford) }),
+decide = nw.command({ data = Decision, rate = 2, authorize = nw.all(policy.alive, policy.party) }),
+priceOf = nw.query({ args = t.u16, returns = t.u32, rate = 5, timeout = 5, authorize = policy.alive }),
 ```
 
-The factory runs once per instance, so this costs one closure per channel at load and nothing per
-request. Making `Policy<T>` compose across payloads without the witness is `PLAN-M5` phase 3.
+One instance serves every channel: `Policy<T>` is `Configured<T> & ((config) -> Configured<T>)`, and
+a function type is contravariant in its parameters, so a check taking `unknown` is usable wherever
+one taking `Equip` is wanted.
+
+~~What works is a helper that takes the schema as a witness, so each channel gets its own
+instance.~~ That was the spelling until `PLAN-M5` phase 1, and it is no longer needed.
+
+**`any` is the one spelling to avoid.** It reaches the channel class's type function as an error
+type and takes the whole namespace's views down with it — eleven diagnostics on one channel,
+measured. That is Luau's behaviour around `any`, not netweave's, and `unknown` is the word that
+means what a payload-agnostic policy means anyway: *this check does not look*.
 
 ## Compose them
 

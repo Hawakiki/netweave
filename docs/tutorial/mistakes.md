@@ -90,8 +90,10 @@ decide = nw.command({ data = Decision, authorize = nw.all(policy.alive, policy.p
 namespace's views become `unknown` — every handler in the file loses its payload type to fix one
 diagnostic, and nothing says which channel did it.
 
-**The fix.** The schema-witness helper, `alive(Offer)`, `alive(Decision)`, `alive(t.u16)`: each
-channel gets its own `Policy<T>`, and `nw.all` accepts it (Step 3).
+**The fix, since `PLAN-M5` phase 1.** Write the agnostic check's request `unknown`, and one policy
+goes on every channel — `Policy<T>` is an intersection, so contravariance applies (Step 3).
+~~The schema-witness helper, `alive(Offer)`, `alive(Decision)`, `alive(t.u16)`, so each channel gets
+its own `Policy<T>`.~~
 
 ## 5. Yielding inside a `command` handler — ~~quiet~~ reported at `handler` since M5
 

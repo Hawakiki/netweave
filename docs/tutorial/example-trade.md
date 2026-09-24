@@ -38,10 +38,9 @@ local Pending = t.struct({
 	state = t.enum({ offered = true, accepted = true, declined = true }),
 })
 
--- A policy's request type is written by hand (Step 3: the alias does not compose through nw.all).
-type Offer = { to: Player, items: { number }, gold: number }
-type Decision = { tradeId: number, accept: boolean }
--- Everything else is derived.
+-- Every payload type is derived from its schema, policies included.
+type Offer = t.PayloadOf<typeof(Offer)>
+type Decision = t.PayloadOf<typeof(Decision)>
 type Pending = t.PayloadOf<typeof(Pending)>
 
 type Wallet = { goldOf: (Player) -> number, transfer: (number, number, number) -> () }
@@ -61,15 +60,12 @@ end
 
 -- Policies -------------------------------------------------------------------------------------
 
--- A policy that ignores the payload takes the schema as a witness, so each channel gets its own
--- Policy<T> and nw.all accepts it (Step 3).
-local function alive<T>(_schema: t.Type<T>)
-	return nw.policy(function()
-		return function(ctx: nw.Ctx, _request: T)
-			return if ctx.humanoid ~= nil then nw.allow() else nw.deny("dead")
-		end
-	end)
-end
+-- A policy that ignores the payload writes its request `unknown`, and composes onto any channel.
+local alive = nw.policy(function()
+	return function(ctx: nw.Ctx, _request: unknown)
+		return if ctx.humanoid ~= nil then nw.allow() else nw.deny("dead")
+	end
+end)
 
 local policy = {}
 

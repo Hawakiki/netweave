@@ -67,7 +67,7 @@ getLoadout = nw.query({
 	returns = t.struct({ primary = t.u16, secondary = t.u16 }),
 	rate = 2,
 	timeout = 5,
-	authorize = alive(t.u8),   -- the schema-witness helper from Step 3; args here are a t.u8
+	authorize = policy.alive,   -- the payload-agnostic policy from Step 3, on any channel
 }),
 ```
 
