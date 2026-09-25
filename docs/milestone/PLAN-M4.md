@@ -98,7 +98,7 @@ milestone bounding — an upstream packet per client per tick, a baseline histor
 reports it; on a `signal` that is one lost packet, and on a `replicate` it is a client that will
 never be right again. So: **reliable deltas, plus a break detector** — a sequence per client per
 subject, and a client that sees a gap gets a snapshot instead of another delta.~~ **Both halves were
-overturned in phase 8 and this decision was left saying them (M4-1).** 236e4dd made the ceiling
+overturned in phase 8 and this decision was left saying them (M4-1).** 7df2228 made the ceiling
 server-only, because a batch's size is chosen by an untrusted peer only when the peer is a client, so
 nothing netweave-side drops a delivered change; phase 4 struck the sequence number. What remains is
 reliable deltas plus the client's own refusal: a change it cannot read makes it give up the channel
@@ -295,7 +295,7 @@ else is in that frame.
       takes the tail of an oversized batch, which is one lost packet on a `signal` and a permanently
       wrong client on a `replicate`. Reliable deltas plus a **break detector** — a sequence per
       client per subject, a gap answered with a snapshot.~~ Struck with D-2: the client applies no
-      ceiling since 236e4dd and there is no sequence number.
+      ceiling since 7df2228 and there is no sequence number.
 - [x] **D-4's design answered by the same mechanism**, which is the part worth having: a client
       entering an audience has no baseline, a client that missed a packet has a stale one, and a
       client that just joined has neither — three conditions, one path.
@@ -378,7 +378,7 @@ else is in that frame.
       baseline, which means that subject is sent **whole** to that client every tick: correct and
       expensive, ~~degrading to exactly what `nw.state` does for a living~~ — which it does not:
       `nw.state` sends when the game publishes and this sends every tick whether anything moved or
-      not, 265 B per idle frame at 300 subjects (M4 report; struck in `Baseline.luau` at 2dcc87f and
+      not, 265 B per idle frame at 300 subjects (M4 report; struck in `Baseline.luau` at d4d4938 and
       here only now, M4-1). That is how a bound should fail, and PLAN-M4-BUG phase 5 declined the
       per-client flag that would quiet it, with the argument in `Baseline.luau`. An already-held baseline stays replaceable at the limit, or a full store would freeze
       every subject it already knew about.
@@ -557,7 +557,7 @@ API to write an example against.
 - [x] The resync control packet is the one thing a client sends that makes the server work it did
       not choose, so it is bounded rather than refused: ~~300 in one batch clear a baseline once and
       the tick that follows resends once~~ — that was the wrong bound, measured in phase 8 (one per
-      tick is a full state per frame); efa3a91 coalesced it to one resend per `resyncTicks` window
+      tick is a full state per frame); 3351d58 coalesced it to one resend per `resyncTicks` window
       per (peer, channel), a `Config` limit since PLAN-M4-BUG phase 5, with the deferred asks
       reported. A resync naming a channel that is not replicated, and one
       naming id 60000, are both refused at `replicate` rather than assumed — a peer that could ask
@@ -644,7 +644,7 @@ API to write an example against.
       **1.56x**, criterion 5 missed by the margin it was already missed by. netweave's own spread is
       84..87 and the control group moved 2-4%, so this is not resolution and not the machine.
       **Phase 8 moved it: 115 [114..116] against 132, 1.15x, on `bench/runs/2026-09-06-m4p8.json`
-      (`460aa41`), controls within 3.3% — criterion 5 met on the array family for the first time.
+      (`7737e09`), controls within 3.3% — criterion 5 met on the array family for the first time.
       The same run puts the client-decode direction 30% lower with no mechanism found;
       `bench/RESULTS.md` carries both, and PLAN-M4-BUG phase 7 repeats the run.**
 - [x] **The optimisation is real; the frame did not care.** Measured on the same VM in the same
@@ -667,7 +667,7 @@ API to write an example against.
       first said 38,434 was faithful to 1.3%.
 - [x] **One inconsistency is left, and reasoning will not close it.** The codec is 1.96 ms a frame
       cheaper and the frame is 0.3 ms shorter, with the control group at 2-5%. The probe that settles
-      it is the one that now exists, run on `ab5541e` — the tree phase 7 was applied to. If the send
+      it is the one that now exists, run on `1ce998b` — the tree phase 7 was applied to. If the send
       loop there is ~8.2 ms, something outside the codec grew by what phase 7 removed; if it is
       ~6.5 ms, the arity ladder is measuring something the bench's channel does not do.
 
@@ -679,7 +679,7 @@ API to write an example against.
       would compare two samples of a quantity whose spread nobody had measured. What the probe can
       answer is the send loop; what it needs is repeats on both trees.
 
-      **Never run on `ab5541e`, and the question dissolved at phase 8 instead of being answered**: with
+      **Never run on `1ce998b`, and the question dissolved at phase 8 instead of being answered**: with
       the encode work in, the phase 8 run measured 115 FPS and the two `PLAN-M4-BUG` runs 114 and 115,
       against Blink's 131-134. What is left open with a number on it is the Down cell
       (`bench/RESULTS.md`, "The Down cell, written as unsettled").
@@ -692,7 +692,7 @@ API to write an example against.
 
 ### Phase 8 — the M4 report
 
-`docs/SECURITY-REPORT-M4.md` audits the tree at `0cb731d` and files 78 findings. Each fix is its own
+`docs/SECURITY-REPORT-M4.md` audits the tree at `15f74f2` and files 78 findings. Each fix is its own
 commit and the report is the tracker; what belongs *here* is the subset that changed a **decision**
 this document had already written down, because those are the ones this document has wrong until
 they are struck through.
@@ -903,7 +903,7 @@ Studio pass.
       which is G4), no union case in `sameFor` (1), and `branches` out of the signature (1).
       `bench/profile` 12,711 and `bench/decode` 20,792, unmoved.
 
-- [x] **The Studio pass caught what the lune pass could not, on this phase's own code.** `24bf8d7`
+- [x] **The Studio pass caught what the lune pass could not, on this phase's own code.** `67fe53f`
       hardened `audience.select` with a shape test written the way `Serdes.isInstance` is — exact
       inside Roblox, a table under lune — and every lune run passed while `replication_runtime` and
       `transport_runtime` were red from the moment the place was opened. That is §9's "the half that
@@ -986,9 +986,9 @@ against an artifact, and the ones that are not met say so.
 | 5 | **met** | `tests/baseline_runtime.luau`: the fourth baseline over a limit of three is refused and reported once, re-armed below the line |
 | 6 | **met** | `tests/replication_runtime.luau`, "A player who has left stays gone, through the real tick" (PLAN-M4-BUG phase 4) — the M4-1 report's point was that no test ran `forget` against the real tick, and one does now |
 | 7 | **met** | `tests/fuzz_runtime.luau`, the second run: 4,000 mutated changes, no raise, nothing lost in silence, the safety net under the read phase never fires |
-| 8 | **not measured** ~~at close~~ — measured in `PLAN-M5` phase 5 | no replication mode in the matrix and no crossover artifact. Carried to `PLAN-M5` as a named task rather than closed by omission. `bench/crossover` answered it under lune on `31c315f`: the diff loses only for a one-field subject (by two bytes) and when every field moved (by its flags and length prefix); it is level at two fields, wins from three, and writes nothing when nothing moved. `bench/RESULTS.md`, "The delta crossover, in bytes" |
+| 8 | **not measured** ~~at close~~ — measured in `PLAN-M5` phase 5 | no replication mode in the matrix and no crossover artifact. Carried to `PLAN-M5` as a named task rather than closed by omission. `bench/crossover` answered it under lune on `ce4f228`: the diff loses only for a one-field subject (by two bytes) and when every field moved (by its flags and length prefix); it is level at two fields, wins from three, and writes nothing when nothing moved. `bench/RESULTS.md`, "The delta crossover, in bytes" |
 | 9 | **not met as written** | run a → run b (`bench/runs/2026-09-09-m4bug-a.json`, `-b.json`): encode `ArrayHeavy` within 1.7%, decode flags within 3%, encode flags at the ±5.12 B quantisation floor, decode `ArrayHeavy` 25-85% for the competitors and 4.8% for netweave — the same column phase 0 named. `bench/RESULTS.md`, "Allocation per packet, run b, with run a beside it" |
-| 10 | **met at 75668a7** | every lune check green through `scripts/check.ps1`; the Studio suite 19 of 19 with `roblox_runtime`'s new cases, run from this session through the Studio MCP and recorded here rather than only in a commit message |
+| 10 | **met at 610d69d** | every lune check green through `scripts/check.ps1`; the Studio suite 19 of 19 with `roblox_runtime`'s new cases, run from this session through the Studio MCP and recorded here rather than only in a commit message |
 | 11 | **missed** | the honest failure-path share of `replication_runtime` is 17% (PLAN-M4-BUG phase 6); the file's floor is that number, and the criterion as written is not met and not softened |
 
 ## 8. Risks
@@ -1014,11 +1014,11 @@ state the version in every claim.
 
 ## 9. Disposition of the security reports
 
-`docs/SECURITY-REPORT-M4.md` (78 findings at `0cb731d`) and `docs/SECURITY-REPORT-M4-1.md` (84 at
-`460aa41`). Phase 8 above said "the report is the tracker" and neither report had one; this is it.
+`docs/SECURITY-REPORT-M4.md` (78 findings at `15f74f2`) and `docs/SECURITY-REPORT-M4-1.md` (84 at
+`7737e09`). Phase 8 above said "the report is the tracker" and neither report had one; this is it.
 
 **The M4 report's 78.** M4-1's "Disposition" table re-established every row from the code at
-`460aa41`: closed 18, closed differently 4, partial 4, declined 1, open 51. `PLAN-M4-BUG` then
+`7737e09`: closed 18, closed differently 4, partial 4, declined 1, open 51. `PLAN-M4-BUG` then
 closed, from those 51: 8 (`readVarint` past 32 bits), 17 (`t.struct` by reference, and `t.union`),
 19 (`owner`/`nearby` through `roster.has`), 20 (a tick raise isolated per channel), 23 (the instance
 writer's class and container), 24 (a change past 16,383 left alone until it moves), 32 (a raise
@@ -1036,13 +1036,13 @@ the numeric-bound ones cannot be closed at analysis), 51, 52, 53, 56, 58, 60, 61
 
 | # | Finding | Where it went |
 |---|---|---|
-| 중대 | `replicate` before `:listen` loses the join-time snapshot | closed, PLAN-M4-BUG phase 3 (565b5d3) |
-| 중대 | `t.map(t.u16, Entity)` does not compile | closed, phase 3 (de11140), with `t.optional`/`t.array` on the same seam |
-| 중대 | the `select` hole test passes with the walk reverted | closed, phase 1 (ae11158) |
-| 중대 ×3 | `RESULTS.md` against `bench/runs/` | phase 1 put the 1.15x on record (790c17f); phase 7 regenerates the tables and archives two attributed runs |
-| 위험 | `t.string` pattern cost | closed, phase 2 (2eb3c1d): `max^k ≤ 2^16` |
-| 위험 ×4 | the checkers (`--!strict`, exit code, `expect N`, string coverage) | closed, phase 1 (07397c9, a1ed785) |
-| 위험 | the Studio numbers have no committed script | closed, phase 7 (249ca27): the probes run in Studio, the run carries its tree |
+| 중대 | `replicate` before `:listen` loses the join-time snapshot | closed, PLAN-M4-BUG phase 3 (4858980) |
+| 중대 | `t.map(t.u16, Entity)` does not compile | closed, phase 3 (757e7a5), with `t.optional`/`t.array` on the same seam |
+| 중대 | the `select` hole test passes with the walk reverted | closed, phase 1 (da91798) |
+| 중대 ×3 | `RESULTS.md` against `bench/runs/` | phase 1 put the 1.15x on record (f46b086); phase 7 regenerates the tables and archives two attributed runs |
+| 위험 | `t.string` pattern cost | closed, phase 2 (6465deb): `max^k ≤ 2^16` |
+| 위험 ×4 | the checkers (`--!strict`, exit code, `expect N`, string coverage) | closed, phase 1 (ca067e4, e2ccd42) |
+| 위험 | the Studio numbers have no committed script | closed, phase 7 (fbcc766): the probes run in Studio, the run carries its tree |
 | 경고, 15 in `src/` | malformed pattern, resync report and limit, `owner`/`nearby`, `ctx` write, `whole`, arrays of optionals, the cycle, over-limit resend (declined), `t.union` keys, `t.unitVector3`, anchor check, schema-unaware gate, `select`-all pass, decode span (unchanged), `__call` arity (M5), unnameable types (M5), `TextOptions` keys (M5) | closed in phases 2, 4, 5 except the three marked M5 and the decode span, which stays as measured |
 | 경고, 12 in `docs/` | dispositions, overturned decisions, DESIGN-API §3/§6/§7, WIRE-FORMAT, 908, 39/40 | closed, phase 8 (this section, the struck decisions above, the two documents) |
 | 경고, 4 comments | `Batch` resync sentence, `Buffer` Zap claim, pointer-compare docstrings, unreachable `Query.abandon` | first three closed, phase 8; `Query.abandon`'s comments are open |
@@ -1085,9 +1085,9 @@ and `scripts/check.ps1` with the pre-commit hook.
 | `ArrayHeavy` Down, p50 | 63 and 54 against Blink's 78 and 83 — **unsettled**, `bench/RESULTS.md` "The Down cell, written as unsettled" |
 | encode B/call, `ArrayHeavy`, run a → run b | 1909.8 → 1917.4 (+0.4%); Zap 1914.9, Blink 2729.0, ByteNet 614.4 |
 | decode B/packet, `ArrayHeavy`, run a → run b | 10447.9 → 9951.2 (−4.8%), a lower bound; the competitors moved 25-85% on unchanged code |
-| Studio ladders at `249ca27` | encode 27,952 ns a packet against a 6,458 ceiling, 4.33x; decode 35,073 against 12,476, 2.81x |
+| Studio ladders at `fbcc766` | encode 27,952 ns a packet against a 6,458 ceiling, 4.33x; decode 35,073 against 12,476, 2.81x |
 | `bench/tick`, median ms a tick at 50x500 | select-all 14.32 → 3.00, extra key 31.02 → 1.69, subtree 1.85 → 1.71 (`PLAN-M4-BUG` phase 5) |
-| the suites | 25 lune steps green through `scripts/check.ps1`; the Studio suite 19 of 19 at `75668a7`, run through the Studio MCP |
+| the suites | 25 lune steps green through `scripts/check.ps1`; the Studio suite 19 of 19 at `610d69d`, run through the Studio MCP |
 | the reports | 78 findings (`SECURITY-REPORT-M4.md`) and 84 (`SECURITY-REPORT-M4-1.md`), each with a disposition in §9 |
 
 **Acceptance**, from the status table under §7: 1, 2, 3, 5, 6, 7 and 10 met; 4, 9 and 11 not met as

@@ -1235,7 +1235,7 @@ end
 do
 	--[[
 		`Baseline.forget` has no guard against `keep` recreating the entry, so what keeps a departed
-		player's baselines gone is the tick never naming them again. bc35060 made that true for a
+		player's baselines gone is the tick never naming them again. 2ea8c90 made that true for a
 		`select` audience; `owner` returned the roster's answer unchecked, and the roster's answer
 		for a `Player`-keyed subject is the instance itself, connected or not. A store that lists
 		the departed player's subject for one more tick — a profile save that yields — rebuilt one

@@ -1,7 +1,7 @@
 # PLAN-M4-BUG — closing the M4-1 report
 
 A sub-milestone that gates M4's close. It works through `docs/SECURITY-REPORT-M4-1.md` (84 new
-findings at `460aa41`, plus the 51 still open from `SECURITY-REPORT-M4.md`) in a fixed order, and
+findings at `7737e09`, plus the 51 still open from `SECURITY-REPORT-M4.md`) in a fixed order, and
 says which of them M4 does **not** close and where those go.
 
 ## 1. Goal
@@ -246,7 +246,7 @@ fix lands, and the commit message says which mutation was used.
 - [x] every probe's `BEFORE` comment names a way to reproduce it that works
 - [x] `bench/envelope.luau` calls `Batch` instead of re-implementing it
 - [x] the matrix run twice on the tree at the end of phase 6; the Down cell's move settled or written as
-      unsettled — `bench/runs/2026-09-09-m4bug-a.json` (75668a7) and `-b.json` (249ca27); criterion 5 at
+      unsettled — `bench/runs/2026-09-09-m4bug-a.json` (610d69d) and `-b.json` (fbcc766); criterion 5 at
       1.15x and 1.17x; the Down cell written as unsettled, with its ranking settled by four runs and its
       mechanism priced by `bench/decode` in Studio (2.81x the ceiling)
 - [x] `bench/RESULTS.md` regenerated over the newest run; the M1 tables under the M3 header struck; the

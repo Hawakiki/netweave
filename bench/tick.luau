@@ -64,7 +64,7 @@ local FRAME_MS = 1000 / 60
 --[[
 	What this file printed on the tree before the phase 8 gate existed — the same script, one commit
 	earlier, which is what makes it a number rather than a memory. This file did not exist on that
-	tree, so to reproduce them copy it there: `git worktree add ../before 37937c7~1`, copy this file
+	tree, so to reproduce them copy it there: `git worktree add ../before b8465eb~1`, copy this file
 	into that tree's `bench/`, and run it. M4-1 did, and got every row 3–5% above the values here —
 	the session, not the tree; the same offset moved every rung.
 
@@ -84,7 +84,7 @@ local BEFORE: { [string]: number } = {
 	["select-all 50x500"] = 14.32,
 	["extra key 50x500"] = 31.02,
 	["subtree 50x500"] = 1.85,
-	--[[ Measured on `d982242`, the parent of the commit that hands the tick's list down
+	--[[ Measured on `2ac59d9`, the parent of the commit that hands the tick's list down
 	     (`PLAN-M5` phase 5), with the rig's `has` in place — the same session as the values that
 	     commit records beside it. ]]
 	["nearby-all 50x500"] = 2.37,

@@ -424,7 +424,7 @@ does not have, and both cost what `PLAN-M3` spent a milestone bounding.
 batch and reports it; on a `signal` that is one lost packet and on a `replicate` it is a client
 that will never be right again. So the design is reliable deltas **plus a break detector**: a
 sequence per client per subject, and a client that sees a gap is sent a snapshot rather than
-another delta.~~ **Neither exists.** Since M4 phase 8 (236e4dd) a client applies no `pendingPerBatch`
+another delta.~~ **Neither exists.** Since M4 phase 8 (7df2228) a client applies no `pendingPerBatch`
 — the ceiling is server-only, because a batch's size is chosen by an untrusted peer only when the
 peer is a client — so nothing netweave-side drops a delivered change, and there is no sequence
 number on the wire (`WIRE-FORMAT.md` §2). What remains is the client's own refusal: a change it
@@ -569,7 +569,7 @@ it was meant to guard, including `Trusted<number>`. That is strictly worse than 
 it breaks the honest caller and admits the dishonest one. Measured in `spike/declare/brand.luau`.
 
 Both brands are therefore type functions. They intersect the tag onto **table** payloads and pass
-anything else through unchanged — with one refinement since 8bd883a: a **union** is branded
+anything else through unchanged — with one refinement since 916364b: a **union** is branded
 component-wise, so `t.optional(struct)` and a tagged union carry the tag on each table member rather
 than being passed through as a non-table (the M4 report's finding 4). The sample below is the
 scalar/table rule; the union rule is `src/api/Trust.luau`:

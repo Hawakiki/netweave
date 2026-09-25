@@ -65,7 +65,7 @@ local WARMUP = 5
 --[[ What this file printed on the tree before `Serdes.fusedStructReader` existed — the same script,
      one commit earlier, which is what makes it a number rather than a memory (`CLAUDE.md` §5).
      This file did not exist on that tree, so to reproduce them copy it there: `git worktree add
-     ../before 03a11a3~1`, copy this file into that tree's `bench/`, and run it. M4-1 did, and got
+     ../before db49ca5~1`, copy this file into that tree's `bench/`, and run it. M4-1 did, and got
      32,740 against the 32,731 here. ]]
 local BEFORE: { [string]: number } = {
 	["inline"] = 6369,

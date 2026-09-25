@@ -1,13 +1,13 @@
 # Netweave Security & Correctness Report — M4-1
 
-**Scope:** the whole repository at commit `460aa41` on `develop` (2026-09-06, "Archive the M4 phase 8
+**Scope:** the whole repository at commit `7737e09` on `develop` (2026-09-06, "Archive the M4 phase 8
 matrix run"): `src/` by folder, `tests/`, `bench/`, `tools/` with `analyze.luau` and the root
 configuration, and `docs/` with `CLAUDE.md`. The previous report (`SECURITY-REPORT-M4.md`) audited
-`0cb731d`; 29 commits landed between the two, most of them closing that report's findings and adding
+`15f74f2`; 29 commits landed between the two, most of them closing that report's findings and adding
 types. This pass re-verifies every one of those 78 closures from the code, not from the documents, and
 audits everything new.
 
-**Method:** nine auditors ran in parallel against a **frozen snapshot** of `460aa41` extracted with
+**Method:** nine auditors ran in parallel against a **frozen snapshot** of `7737e09` extracted with
 `git archive` into the session scratchpad, so a commit landing mid-audit could not move a line number.
 Seven ran on Fable 5.1 (the five `src/` scopes, `tests/`, `docs/`); two on Opus 5 (`bench/`, `tools/`).
 Each could read any file its scope requires or is consumed by but could report only on its own scope;
@@ -42,10 +42,10 @@ would rely on a security or correctness property that does not hold.
 
 ## Disposition of the previous report's 78 findings
 
-Established from the code at `460aa41`. "Closed" means the probe re-run shows the fixed behaviour and,
+Established from the code at `7737e09`. "Closed" means the probe re-run shows the fixed behaviour and,
 where a regression test was added, that test was run over the pre-fix source (`git archive <commit>~1`)
 and failed there. Nine such pre-fix runs were made this pass and all nine fail as claimed; one commit
-(`bc35060`, roster `has`) has a test that passes over the pre-fix source under lune because the defect
+(`2ea8c90`, roster `has`) has a test that passes over the pre-fix source under lune because the defect
 was Studio-only, which the commit message says.
 
 **Totals: closed 18, closed differently 4, partially closed 4, declined with an argument 1, open 51.**
@@ -53,29 +53,29 @@ Six of the closures (rows 2, 3, 4, 10, 38, 39) are recorded only in commit messa
 docstrings; no document in `docs/` says they happened. Three closures overturned decisions written in
 `PLAN-M4` (rows 1, 10, 18) and the plan carries the old sentences unstruck.
 
-| # | Finding (M4 report) | Code at 460aa41 |
+| # | Finding (M4 report) | Code at 7737e09 |
 |---|---|---|
-| 1 | RESYNC re-encode every frame | **closed differently** — coalesced to one resend per 30 ticks per (peer, channel), verdict checked (efa3a91); still charged to no budget, silent when coalesced, window a constant (new finding below) |
-| 2 | zero-byte array/map elements | closed (633a6ec); `carriesNothing` refuses at lowering, hand-built descriptors too |
+| 1 | RESYNC re-encode every frame | **closed differently** — coalesced to one resend per 30 ticks per (peer, channel), verdict checked (3351d58); still charged to no budget, silent when coalesced, window a constant (new finding below) |
+| 2 | zero-byte array/map elements | closed (2596da8); `carriesNothing` refuses at lowering, hand-built descriptors too |
 | 3 | optional map key raises | closed; `t.map` refuses at declaration and the reader rejects a nil key |
-| 4 | brand dropped on `t.optional(struct)` | closed (8bd883a); unions branded component-wise; six must-fail cases fail, `api_reject` 23 → 24 |
+| 4 | brand dropped on `t.optional(struct)` | closed (916364b); unions branded component-wise; six must-fail cases fail, `api_reject` 23 → 24 |
 | 5 | `nw.validate` returns caller's table, launders `Untrusted` | open |
 | 6 | channel record mutable after seal | open |
 | 7 | `isType` duck check | open; `types/init.luau:879-881` now documents it as a limitation |
 | 8 | `readVarint` wraps ≥ 2^32 | open |
 | 9 | `nw.internal` exposure, unfrozen modules | open |
-| 10 | client applies `pendingPerBatch` → livelock | closed (236e4dd); 257 and 300 subjects converge on frame 1; 1,000-packet server batch delivered whole; pre-fix test 4 failures |
-| 11 | hash omits `subject` | closed (284c1a1); pre-fix test 5 failures |
-| 12 | `t.f32` non-dyadic bounds refused | closed (758e282); reader compares against `asF32(bound)`; 0 of 8,000 random bounds refused; pre-fix 4 failures |
+| 10 | client applies `pendingPerBatch` → livelock | closed (7df2228); 257 and 300 subjects converge on frame 1; 1,000-packet server batch delivered whole; pre-fix test 4 failures |
+| 11 | hash omits `subject` | closed (f495311); pre-fix test 5 failures |
+| 12 | `t.f32` non-dyadic bounds refused | closed (9aad273); reader compares against `asF32(bound)`; 0 of 8,000 random bounds refused; pre-fix 4 failures |
 | 13 | nested `Observer.emit` overwrites the record | open (re-measured: observer J sees `inner` twice) |
-| 14 | fractional integer bounds | closed (54e1121) |
-| 15 | floats capped ±2^24 / ±2^53 | closed (54e1121); `MAX_F32`/`MAX_F64` |
+| 14 | fractional integer bounds | closed (cbed97d) |
+| 15 | floats capped ±2^24 / ±2^53 | closed (cbed97d); `MAX_F32`/`MAX_F64` |
 | 16 | failed `nw.namespace` leaves `qualified` | open |
 | 17 | `t.struct` keeps `fields` by reference | open, and duplicated into `t.union` (new finding) |
-| 18 | over `baselinesPerClient` re-sent and reported every frame | **closed differently** — reported once per crossing with re-arm (2dcc87f); the whole-subject re-send every idle frame is kept by argument (new finding) |
-| 19 | departed player's baselines recreated | **partial** — `select` filtered through `roster.has` (bc35060); `owner` and `nearby` are not (new finding) |
+| 18 | over `baselinesPerClient` re-sent and reported every frame | **closed differently** — reported once per crossing with re-arm (d4d4938); the whole-subject re-send every idle frame is kept by argument (new finding) |
+| 19 | departed player's baselines recreated | **partial** — `select` filtered through `roster.has` (2ea8c90); `owner` and `nearby` are not (new finding) |
 | 20 | game raise in tick aborts flush | open, plus a fourth trigger (new finding) |
-| 21 | handler receives the mutable baseline | closed (e9f3241); deep freeze measured; pre-fix 7 failures |
+| 21 | handler receives the mutable baseline | closed (477b24b); deep freeze measured; pre-fix 7 failures |
 | 22 | `nw.signature()` seals as a side effect | open; `Namespace.protocol`'s docstring now says it, `nw.signature`'s does not |
 | 23 | datatype writers accept NaN / non-unit / wrong class | open for bare `t.vector3`, `t.unitVector3`, `t.cframe`, `t.color3`, classed `t.instance`; closed for componented vectors only |
 | 24 | replicate change past 16,383 retried forever | open (re-measured: 5 of 5 `false`, subject never advances) |
@@ -87,13 +87,13 @@ docstrings; no document in `docs/` says they happened. Three closures overturned
 | 30 | unknown stage/rule silent | open |
 | 31 | joiner snapshot believed delivered | open; still inferred — the remote-events page states a bound exists and not its size |
 | 32 | dispatch loop one `pcall` | open (re-measured: rest of batch dropped, report `? nil 0`) |
-| 33 | `select` holes / departed / duplicates | closed (24bf8d7, bc35060); pre-fix 6 failures |
+| 33 | `select` holes / departed / duplicates | closed (67fe53f, 2ea8c90); pre-fix 6 failures |
 | 34 | install guard in edit mode | open (inferred; `RunService` YAML confirms `IsServer` true, `IsRunning` false in edit) |
 | 35 | server seals on first client packet | open, no argument written |
 | 36 | `check()` inside an open block | open |
-| 37 | `nw.Views<D>` annotation erases G3/G6 | **declined with an argument that holds for the type** (788f8b5: six safe spellings pinned, one canary); the erasure is unchanged (A.2 re-run: 0 diagnostics with the annotation, 2 without); the caution the code says is in `DESIGN-API.md` §7 is not there (new finding) |
-| 38 | `t.PayloadOf` never reduces | **closed differently** — direct-require path fixed by a local instantiation (8bd883a); the path the docstring prescribes (`require(nw).types` then `t.PayloadOf<…>`) is still `Unknown type` (new finding) |
-| 39 | `CheckedSettings` refuses `nw.Settings` | closed (8bd883a); `config_ok` writes `local declared: nw.Settings`; a literal `nil` section is still refused with "got that" (미미) |
+| 37 | `nw.Views<D>` annotation erases G3/G6 | **declined with an argument that holds for the type** (0cac0ab: six safe spellings pinned, one canary); the erasure is unchanged (A.2 re-run: 0 diagnostics with the annotation, 2 without); the caution the code says is in `DESIGN-API.md` §7 is not there (new finding) |
+| 38 | `t.PayloadOf` never reduces | **closed differently** — direct-require path fixed by a local instantiation (916364b); the path the docstring prescribes (`require(nw).types` then `t.PayloadOf<…>`) is still `Unknown type` (new finding) |
+| 39 | `CheckedSettings` refuses `nw.Settings` | closed (916364b); `config_ok` writes `local declared: nw.Settings`; a literal `nil` section is still refused with "got that" (미미) |
 | 40 | plain-table audience crashes view type functions | open; also crashes for a literal `{ scope = "everyone", kind = "owner" }` |
 | 41 | seven analysis/runtime disagreements | open; now nineteen (new finding) |
 | 42 | `Ir.patch` framing `static` | open |
@@ -103,7 +103,7 @@ docstrings; no document in `docs/` says they happened. Three closures overturned
 | 46 | `channel: any` across the boundary | open |
 | 47 | encoding tables keyed `string` | open |
 | 48 | `Sink` stage `string` | open |
-| 49 | `store.changed` never read | closed — deleted (37937c7), with a measurement recorded in `Store.luau` |
+| 49 | `store.changed` never read | closed — deleted (b8465eb), with a measurement recorded in `Store.luau` |
 | 50 | sidecar typed `{ Instance }` | open |
 | 51 | WIRE-FORMAT §6 "clamped" | open |
 | 52 | "`nw.observe` replaces console output" | open (re-measured) |
@@ -113,7 +113,7 @@ docstrings; no document in `docs/` says they happened. Three closures overturned
 | 56 | acceptance 4 met by hand-swapped audience | open |
 | 57 | acceptance 11 unenforceable | open (41% at floor 0.3; honest share lower — new finding) |
 | 58 | 65,535 in types docstrings, `Batch` comment, DESIGN-API:264 | open |
-| 59 | reference-equality fast path cannot fire | **partial** — cost fixed by a different mechanism (37937c7 compares once per subject); the docstrings still promise a pointer compare that cannot fire |
+| 59 | reference-equality fast path cannot fire | **partial** — cost fixed by a different mechanism (b8465eb compares once per subject); the docstrings still promise a pointer compare that cannot fire |
 | 60 | `src/types` messages fail the `tools/messages` bar | open; now 54 sites, checker still `src/api` only |
 | 61 | "Six classes", stage/rule/limit lists | open (ten stages, not the eleven the M4 report said) |
 | 62 | Forbids columns | open |
@@ -124,9 +124,9 @@ docstrings; no document in `docs/` says they happened. Three closures overturned
 | 67 | stale cross-references | open |
 | 68 | SECURITY-REPORT.md stale | open |
 | 69 | stale `src` docstrings | open, every one listed |
-| 70 | tick O(S × P) | closed (37937c7) for schema-shaped tables; 47 ms → 1.7 ms at 50 × 500 (n = 21); defeated by non-schema keys and select-all audiences (new findings) |
-| 71 | decode never takes a block path | **closed differently** — `fusedStructReader` (03a11a3) spans a struct of 1–8 flagless number fields; the root static payload is not spanned; the at-commit test proves equivalence, not that the path is taken |
-| 72 | `Context.acquire` per packet | closed (a57653e); 0 reads for 20 untouched packets; pre-fix 5 failures; a new consequence (new finding) |
+| 70 | tick O(S × P) | closed (b8465eb) for schema-shaped tables; 47 ms → 1.7 ms at 50 × 500 (n = 21); defeated by non-schema keys and select-all audiences (new findings) |
+| 71 | decode never takes a block path | **closed differently** — `fusedStructReader` (db49ca5) spans a struct of 1–8 flagless number fields; the root static payload is not spanned; the at-commit test proves equivalence, not that the path is taken |
+| 72 | `Context.acquire` per packet | closed (5478812); 0 reads for 20 untouched packets; pre-fix 5 failures; a new consequence (new finding) |
 | 73 | `Delta.write` closure per call | open; now measured at 112 B per call, 0 with `commit` hoisted |
 | 74 | per-refusal interpolation in `Batch.read` | open (500 claims, 50 distinct lengths → 50 distinct strings) |
 | 75 | one RESYNC per refused packet | server side coalesced; client `desync` still per refusal (44 refusals → 44 calls) |
@@ -166,14 +166,14 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 ### [경고] The resync bound is a hard constant, charged to nothing, and a coalesced ask is silent
 - Category: Security-current
 - Location: `src/transport/Inbound.luau:672` (`RESYNC_TICKS = 30`, not a `Config` limit), `:944-961` (coalesce; the deferred branch `:953-957` returns without `report`), `src/transport/Batch.luau:516-581` (control kinds read before `admit`)
-- Problem: efa3a91's bound holds — one full resend per window per (peer, channel), measured on frames 2, 31, 61 only — but three things remain. Nothing is charged: `budget.usage` is `0 0 0` after 101 resyncs, so `nw.diagnostics` cannot show the peer. The deferred branch neither reports nor counts, so a peer asking every frame is invisible to `nw.observe` (90 attack frames, `reports []`) — §9 "nothing on the receive path is silent". The window is a constant a game cannot tune: with a 30 KB replicated state (5,000 subjects) each hostile client extracts 60 KB/s of encode and downlink per channel for 10 B/s up.
+- Problem: 3351d58's bound holds — one full resend per window per (peer, channel), measured on frames 2, 31, 61 only — but three things remain. Nothing is charged: `budget.usage` is `0 0 0` after 101 resyncs, so `nw.diagnostics` cannot show the peer. The deferred branch neither reports nor counts, so a peer asking every frame is invisible to `nw.observe` (90 attack frames, `reports []`) — §9 "nothing on the receive path is silent". The window is a constant a game cannot tune: with a 30 KB replicated state (5,000 subjects) each hostile client extracts 60 KB/s of encode and downlink per channel for 10 B/s up.
 - Impact: a bounded amplifier proportional to state size × replicated channels × colluding clients, with no observability and no knob.
 - Evidence: measured. N = 100: 450 B up bought 1,803 B down over 90 frames; N = 300: 1,801 B per window. Fix: report the coalesced ask at stage `replicate` with a constant reason, charge `bytes` to the peer's usage, lift `RESYNC_TICKS` into `Config.LIMITS`.
 
 ### [경고] `owner` and `nearby` audiences bypass `roster.has`, so a departed player's baselines and parked send record are rebuilt after `forget`
 - Category: Security-potential
 - Location: `src/transport/Recipients.luau:289-302` (`owner`/`nearby` return the roster's answer unchecked; `has` consulted only in the `select` arm at `:341-342`), `src/replication/Tick.luau:196-216` (`send` keeps for whoever is named), `:309-334` (both removal passes walk `roster.all()`), `src/transport/Outbound.luau:157-178` (`switchTo` parks a record for any key)
-- Problem: bc35060 closed the `select` half of M4 finding 19. `owner` returns `roster.owner(subject)`, which for a `Player` subject is the instance itself, connected or not. If the store lists the departed player's subject for one more tick (a profile save that yields — the DESIGN-API worked example is `audience = owner, store = of(byPlayer)`), the tick keeps a snapshot for them and `Outbound` parks a record; once the subject vanishes, the removal pass cannot see a player the roster no longer returns. Found independently by the transport and replication auditors. Inferred second angle: `Players.yaml` says `PlayerRemoving` fires before `ChildRemoved` on `Players`, so during a game's own `PlayerRemoving` handler the player is still in `GetPlayers()` and a publish there rebuilds the record after netweave's `forget`.
+- Problem: 2ea8c90 closed the `select` half of M4 finding 19. `owner` returns `roster.owner(subject)`, which for a `Player` subject is the instance itself, connected or not. If the store lists the departed player's subject for one more tick (a profile save that yields — the DESIGN-API worked example is `audience = owner, store = of(byPlayer)`), the tick keeps a snapshot for them and `Outbound` parks a record; once the subject vanishes, the removal pass cannot see a player the roster no longer returns. Found independently by the transport and replication auditors. Inferred second angle: `Players.yaml` says `PlayerRemoving` fires before `ChildRemoved` on `Players`, so during a game's own `PlayerRemoving` handler the player is still in `GetPlayers()` and a publish there rebuilds the record after netweave's `forget`.
 - Impact: one `records[player]` tree plus a snapshot per subject, plus one `Buffer.Save`, per such departure, for the life of the server; and a `FireClient` to a departed player that Roblox does not document.
 - Evidence: measured. After `forget(carol)` on all three server stores, one tick with `owner = carol` sent 7 B to carol and `serverBase.held(carol) == 1`; after the subject is gone the baseline stays at 1. `select` and `everyone` stay at 0.
 
@@ -188,13 +188,13 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 ### [중대] `t.map` refuses a struct, enum or union payload at the type layer — the "entities by id" schema does not compile
 - Category: Type-error
 - Location: `src/types/init.luau:1203` (`function t.map<K, V>(key: Type<K>, value: Type<V>): Type<{ [K]: V }>`)
-- Problem: with `--!strict` and `LuauSolverV2`, `t.map(t.u8, t.struct({ a = t.u8 }))` is `TypeError: Expected this to be exactly 'unknown', but got '{ a: number }'`; `t.map(t.u8, t.union({ a = t.u8 }))` the same; `t.map(t.enum({ a = true }), t.u8)` is `Expected this to be 'Type<unknown>', but got 'Type<"a">'`. Primitive, `t.array`, `t.optional`, `t.vector3` and `t.string` payloads on either side are fine, and the one-parameter generics (`t.array(struct)`, `t.optional(struct)`) are fine inside a spec literal — it is the two-parameter generic meeting a type-function-produced payload. Reproduced byte-for-byte on `0cb731d`, so it predates every commit in this window; no `tests/*_ok.luau` writes a map whose value is a struct (`grep "t\.map("` over `src tests docs`: one `t.map(t.string, t.u8)` in `types_ok:48`). The api auditor reached the same seam from the other side: `local o = t.optional(S)` outside a spec is `Type<unknown?>`, so `nw.validate(t.optional(struct), v)` returns `unknown?` and the brand the M4 fix describes never applies on that path.
+- Problem: with `--!strict` and `LuauSolverV2`, `t.map(t.u8, t.struct({ a = t.u8 }))` is `TypeError: Expected this to be exactly 'unknown', but got '{ a: number }'`; `t.map(t.u8, t.union({ a = t.u8 }))` the same; `t.map(t.enum({ a = true }), t.u8)` is `Expected this to be 'Type<unknown>', but got 'Type<"a">'`. Primitive, `t.array`, `t.optional`, `t.vector3` and `t.string` payloads on either side are fine, and the one-parameter generics (`t.array(struct)`, `t.optional(struct)`) are fine inside a spec literal — it is the two-parameter generic meeting a type-function-produced payload. Reproduced byte-for-byte on `15f74f2`, so it predates every commit in this window; no `tests/*_ok.luau` writes a map whose value is a struct (`grep "t\.map("` over `src tests docs`: one `t.map(t.string, t.u8)` in `types_ok:48`). The api auditor reached the same seam from the other side: `local o = t.optional(S)` outside a spec is `Type<unknown?>`, so `nw.validate(t.optional(struct), v)` returns `unknown?` and the brand the M4 fix describes never applies on that path.
 - Impact: the canonical replicated-state schema (`t.map(t.u16, Entity)`) cannot be declared in the only mode the library supports without `(t.map :: any)(…)`, which erases the payload type for everything downstream. The runtime lowers and encodes it correctly; the sold guarantee is the type.
-- Evidence: measured (`luau-lsp analyze` with the project's flags; the same file over `0cb731d` and `8bd883a~1`). Fix: a `MapPayload(key, value)` type function reading both `__payload`s, the way `t.struct` already does, and `t.map(t.u16, Entity)` written into `types_ok`.
+- Evidence: measured (`luau-lsp analyze` with the project's flags; the same file over `15f74f2` and `916364b~1`). Fix: a `MapPayload(key, value)` type function reading both `__payload`s, the way `t.struct` already does, and `t.map(t.u16, Entity)` written into `types_ok`.
 
 ### [경고] A stray write into a production `ctx` is now permanent for that player
 - Location: `src/api/Context.luau:164-189` (`live` has `__index` only), `:207-237` (`acquire` clears `character`/`humanoid` only when `record.looked`)
-- Problem: before a57653e every `acquire` overwrote `character` and `humanoid`, so a handler that wrote into `ctx` was corrected on the next packet. Now the lazy `__index` fires only while the key is absent: a write to `ctx.character` (or any key) sits in the shared per-player record and is returned to every later policy and handler for that player until `forget`. The Studio guard's `__newindex` does not exist on the production record, although `Context.luau:17-21` says the footgun "is guarded rather than documented".
+- Problem: before 5478812 every `acquire` overwrote `character` and `humanoid`, so a handler that wrote into `ctx` was corrected on the next packet. Now the lazy `__index` fires only while the key is absent: a write to `ctx.character` (or any key) sits in the shared per-player record and is returned to every later policy and handler for that player until `forget`. The Studio guard's `__newindex` does not exist on the production record, although `Context.luau:17-21` says the footgun "is guarded rather than documented".
 - Impact: one game bug (`ctx.character = …`, `ctx.cooldown = now`) becomes a persistent per-player context corruption that a policy such as `originNearCharacter` then trusts, with no message in production.
 - Evidence: measured: `custom key leaks into the next packet: 1`; after `ctx2.character = "forged"`: `a forged character persists across packets: forged`, and again on the packet after. Fix costs nothing per packet: a `__newindex` on `live` that raises (the guard's message exists), or two `rawset`s clearing both keys unconditionally in `acquire`.
 
@@ -217,7 +217,7 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 
 ### [경고] Over `baselinesPerClient` the whole subject is re-sent every idle frame, and the default pair means an `everyone` audience pays it from subject 257
 - Location: `src/replication/Baseline.luau:164-197` (refuse; the value is not remembered), `src/replication/Tick.luau:277-292` (`baselines.of(who) == held` is nil for a refused client, so `send` runs every tick)
-- Problem: 2dcc87f's argument — correctness over bandwidth — holds for *not dropping state*; it does not cover *every tick whether it moved or not*. The tick already knows the value has not moved (`settled`); what it lacks is a record that the refused client received the last snapshot, a per-client boolean rather than a baseline. `pendingPerBatch` was fixed for the same 257 threshold; this one was documented instead.
+- Problem: d4d4938's argument — correctness over bandwidth — holds for *not dropping state*; it does not cover *every tick whether it moved or not*. The tick already knows the value has not moved (`settled`); what it lacks is a record that the refused client received the last snapshot, a per-client boolean rather than a baseline. `pendingPerBatch` was fixed for the same 257 threshold; this one was documented instead.
 - Impact: 300 subjects at defaults: 265 B/frame per client for a world at rest, forever (≈ 15.9 KB/s per client; 50 clients ≈ 795 KB/s of server upload for nothing). One report, then silence.
 - Evidence: measured (`repl_livelock 300`: 265 B every frame from frame 2, `serverHeld = 256`, one `replicate` refusal; 257: 7 B/frame).
 
@@ -259,7 +259,7 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 ### [경고] The idle gate is schema-unaware: non-schema keys are cloned into every baseline, compared every tick, and can defeat the gate entirely
 - Category: Optimization (with the cycle above as its bug edge)
 - Location: `src/replication/Tick.luau:129-143` (`snapshot` clones every key), `:164-192` (`moved` walks every key), comment `:253-266` and `src/replication/Store.luau:78-82` ("compares each subject once a tick")
-- Problem: the comparison is over the game's whole table, not the schema's fields. A key the schema does not read but which changes every frame (`lastSeen = os.clock()`, a `Character` reference) makes every subject "moved" and the per-pair attempt that 37937c7 removed comes back. A large non-schema subtree (a `Replica.Data` whose inventory is not replicated through this channel) is cloned into the baseline and walked every tick.
+- Problem: the comparison is over the game's whole table, not the schema's fields. A key the schema does not read but which changes every frame (`lastSeen = os.clock()`, a `Character` reference) makes every subject "moved" and the per-pair attempt that b8465eb removed comes back. A large non-schema subtree (a `Replica.Data` whose inventory is not replicated through this channel) is cloned into the baseline and walked every tick.
 - Impact: the 22× claim holds only for tables shaped exactly like the schema.
 - Evidence: measured (50 × 500, n = 21): constant extra key → 0 attempts, 1.58 ms; changing extra key → **25,000 attempts/tick, 22.4 ms** (21.3–28.8); 100 subjects × 2,000-entry non-schema list, 1 player → 18.8 MB cloned into baselines, idle **16.6 ms** (15.8–19.3) vs 0.036 ms control. Fix: restrict `snapshot`/`moved` to the schema's fields (the layout is in `channel.delta.layout`).
 
@@ -324,7 +324,7 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 ### [경고] The `nw.Views<D>` export has no docstring, and the caution the code and tests say is in DESIGN-API §7 is not there
 - Category: Doc-missing
 - Location: `src/netweave.luau:360-369` (ten `export type`s, of which only `Trusted`/`Untrusted` carry a `--[=[ ]=]`), `src/api/View.luau:331` and `tests/api_reject.luau:272` ("the caution … on `DESIGN-API.md` §7"), `docs/DESIGN-API.md:711` ("G6 is a compile-time guarantee")
-- Problem: M4 finding 37 was answered by 788f8b5 as documentation-plus-canary — the erasure is still there (A.2 re-run: 0 diagnostics with `local _v: nw.Views<…> = ns`, 2 without). The caution lives in `View.luau` (internal) and in a test comment, both of which say it is also in DESIGN-API §7; `grep "Views<" docs/DESIGN-API.md` finds only the Q5 paragraph at line 618. Both `View.luau:332` and `api_reject.luau:272` say the count "moves to 25" if the erasure lifts; it moves to 26. Found by the docs, types and api auditors.
+- Problem: M4 finding 37 was answered by 0cac0ab as documentation-plus-canary — the erasure is still there (A.2 re-run: 0 diagnostics with `local _v: nw.Views<…> = ns`, 2 without). The caution lives in `View.luau` (internal) and in a test comment, both of which say it is also in DESIGN-API §7; `grep "Views<" docs/DESIGN-API.md` finds only the Q5 paragraph at line 618. Both `View.luau:332` and `api_reject.luau:272` say the count "moves to 25" if the erasure lifts; it moves to 26. Found by the docs, types and api auditors.
 - Impact: a reader of §7 relies on "G6 is a compile-time guarantee" and writes the one spelling that removes it, with no diagnostic and no caution anywhere a game reads.
 - Evidence: measured (A.2 re-run; grep; a private copy of `api_reject.luau` with line 280 deleted → 26).
 
@@ -348,12 +348,12 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 ### [경고] PLAN-M4 decisions overturned by phase-8 commits are still stated as current
 - Category: Plan-rule-violation
 - Location: `docs/milestone/PLAN-M4.md:97-100` and `:287-290` (D-2 / phase 2: `pendingPerBatch` drops deltas on the client → a sequence per client per subject), `:368-373` (phase 4: over `baselinesPerClient` it "degrad[es] to exactly what `nw.state` does"), `:546-550` (phase 6: resync "bounded rather than refused: 300 in one batch clear a baseline once")
-- Problem: 236e4dd made the ceiling server-only (`src/api/Config.luau:132`), 2dcc87f struck the `nw.state` claim in `Baseline.luau` and said why, efa3a91 replaced the per-batch bound with a 30-tick coalesce and struck it in WIRE-FORMAT:198-218. The plan carries all three pre-fix sentences live; phase 4 strikes the sequence number but D-2 and phase 2 do not.
+- Problem: 7df2228 made the ceiling server-only (`src/api/Config.luau:132`), d4d4938 struck the `nw.state` claim in `Baseline.luau` and said why, 3351d58 replaced the per-batch bound with a 30-tick coalesce and struck it in WIRE-FORMAT:198-218. The plan carries all three pre-fix sentences live; phase 4 strikes the sequence number but D-2 and phase 2 do not.
 - Evidence: inferred from the four texts against `Inbound.luau:672`, `Config.luau:132`, `Baseline.luau:165-170`.
 
 ### [경고] DESIGN-API §3 specifies a client-side `pendingPerBatch` drop and a sequence number; WIRE-FORMAT §2 justifies the absence of a sequence number with the same removed drop path
 - Location: `docs/DESIGN-API.md:407-411`; `docs/WIRE-FORMAT.md:190-193` ("the only thing that drops one is netweave's own `pendingPerBatch`")
-- Problem: since 236e4dd the client's ceiling is `math.huge`, so nothing netweave-side drops a delivered change on a client; recovery is the client's own refusal → `RESYNC`. DESIGN-API describes a wire feature that does not exist; WIRE-FORMAT justifies its absence with a drop that no longer exists. `Batch.luau:134-137` also states the pre-efa3a91 per-tick resync bound as current — the sentence WIRE-FORMAT strikes.
+- Problem: since 7df2228 the client's ceiling is `math.huge`, so nothing netweave-side drops a delivered change on a client; recovery is the client's own refusal → `RESYNC`. DESIGN-API describes a wire feature that does not exist; WIRE-FORMAT justifies its absence with a drop that no longer exists. `Batch.luau:134-137` also states the pre-3351d58 per-tick resync bound as current — the sentence WIRE-FORMAT strikes.
 - Evidence: inferred (`Inbound.luau:687`, `:289-315`).
 
 ### [경고] DESIGN-API §3's documented escape from the frozen value — `local mine = table.clone(value)` — is shallow, so the first nested write raises
@@ -373,12 +373,12 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 - Problem: a bare `t.i8`, `t.i16`, `t.i32` is stored as `value − min` in unsigned storage even with no range constraint. A second implementation written from this frozen document would emit two's complement and mis-decode every negative integer.
 - Evidence: measured (`t.i8` −1 → `7f`; −128 → `00`; `t.i16` −1 → `ff 7f`; `t.i32` −1 → `ff ff ff 7f`; `t.f32` −1 → `00 00 80 bf`, floats are not offset).
 
-### [경고] WIRE-FORMAT has no layout for six wire-affecting kinds added since 0cb731d, and §4 does not say which node attributes reach the hash
+### [경고] WIRE-FORMAT has no layout for six wire-affecting kinds added since 15f74f2, and §4 does not say which node attributes reach the hash
 - Location: `docs/WIRE-FORMAT.md:373-376` (Numbers), `:378-382` (Instances), `:279-283` (hash coverage), `:6-8` (preamble: "the one addition since the freeze")
 - Problem: `t.quantized` (a count of steps in u8/u16/u32), `t.u53`/`t.i53` (narrowed like `u32`, else an f64 with a wholeness check), `t.vector3(component)` (three component nodes), `t.union` (documented in §5 as a design and now implemented as designed — the one thing here that is in the document), and the string `utf8`/`pattern` constraints (hash-visible, not wire-visible) are documented only in commit messages and docstrings. §4 says the hash covers "the lowered node tree" but not that `step`, `utf8`, `pattern`, `unit`, union `branches` are in it and `descendantOf` deliberately is not. Found by the docs and codec auditors.
 - Evidence: measured (probe bytes: quantized `{q=-0.5, deg=90}` → `68 01 40`; `u53` narrow 1000 → `e7 03`; `grep -i "quantiz\|u53\|utf8\|pattern\|component\|descendantOf"` over the doc returns nothing).
 
-### [경고] DESIGN-API §6 describes the brands as passing non-tables through unchanged; since 8bd883a a union is branded component-wise
+### [경고] DESIGN-API §6 describes the brands as passing non-tables through unchanged; since 916364b a union is branded component-wise
 - Location: `docs/DESIGN-API.md:526-532` (the `type function` sample), `:593-596`; `src/api/Trust.luau:96-141`
 - Problem: §6's code sample is now false; "a scalar payload is unbranded" stays true but the optional-table case that was the hole is neither listed as closed nor described.
 - Evidence: inferred.
@@ -386,7 +386,7 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 ### [경고] PLAN-M4 acceptance criteria 4, 8, 10 and 11 are stated as checkable and their status is not written
 - Category: Plan-rule-violation
 - Location: `docs/milestone/PLAN-M4.md:943` (4), `:947` (8), `:949` (10), `:950` (11)
-- Problem: (4) both rigs still swap the audience by hand and `roblox_runtime` has no `nearby` replication case. (8) the crossover has no measurement and no artifact (no replication mode in `bench/src/shared/Modes/`, no RESULTS entry). (10) "the Studio suite is run and green" is asserted only in commit 460aa41's message; the archived run carries no suite field. (11) "outnumber" means > 50%; measured 41% against a declared floor of 0.3 — and the honest share is lower (see the test suite section). None is marked unmet.
+- Problem: (4) both rigs still swap the audience by hand and `roblox_runtime` has no `nearby` replication case. (8) the crossover has no measurement and no artifact (no replication mode in `bench/src/shared/Modes/`, no RESULTS entry). (10) "the Studio suite is run and green" is asserted only in commit 7737e09's message; the archived run carries no suite field. (11) "outnumber" means > 50%; measured 41% against a declared floor of 0.3 — and the honest share is lower (see the test suite section). None is marked unmet.
 - Evidence: measured for 8, 10, 11; inferred for 4.
 
 ### [경고] "908 is Roblox's documented ceiling" is not what the official page says, and §3.7-F does not say it either
@@ -406,7 +406,7 @@ The findings below are **new**. An open row above is not re-listed as a finding;
 - Evidence: measured.
 
 ### [미미] Statements in the two previous reports now wrong, for this report to strike
-- Location: `docs/SECURITY-REPORT.md:347` ("has not been run yet" — `roblox_runtime` ran in phase 9 and at 460aa41), `:467-468` (A.2 writes `{ fake = true }` through the encoder, which now refuses it); `docs/SECURITY-REPORT-M4.md:18` (23/8/8 → 24/8/11; 49% → 41%), `:263` (cites the remote-events page for queueing — that page says nothing about queueing), `:422` and `:455` ("eleven stages" — ten), `:454` (the YAML today says 1000 only), `:94` and `:651` (`Serdes:1254` is `1297` at the pre-fix commit and the path no longer exists), Appendix A.1 `:602` (`R = "../src/"` assumes `spike/`; the three printed outcomes are all inverted now)
+- Location: `docs/SECURITY-REPORT.md:347` ("has not been run yet" — `roblox_runtime` ran in phase 9 and at 7737e09), `:467-468` (A.2 writes `{ fake = true }` through the encoder, which now refuses it); `docs/SECURITY-REPORT-M4.md:18` (23/8/8 → 24/8/11; 49% → 41%), `:263` (cites the remote-events page for queueing — that page says nothing about queueing), `:422` and `:455` ("eleven stages" — ten), `:454` (the YAML today says 1000 only), `:94` and `:651` (`Serdes:1254` is `1297` at the pre-fix commit and the path no longer exists), Appendix A.1 `:602` (`R = "../src/"` assumes `spike/`; the three printed outcomes are all inverted now)
 - Evidence: measured.
 
 ## Comments and Docstrings
@@ -416,14 +416,14 @@ Judged by CLAUDE.md §4's two kinds: a `--[=[ ]=]` must let someone decide wheth
 citation that says what is attributed, and never restate the line below. Every `§` citation in `src/`
 was read at its heading in `RESEARCH-AND-PLAN.md`; the ones below are the ones that do not hold.
 
-### [경고] `Batch.luau` states the pre-efa3a91 resync bound as current
+### [경고] `Batch.luau` states the pre-3351d58 resync bound as current
 - Location: `src/transport/Batch.luau:134-137` ("the resend it provokes happens once in the tick that follows however many arrive — so the worst a peer can extract is a whole state per tick")
 - Problem: that sentence is the bound `WIRE-FORMAT.md:198-207` strikes through as "the wrong bound … measured in M4 phase 8"; the file that owns the control kind still asserts it un-struck. A reader of `Batch` takes a per-tick bound as the security property; the real one is per 30 ticks and lives in `Inbound`.
 - Evidence: measured (one resend per 30 frames) against the text.
 
 ### [경고] `Query.abandon`, `ceilingReplyReason` and the `holdReply` ceiling branch are unreachable, and four comments describe them as live
 - Location: `src/transport/Inbound.luau:770-793` (`holdReply` runs only on a client, where `pendingCeiling` is `math.huge` since `:687`), `:777-785`, `src/transport/Query.luau:78-81, :404-434` ("The only caller is the pending-set ceiling"), `src/transport/Outbound.luau:416`
-- Problem: 236e4dd made the branch dead and `query_runtime` says so; the source does not. A future reader restores the ceiling on the client "because the abandon path handles replies" — the M4 livelock, reintroduced with a citation.
+- Problem: 7df2228 made the branch dead and `query_runtime` says so; the source does not. A future reader restores the ceiling on the client "because the abandon path handles replies" — the M4 livelock, reintroduced with a citation.
 - Evidence: inferred from `:687`, `:773` and `Batch.read:623-634`; `grep abandon` shows the one call.
 
 ### [경고] `Buffer.luau` says Zap coalesces block allocations; the research log says the opposite, and the cited section is about something else
@@ -450,7 +450,7 @@ was read at its heading in `RESEARCH-AND-PLAN.md`; the ones below are the ones t
 
 ### [미미] Stale, overstated or restating comments in `src/`
 - Location and problem, one line each, all read in the snapshot:
-  - `src/transport/Recipients.luau:31-39` — the pre-bc35060 paragraph sits un-struck directly above the block at `:40-66` that strikes the same sentence, and says "`has` above" for a function defined below.
+  - `src/transport/Recipients.luau:31-39` — the pre-2ea8c90 paragraph sits un-struck directly above the block at `:40-66` that strikes the same sentence, and says "`has` above" for a function defined below.
   - `src/transport/Outbound.luau:57` "all three surveyed libraries" vs `:65` "none of the four"; `:117` `@param isServer` (no such parameter); `:446-449` "the record keeps [the buffer]" (it does not — measured 64 → 2048 → 64); `:59` "908 is the documented limit".
   - `src/transport/Inbound.luau:14` "Four things happen to a packet" (ten stages), `:256` "the same six arrays" (seven), `:682-687` (the client builds `ceilingReason` "if it ever does" report; it cannot), `:954` `seen[channel] = honoured` (dead store); `src/transport/Driver.luau:198` "Four places" (six `forget`s); `:57-61` `task.spawn` "propagating whatever that thread raises" — creator-docs `task.yaml` is silent on errors; `src/transport/Batch.luau:9-16` grammar omits the change and control shapes; `:566/569` an unknown control kind reports body bytes where every other refusal reports the whole packet.
   - `src/codec/Serdes.luau:20-27` "encode errors loudly … `error` with a message naming the field" — false for type-mismatched values (six VM messages) and for the bare datatype writers (silent); `:1291-1293` "refuses a count past the last level" — `t.quantized(1e15, 1e15+1, 0.001)` accepts count 1008 of 1000 because the step is below the ulp of the bound; `:944-945`, `:2007` ("The half the finding is actually about" names no finding); `src/codec/Buffer.luau:149-155` "`load` and `take` clear it" — `rollback` and `discardBlock` do too; `src/codec/Ir.luau:174-182` and `Serdes.luau:2266-2274` `@interface` blocks missing `instances`, `maxSize`, `layout`; `Ir.luau:954` ceiling derived from 65,535.
@@ -464,7 +464,7 @@ was read at its heading in `RESEARCH-AND-PLAN.md`; the ones below are the ones t
 
 ### [경고] The decode side spans only a struct of 1–8 flagless number fields; the root static payload is not spanned
 - Location: `src/codec/Serdes.luau:1447-1743` (`fusedStructReader`), `rowsOf` `:567-628`, `src/codec/Buffer.luau:934-944` (`span`)
-- Problem: 03a11a3 closed M4 finding 71 differently than described. The at-commit test passes over the pre-fix source (it proves equivalence, not that the fused path is taken), and the newest archived Studio run moves the client-decode direction the wrong way (see the harness section).
+- Problem: db49ca5 closed M4 finding 71 differently than described. The at-commit test passes over the pre-fix source (it proves equivalence, not that the fused path is taken), and the newest archived Studio run moves the client-decode direction the wrong way (see the harness section).
 - Evidence: measured (lune, n = 5 × 3,000): `ArrayHeavy` fused 22.6 µs (22.5–24.0); `array(u8, 600)` general 28.6 (28.5–28.9); 100 × 9-field struct 50.3 (49.2–51.9).
 
 ### [미미] `Budget.admit`'s refusal costs 2.4× its admission, from one string per refusal
@@ -483,14 +483,14 @@ was read at its heading in `RESEARCH-AND-PLAN.md`; the ones below are the ones t
 
 ## Test Suite (`tests/`)
 
-Audited for the first time. Method: `git diff 7f5871c..460aa41 -- tests` read line by line for
+Audited for the first time. Method: `git diff e8d9589..7737e09 -- tests` read line by line for
 weakened assertions; 40 guard mutations in a private copy, each test run over the mutated source;
 every `UNCOVERED` entry attempted as a real `_ok` case; all eighteen runtimes required in one process in
 runner order and in reverse.
 
-**No test was weakened evasively.** Every removed or changed assertion since `7f5871c` traces to a
+**No test was weakened evasively.** Every removed or changed assertion since `e8d9589` traces to a
 behaviour change in the fix commit; the one assertion removal (`query_runtime:865-895`, the parked
-third answer that 236e4dd made unreachable) says so honestly. No harness floor moved. Cross-file
+third answer that 7df2228 made unreachable) says so honestly. No harness floor moved. Cross-file
 state leakage: none — all eighteen files pass with identical counts in one process in both orders.
 **Of 40 mutations, 36 fail as claimed**; the exceptions are below.
 
@@ -568,10 +568,10 @@ state leakage: none — all eighteen files pass with identical counts in one pro
 
 ### [미미] Smaller suite defects
 - `tests/hostile_runtime.luau:433` "a number in the sidecar does not raise" passes with `isInstance` removed — satisfied by the read-phase guard, not by the guard the block describes (the block still fails on four other assertions). measured.
-- `tests/replication_runtime.luau:558-563` describes a provocation (`pendingPerBatch = 1`, `Config.reset()`) the section above no longer uses since 236e4dd; the strikethrough at 488-492 says so and this paragraph contradicts it. measured.
+- `tests/replication_runtime.luau:558-563` describes a provocation (`pendingPerBatch = 1`, `Config.reset()`) the section above no longer uses since 7df2228; the strikethrough at 488-492 says so and this paragraph contradicts it. measured.
 - `tests/serdes_runtime.luau:846-870` is the one lune assertion whose verdict depends on the host (`hostileCost < honestCost * 20 + 0.05` over `os.clock()`); §9's counting half — `table.create` never called from a claim — is unwritten. inferred.
 - `tests/types_reject.luau:5` "the count on line 1" (the header is line 2); `tests/example_runtime.luau:8` names `tests/messages.luau`. measured.
-- bc35060's regression test passes over the pre-fix source under lune (`246 assertions`), because the pre-fix branch was `type(who) == "table"` under lune and the defect existed only in the Roblox branch; the commit message records the confirmation used a different mutation. measured.
+- 2ea8c90's regression test passes over the pre-fix source under lune (`246 assertions`), because the pre-fix branch was `type(who) == "table"` under lune and the defect existed only in the Roblox branch; the commit message records the confirmation used a different mutation. measured.
 
 ## Benchmark Harness (`bench/`)
 
@@ -585,7 +585,7 @@ reconciles with its named run; and `PLAN-M3.md` disagrees with nothing. What is 
 
 ### [중대] The newest committed run puts acceptance criterion 5 at 1.15x, and no document mentions it
 - Category: Reproducibility / Doc-mismatch
-- Location: `bench/runs/2026-09-06-m4p8.json` (committed by `460aa41`); `bench/RESULTS.md:692` ("**missed on `ArrayHeavy`** … 1.56x at M4 phase 7 (85 against 133) … the framerate did not move at all"), `:97-102`; `docs/milestone/PLAN-M4.md:195, :628-630`
+- Location: `bench/runs/2026-09-06-m4p8.json` (committed by `7737e09`); `bench/RESULTS.md:692` ("**missed on `ArrayHeavy`** … 1.56x at M4 phase 7 (85 against 133) … the framerate did not move at all"), `:97-102`; `docs/milestone/PLAN-M4.md:195, :628-630`
 - Problem: reconstructed `ArrayHeavy` Up p50 [p0..p100] across every run: seven runs at 84–86 with ±2 FPS internal spread, then **115 [114..116]** in m4p8 against Blink 132. The control group moved −0.8% (blink), +0.9% (zap), −1.7% (bytenet), −3.3% (raw) — §9's control-group question, asked and answered. The cell is genuine: `sent == received == 230,000`, `correct = true`, `wireCalls = 1150` (115 × 10 s), `wireBytes = 230,000 × 601.005` exactly, `smoke = false`. `RESULTS.md` never cites the file.
 - Impact: the milestone's headline open criterion is met on a committed artifact and the document says it is missed by 1.56x. Anyone quoting `RESULTS.md` quotes a number the folder next to it refutes.
 - Evidence: measured (`report.luau` regenerated over all eleven runs).
@@ -658,7 +658,7 @@ reconciles with its named run; and `PLAN-M3.md` disagrees with nothing. What is 
 
 Audited for the first time, by mutation in a private copy. All three checkers exist, run, exit non-zero
 on failure, and catch the drift they were written for: 15 of 15 "obvious" mutations caught, including
-reconstructing the three M4 originals against the `0cb731d` tree (no `_ok` file wrote `nw.Views`,
+reconstructing the three M4 originals against the `15f74f2` tree (no `_ok` file wrote `nw.Views`,
 `nw.Settings` or `t.PayloadOf`; the current `exports.luau` names all three). `UNCOVERED` fails in both
 directions as claimed. The worked-example equality is byte-exact. `.luaurc` is load-bearing and
 correctly placed. `.gitignore`'s negation works. `default.project.json` builds the package shape §2
@@ -726,7 +726,7 @@ follows is what the checkers do not catch.
 - `tools/messages.luau:6` tells the reader to run `lune run tests/messages`; `prose()` at `:155-167` counts backtick-quoted fragments twice against the 80-character floor (`Channel.luau:330` clears it at 86 only because `timeout` is counted twice); the 60-line cap at `:328/:338` applies to the first worked example only (the replication example grown to 100 lines passed, visibly).
 - `tools/exports.luau:170` reads `tests/` non-recursively while `analyze.luau:47-62` recurses (fails safe); an `export type` inside a comment in a surface module is demanded as real (fails safe); an `UNCOVERED` entry with `""` as its reason passes; `:77` says `t.Encoding` "names the eight storages" — ten.
 - `tools/README.md` documents `globalTypes.d.luau` only; its download URL works but is not the one luau-lsp recommends (a CDN, which serves the `.None` security-context variant — not necessarily the same file).
-- `LuauSolverV2` is still an opt-in FFlag in open-source Luau 0.737 (`isAnalysisFlagExperimental`), so `--flag:LuauSolverV2=true` remains required; the general-release announcement commit f2a719b cites is a Studio announcement, and no non-devforum official page was found.
+- `LuauSolverV2` is still an opt-in FFlag in open-source Luau 0.737 (`isAnalysisFlagExperimental`), so `--flag:LuauSolverV2=true` remains required; the general-release announcement commit faf2d4c cites is a Studio announcement, and no non-devforum official page was found.
 
 ## Suggested Types
 
@@ -795,7 +795,7 @@ Recorded so the next reader can see these were checked, not skipped.
 - **Transport.** Non-LIFO: three and six batches in two orders with a 12-packet batch mid-park, exactly-once, 0 reports. Direction: all seven classes, both endpoints. Hostile call ids 0, 16,384, 2^32−1 answered and released. A protocol-refused peer's `HELLO+RESYNC` clears nothing; its 50 unknown control kinds → 50 `parse` reports, no work. Server `pendingPerBatch` 1,000 → 256 + 744 `budget`; client 1,000 → 1,000. `flush` after a raising send: no retry. `_refsrc` citations in the folder (Blink `Generator/init.luau:413-418, :723-745`, Zap `client.rs:1329`, Warp `Server/init.luau:196-200`) all match. No server-side per-destination bound exists (5,000 subjects → one 30,001 B batch accepted whole); creator-docs documents no `RemoteEvent` size limit, so recorded and not filed.
 - **Replication.** Livelock at 256/257/300: converges frame 1, 0 resyncs. RESYNC resends on frames 2/31/61 only, honest mirror intact, tick ms flat (n = 90). Frozen value: deep, untouched subtrees shared, merger folds into a frozen base. `t.union` in a replicated struct end to end. Same-frame ordering: an owed resync honoured in `inbound.tick()` is resent by the tick of the same frame. `bench/tick` reproduces PLAN-M4's numbers with spread. `_refsrc` citations for charm-sync and ReplicaService hold.
 - **api.** All 23 `api_reject` cases fire (24 with the union case). `replicate` views correct for every data shape. Every `export type function` in the folder reduces across a require, confirmed by rejection. Laundering routes closed: field rebuild, `table.clone`, array element, map, intent payload, state client value, boolean-typed tag. `CheckedSettings` knows `direction`, `replicate`, `baselinesPerClient`. `Observer`: 2,000 refusals → 3 sink lines, 1 rejection record, 2,000 counted. The folder's receive-path cost is O(1) per packet with no allocation; every optimisation its comments claim was found to fire.
-- **types.** Nothing in `types/` runs per packet. Declaration cost: a 200-branch union 0.047 ms, a 1,000-field struct 0.31 ms, `fromSchema` of each under 0.8 ms. `PayloadOf<number>` prints the advice; union payloads narrow on `tag`. f2a719b's devforum quote is verbatim (2025-11-20).
+- **types.** Nothing in `types/` runs per packet. Declaration cost: a 200-branch union 0.047 ms, a 1,000-field struct 0.31 ms, `fromSchema` of each under 0.8 ms. `PayloadOf<number>` prints the advice; union payloads narrow on `tag`. faf2d4c's devforum quote is verbatim (2025-11-20).
 - **docs.** Every WIRE-FORMAT byte-level claim other than §6 "clamped" and the offset-binary omission dumps as specified, including the tagged-union layout as §5 designed it and the 30-tick resync. Every `~~strikethrough~~` in DESIGN-API and WIRE-FORMAT is true today. Every `RESEARCH §` citation in PLAN-M4 says what is attributed; `_refsrc/README.md` pins match. CLAUDE.md §9's incident numbers (690x, ten of eleven, 1,994 → 3, 19/21/37/86%, 67%, four Studio suites, 2,000 refusals, fourteen lune runs) all verified against PLAN-M3 except 39/40 and "9%". Nine regression tests fail against their pre-fix trees.
 - **tests.** No evasive weakening; no cross-file state leakage in either order; the analyzer instruments (`Views` canary 24 → 26, `PayloadOf` 11 → 8, `CheckedSettings`) work exactly as their comments say; every double differs from production only in dimensions the code under test does not read, except the two rigs that omit `has` and use no `select` audience.
 - **bench.** All eleven runs regenerate through `report.luau`; every figure in the M2/M3/M4-p0/M4-p7 sections and in PLAN-M3 reconciles; correctness 45/45 in every full run; the vendored codegen regenerates; the suite's resets before the matrix are guarded (with one gap: the adapter does not `Config.reset()` before its own `nw.configure`, so a limit a test left set carries into the matrix — Studio-only to confirm).
@@ -823,7 +823,7 @@ result all exist only in `git log`.
 The auditors' probes live in the session scratchpad under their prefixes (`api_m41_*`, `codec_m41_*`,
 `transport_*`, `repl_*`, `types_*`, `docs_*`, `tests_*`, `bench_*`, `tools_*`) and are not committed;
 each finding's Evidence quotes enough of the probe to reconstruct it. Every lune probe was run with cwd =
-the snapshot root and `local R = "./snap-460aa41/src/"`; from `spike/` in the repository the prefix is
+the snapshot root and `local R = "./snap-7737e09/src/"`; from `spike/` in the repository the prefix is
 `"../src/"`. Analyzer probes used exactly the invocation `analyze.luau` uses:
 
 ```

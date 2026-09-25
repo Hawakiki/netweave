@@ -12,7 +12,7 @@
 	bodies line for line and reports the worst error over random rotations.
 
 	The axis and angle are random, so this is one number per run and the spread is what to quote.
-	Five runs of 200,000 rotations on `3238687` + the compact cframe:
+	Five runs of 200,000 rotations on `eb2db26` + the compact cframe:
 
 		max component error 2.57e-05 .. 2.68e-05   (one step is 2.16e-05)
 		max angle error     6.12e-05 .. 6.40e-05 rad

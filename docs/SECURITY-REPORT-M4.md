@@ -1,21 +1,21 @@
 # Netweave Security & Correctness Report — M4
 
-**Scope:** the whole of `src/` at commit `0cb731d` on `develop` (2026-09-05, "Write a struct of numbers in
+**Scope:** the whole of `src/` at commit `15f74f2` on `develop` (2026-09-05, "Write a struct of numbers in
 one claim — M4 phase 7"), plus `docs/DESIGN-API.md`, `docs/WIRE-FORMAT.md`, `docs/SECURITY-REPORT.md`,
 `docs/milestone/PLAN-M3.md` phase 9 and `docs/milestone/PLAN-M4.md`, and `CLAUDE.md`. The previous report
-audited `7f5871c`; this one re-verifies its closure and audits everything M3 phase 9 and M4 added.
+audited `e8d9589`; this one re-verifies its closure and audits everything M3 phase 9 and M4 added.
 
 **Method:** six auditors ran in parallel, one per `src/` folder (`api`, `codec`, `transport`,
 `replication`, `types` together with `src/netweave.luau`) and one for `docs/`. Each could read any file
 its folder requires or is consumed by, but could report only on its own folder; anything it noticed
 elsewhere went to the owning auditor as a dependency notice, and the two were reconciled here. Every
 finding marked *measured* was reproduced under `lune` or `luau-lsp analyze` (with `LuauSolverV2`) against
-the tree at `0cb731d`; *inferred* findings are labelled as such, per `CLAUDE.md` §7. Where two auditors
+the tree at `15f74f2`; *inferred* findings are labelled as such, per `CLAUDE.md` §7. Where two auditors
 reached the same defect independently it is said so. Line numbers were verified with `grep -n` at
-`0cb731d` by the auditing agent and spot-checked during synthesis.
+`15f74f2` by the auditing agent and spot-checked during synthesis.
 
 **Baseline:** green. `lune run analyze` 52 files clean, the three rejection files at their declared
-counts ~~(23 / 8 / 8)~~ (24 / 8 / 11 at `460aa41`), all eighteen `*_runtime` files pass (`replication_runtime` at ~~49%~~ 41% tagged, 17% honest — M4-1, PLAN-M4-BUG phase 6 — failure-path
+counts ~~(23 / 8 / 8)~~ (24 / 8 / 11 at `7737e09`), all eighteen `*_runtime` files pass (`replication_runtime` at ~~49%~~ 41% tagged, 17% honest — M4-1, PLAN-M4-BUG phase 6 — failure-path
 against a declared floor of 30%), `tools/messages`, `bench/check`, `bench/envelope`, `selene src`,
 `stylua --check` all pass. **None of what follows is caught by the suite.**
 
@@ -32,11 +32,11 @@ and an opinion on which types the vocabulary should gain.
 
 ## Previous report — closure verification
 
-All 26 findings of `docs/SECURITY-REPORT.md` were re-checked against `0cb731d`. Every Appendix A probe
+All 26 findings of `docs/SECURITY-REPORT.md` were re-checked against `15f74f2`. Every Appendix A probe
 re-run reproduces the *fixed* behaviour, and three "confirmed to fail against the pre-fix code" claims were
-checked by extracting the at-commit `tests/` over the pre-commit `src/` with `git archive` (801a6d5
-`ir_runtime` 6 failures, f8799d3 `serdes_runtime` 8 failures and `hostile_runtime` "at direction:
-expected 40, got 0", b86c584 `observer_runtime` 3 failures).
+checked by extracting the at-commit `tests/` over the pre-commit `src/` with `git archive` (18e1650
+`ir_runtime` 6 failures, ee44c80 `serdes_runtime` 8 failures and `hostile_runtime` "at direction:
+expected 40, got 0", 9453cf6 `observer_runtime` 3 failures).
 
 | # | Finding | Status |
 |---|---|---|
@@ -385,7 +385,7 @@ Three findings of this kind are security-relevant and are filed above: the brand
 
 ### [경고] DESIGN-API §10's severity table still says `"error"` reports every occurrence; PLAN-M3 phase 9 says that was corrected "in three places"
 - Location: `docs/DESIGN-API.md:828`; claim at `docs/milestone/PLAN-M3.md:813-814`
-- Problem: since 2d6c2a0 every level is suppressed after `repeatsPerDiagnostic` (`src/api/Observer.luau:239-258`). The three corrected places are source comments; the user-facing table was not one of them.
+- Problem: since 025abab every level is suppressed after `repeatsPerDiagnostic` (`src/api/Observer.luau:239-258`). The three corrected places are source comments; the user-facing table was not one of them.
 
 ### [경고] DESIGN-API §3 still specifies a sequence number per client per subject; M4 removed it and WIRE-FORMAT says so
 - Location: `docs/DESIGN-API.md:376-378, :381-382`; `PLAN-M4.md:99-100` (D-2) and `:283-284` (phase 2) carry the sentence unstruck while phase 4 (`:351-357`) strikes it; `WIRE-FORMAT.md:190-194` ("There is no sequence number"); `src/replication/Baseline.luau:19-29`

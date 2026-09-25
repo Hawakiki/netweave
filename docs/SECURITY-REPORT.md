@@ -1,6 +1,6 @@
 # Netweave Security & Correctness Report
 
-**Scope:** `src/` at commit `7f5871c` on `develop` (2026-09-05), read in full, plus `docs/DESIGN-API.md`,
+**Scope:** `src/` at commit `e8d9589` on `develop` (2026-09-05), read in full, plus `docs/DESIGN-API.md`,
 `docs/WIRE-FORMAT.md`, `docs/milestone/PLAN-M3.md` and the test suite for the claims they make.
 
 **Method:** every finding marked *measured* was reproduced under `lune` against the current tree
@@ -333,7 +333,7 @@ its probe run against the pre-fix code first, per `CLAUDE.md` §9.
 ## Disposition
 
 Added by the netweave session that acted on this report. The report itself is left as it was
-written, at `7f5871c` — it is a dated snapshot and rewriting it would destroy the record of what an
+written, at `e8d9589` — it is a dated snapshot and rewriting it would destroy the record of what an
 outside reader could see. What follows is where each finding was answered.
 
 All 26 are closed: **16 by a change to `src/`**, and 10 by a correction to a document that
@@ -345,7 +345,7 @@ Every code fix landed with its probe run against the pre-fix code first, per `CL
 each is pinned by a test that fails without it. The one exception is
 `Recipients.roblox().owner`, whose test is in `tests/roblox_runtime.luau` because that module's
 whole body is Roblox API calls — ~~**it has not been run yet**, and it is on the next Studio pass~~
-(run in M3 phase 9 and on every Studio pass since; 19 of 19 at 75668a7).
+(run in M3 phase 9 and on every Studio pass since; 19 of 19 at 610d69d).
 
 Two of the 26 are corrections to this report rather than to netweave:
 
