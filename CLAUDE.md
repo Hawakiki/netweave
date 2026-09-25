@@ -35,6 +35,7 @@ Do not mix languages inside one file. A Korean comment in a `.luau` file is a de
 
 ```
 CLAUDE.md                     this file
+LICENSE                       MIT, © 2026 Hawakiki. §8 says why MIT and not Apache or GPL
 README.md                     the front page: what it guarantees, the worked example, what it costs;
                               its two code blocks are checked against tests/example_runtime.luau
 README.ko.md                  the same page in Korean, checked the same way
@@ -76,6 +77,12 @@ bench/                        the benchmark harness, with its own project file
   default.project.json
   envelope.luau               the netweave batch envelope, checked under lune
   report.luau                 a run document to the tables in RESULTS.md
+  residue.luau                one rung per M4 optimisation finding; refuses to pass while one still shows
+  crossover.luau              where a diff loses to a resend, in bytes, on the real writer
+  pace.luau                   the client pacer against the server's bucket
+  vendor/                     the three competitors, pinned and committed — README.md says which are
+                              generated output and which is a source copy, and each carries its
+                              upstream MIT licence (§8)
 tools/                        globalTypes.d.luau for the analyzer, and the checkers that read source off disk
 scripts/                      check.ps1 — every lune-side check in one command; hooks/ — the pre-commit that runs it
 _refsrc/                      READ-ONLY vendored competitor sources — never edit
@@ -393,20 +400,44 @@ project's requirements.
 Git, initialised at the end of M1 phase 5 — after the milestone was green, so the first commit is
 a working tree rather than a snapshot of something half-built.
 
-### This repository has no remote, and must not get one
+### This repository has no remote yet, and publishing is the owner's call every time
 
-**The owner's GitHub account is flagged, so hosting is not available.** This is a standing
-constraint, not a temporary state:
+~~**The owner's GitHub account is flagged, so hosting is not available.** This is a standing
+constraint, not a temporary state.~~ **The flag was lifted** — measured 2026-09-25:
+`api.github.com/users/Hawakiki` answers 200 with a normal user object, where it had the suspended
+shape when this rule was written. So the reason is gone and the rule is not; what remains is the
+narrower one:
 
-- Never run `git remote add`, `git push`, `gh repo create`, or anything else that publishes.
-- Never suggest "push it to GitHub" as a next step, or treat the absence of a remote as a gap to
-  be filled.
-- The backup story is the filesystem, not a forge. If a backup is wanted, that is a copy of the
-  directory, and it is the owner's call.
+- **Never publish without being asked in that turn.** `git remote add`, `git push`, `gh repo create`
+  and anything else that puts the tree somewhere else are outward-facing and hard to reverse: a fork,
+  a cache or an index outlives a `git push --delete`. Approval for one of them is not approval for
+  the next.
+- Never treat the absence of a remote as a gap to be filled, or offer "push it to GitHub" as a next
+  step on its own.
+- The backup story is still the filesystem unless the owner says otherwise.
 
-Everything git buys here is local and still worth having: a diff when `bench/RESULTS.md` changes,
-a point to return to when a Studio-only regression appears, and a record of *when* a claim was
-corrected to sit alongside the strikethrough saying *what* was wrong.
+**What publishing would expose, checked 2026-09-25 and true until it changes:** all 172 commits carry
+`vaxze <vaxzeen@hotmail.com>` as the author, and GitHub's private-email setting cannot reach commit
+objects that already exist. The owner knows; do not rewrite history to change it — six milestone
+merge commits sit in that history and are the record §3 is about.
+
+Everything git buys here is local and worth having either way: a diff when `bench/RESULTS.md`
+changes, a point to return to when a Studio-only regression appears, and a record of *when* a claim
+was corrected to sit alongside the strikethrough saying *what* was wrong.
+
+### Licence
+
+**MIT, `Copyright (c) 2026 Hawakiki`** (chosen 2026-09-25, over Apache-2.0, and the handle over a
+legal name). Two reasons, both about this repository rather than about licences in general: the three
+libraries `bench/vendor/` carries are all MIT, so the tree is one licence family and the attribution
+is one paragraph; and MIT's only requirement — ship the notice with the code — is one a Roblox
+distribution can actually satisfy, where Apache-2.0's NOTICE delivery and state-your-changes clauses
+have nowhere to live inside a `.rbxm`. GPL is not a candidate: a Roblox place is not delivered to
+players as source, so a game embedding it would be in violation at distribution.
+
+`bench/vendor/<name>/LICENSE` carries each upstream's notice beside its code, because two of those
+three are generated output that still embeds its generator's runtime — a substantial portion either
+way. `bench/vendor/README.md` says which is which and pins the versions.
 
 ### Branches
 
@@ -435,6 +466,11 @@ directly.
 `bench/Benchmark.rbxl`), `sourcemap.json`, and **`_refsrc/`** — 45 MB of vendored competitor
 sources that are read-only research material, not this project's code (§2). Its `README.md` is the
 one exception and is tracked; §2 says why.
+
+`bench/vendor/` is the opposite case and **is** committed: three competitors the harness loads, pinned
+so that a run from this tree in a year measures what `bench/RESULTS.md` says it measured (§5, "never
+benchmark against a moving target"). It is not `_refsrc/` — that one is for reading and citing, this
+one is a dependency — and it does not reach a consumer, because the package builds `src` alone.
 
 ---
 
