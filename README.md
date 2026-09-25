@@ -264,8 +264,20 @@ with their corrections struck through in place rather than rewritten.
 
 ## Status
 
-Milestone M4 is closed. Codec, transport and replication are implemented, two external security
+Milestone M5 is closed. Codec, transport and replication are implemented; two external security
 audits have been worked through with a disposition for every finding, in `docs/SECURITY-REPORT*.md`
-and `docs/milestone/PLAN-M4.md` §9, and both the lune suite and the Studio suite are green.
-`PLAN-M5.md` is written and not opened; it holds the type-layer work the audits deferred. This
-repository is developed locally and has no hosted remote.
+and `docs/milestone/PLAN-M4.md` §9; and M5 closed the type layer those audits deferred — a
+constructor's arguments are checked by type, a handler's `ctx` is `nw.Ctx`, every public value has a
+nameable type, and seven optimisation findings closed with a probe each in `bench/residue`.
+`docs/milestone/PLAN-M5.md` §9 has the measured before-and-after table, the one task left open on
+purpose, and five things that were measured and deliberately not done. Both the lune suite and the
+Studio suite are green. This repository is developed locally.
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
+
+`bench/vendor/` carries three competitors so the benchmark can run all four libraries in one session.
+They are Blink, Zap and ByteNet, each MIT and each with its upstream licence beside it;
+[`bench/vendor/README.md`](bench/vendor/README.md) says which are generated output and which is a
+source copy. None of it reaches a consumer: the package builds `src` alone.
