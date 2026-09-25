@@ -419,12 +419,29 @@ narrower one:
 **Published 2026-09-25**: `https://github.com/Hawakiki/netweave`, public, `master` the default branch
 and `develop` beside it. `gh` is authenticated as `Hawakiki` with the `repo` scope.
 
-**The author identity changed with the publish.** Commits from here on are
-`Hawakiki <283680891+Hawakiki@users.noreply.github.com>`, set in this repository's own `.git/config`
-rather than globally, because the owner's other projects were not part of the decision. The **173
-commits made before it** carry `vaxze <vaxzeen@hotmail.com>` and always will: GitHub's private-email
-setting cannot reach commit objects that already exist, and rewriting them would rewrite six
-milestone merges, which are the record §3 is about. The owner published knowing that.
+**Every commit is authored `Hawakiki <283680891+Hawakiki@users.noreply.github.com>`**, in the
+repository's own `.git/config` rather than globally, because the owner's other projects were not part
+of the decision.
+
+~~The 173 commits made before the publish carry `vaxze <vaxzeen@hotmail.com>` and always will.~~
+**They were rewritten** on 2026-09-25, because that address is verified on the owner's other account
+(`Hasoo`) and GitHub maps a commit to an account by the email inside it — so the whole history was
+credited to the wrong account. An author-only `filter-branch` over `--all`, then a force-push of both
+branches. It changed every commit hash and no file: `master` and `develop` have byte-identical tree
+hashes before and after, which is the check that proves it, and the 48 commit citations across the
+plans, the reports, `bench/RESULTS.md` and three probe headers were remapped by pairing the two
+histories on tree, author date and subject. The backup is
+`../netweave-before-author-rewrite.bundle`.
+
+**Two things about the contributor list, so the next reader does not "fix" them:**
+
+- **`Hasoo` may still be listed.** That is GitHub's contributor *statistic*, which is recomputed
+  asynchronously; it is not data on the remote. Measured after the force-push: 184 of 184 commits
+  upstream carry the noreply address and every sampled one links to `Hawakiki`. Waiting is the fix
+  the owner chose. **Do not rewrite history over it.**
+- **Claude is listed, by design.** All 184 commits end with the `Co-Authored-By` line this section
+  requires, and GitHub counts a co-author as a contributor. The owner decided on 2026-09-25 to keep
+  it. Removing it means rewriting every commit message, every hash, and those 48 citations again.
 
 Everything git buys here is local and worth having either way: a diff when `bench/RESULTS.md`
 changes, a point to return to when a Studio-only regression appears, and a record of *when* a claim
