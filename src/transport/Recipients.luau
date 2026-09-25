@@ -386,7 +386,7 @@ function Recipients.of(
 
 	--[[
 		`owner` and `nearby` ask the roster the same question `select` asks of the game's list:
-		is this player still here. bc35060 closed it for `select` only, and the owner of a
+		is this player still here. 2ea8c90 closed it for `select` only, and the owner of a
 		`Player`-keyed subject is the instance itself, connected or not — a store that lists the
 		departed player's subject for one more tick (a profile save that yields) rebuilt the
 		baselines and the parked send record `forget` had just removed, for the life of the server

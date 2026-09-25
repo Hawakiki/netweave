@@ -587,7 +587,7 @@ evidence the claim is not merely unexamined:
 
 ### Phase 9 — the external review, and the number that went the wrong way
 
-An outside security and correctness review of `src/` at `7f5871c` returned 26 findings:
+An outside security and correctness review of `src/` at `e8d9589` returned 26 findings:
 3 중대, 5 위험, 12 경고, 6 미미 (`docs/SECURITY-REPORT.md`). The baseline suite is green against
 every one of them — fourteen `*_runtime` files, `analyze` at 44 clean, three rejection files at
 their declared counts, and `tools/messages`. **None of it is caught by anything this milestone
@@ -851,7 +851,7 @@ the measured window opens.
       one packet, returns four hundred usable windows out of four hundred with a spread of zero and
       says the two are identical:
 
-      | per packet | M2 `272965a` | M3 `7e5e00b` |
+      | per packet | M2 `f0e7bf6` | M3 `8e5fe28` |
       |---|---|---|
       | `ArrayHeavy` encode | 1908.4 B | 1908.4 B |
       | `ArrayHeavy` through `inbound.receive` | 32048.2 B `[0 spread]` | 32048.2 B `[0 spread]` |

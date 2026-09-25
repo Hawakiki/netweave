@@ -360,49 +360,49 @@ payload type function at once:
 - [x] items 73, 74, 76, 77 and the three M4-1 미미 optimisation findings, each with its probe. The
       probes are rungs of `bench/residue`, which prints every rung and then refuses to pass while any
       still shows what its finding described, so it is a check-script step from the first rung on.
-      Seven commits, `d98e91d` … `251b1c5`, each BEFORE measured on its parent.
-  - [x] 73 — `commit` hoisted out of `Delta.write`, `flagsAt` an upvalue. BEFORE on `bea4631`:
+      Seven commits, `ffdefee` … `f236640`, each BEFORE measured on its parent.
+  - [x] 73 — `commit` hoisted out of `Delta.write`, `flagsAt` an upvalue. BEFORE on `731e6e6`:
         112 B a call on both paths [67–112, n = 45 of 64 windows]; AFTER: 0 in all 64.
   - [x] 74 — the oversize-claim reason no longer quotes the claim; one string per ceiling, built
-        on first refusal. BEFORE on `d98e91d`: 500 claims over 50 lengths → 50 distinct reasons;
+        on first refusal. BEFORE on `ffdefee`: 500 claims over 50 lengths → 50 distinct reasons;
         AFTER: 1. `PLAN-M3` phase 9's "all four" corrected in place.
   - [x] 76 — `Buffer.take` empties the buffer instead of replacing it, so a parked record keeps
         the size it grew to; unreliable packets get a record of their own instead of `load(nil)`.
-        BEFORE on `0ee4327`: 64 → 2048 → 64 across one 1.5 KB frame, the next frame a new object,
+        BEFORE on `b819333`: 64 → 2048 → 64 across one 1.5 KB frame, the next frame a new object,
         5,696 B a frame [3,008–5,760, n = 56], 768 B an unreliable 200 B packet; AFTER: 64 → 2048 →
         2048, the same object, 1,600 and 256 — the exact copy and the sidecar table. The flush
         comment that said the record kept its buffer now describes what happens.
   - [x] 77 — `Namespace.replicated` is one frozen list built at seal; `within` is handed the
         frame's players and the Roblox roster no longer calls `GetPlayers()` per subject;
         `Recipients.of` trims the scratch past `count`; a broadcast reads the roster in place
-        instead of copying it per subject. BEFORE on `f15828a`: two asks two tables, `within`
+        instead of copying it per subject. BEFORE on `575fdfe`: two asks two tables, `within`
         handed no list, 50 entries left after an audience of 1; AFTER: one table, handed to all
         100, 1 left. `roblox_runtime` asserts `within` reads the list it is given, not the engine.
   - [x] M4-1 minors, the two refusal strings — `Budget.admit`'s sentence is one per rate, built on
         the first refusal; the instance reader's two are built with the closure. Time only, since
         Luau interns short strings (and a long one is collected inside a `gcinfo` window, measured —
-        the heap instrument reads zero for both). ~~BEFORE on `78689c7` a refusal at 2.8x an admission
+        the heap instrument reads zero for both). ~~BEFORE on `798eb7c` a refusal at 2.8x an admission
         (186 against 67 ns) and 1.4x (159 against 111); AFTER 1.3x (84) and 1.1x (125).~~ Those two
         columns were timed in separate passes and read from the median, and the instance ratio moved
         1.1 → 1.5 between two runs with a Studio pass in between, failing its own assertion. The rung
         races the two paths in one alternating pass and takes the fastest, per `bench/tick`'s reason:
-        BEFORE, reverted in place on `6aeff0e`, 2.84–2.87x and 1.40–1.52x over three runs each, both
+        BEFORE, reverted in place on `52005a2`, 2.84–2.87x and 1.40–1.52x over three runs each, both
         red; AFTER 1.19–1.25x and 1.09–1.11x, ceilings 2.0 and 1.3.
   - [x] M4-1 minor, the free list — `Inbound.pooled()` counts it, since lune cannot force a
-        collection; the pool keeps at most 8 lists on the way back in. BEFORE on `5214fd1`: 64
+        collection; the pool keeps at most 8 lists on the way back in. BEFORE on `0c86157`: 64
         walks parked inside a yielding handler, 64 lists pooled after; AFTER: 8.
-- [x] the reader: `bench/decode` in Studio at `249ca27` prices netweave's client decode at 2.81x the
+- [x] the reader: `bench/decode` in Studio at `fbcc766` prices netweave's client decode at 2.81x the
       generated-code ceiling (35,073 against 12,476 ns a packet) ~~and there is no fused struct reader to
       match the writer~~ — **there is, and it is taken**: instrumented at build time, six rows and six
-      bytes, for the `ArrayHeavy` element and for the struct alone. Re-priced under lune on `1c021e5`,
+      bytes, for the `ArrayHeavy` element and for the struct alone. Re-priced under lune on `ed744b4`,
       three runs: 20,936–21,413 ns a packet, 3.33x the bare ceiling and 2.21x the ceiling that checks
       what it reads, 1.23x the `dispatched` rung — so what is left is the array's length handling and
       one `table.clone(template)` per element, not the per-value dispatch. The encode side is 6.54x and
       3.25x on the same instrument, so the writer is the further of the two from its ceiling, which is
       the opposite of what this item assumed. `bench/RESULTS.md`, "The reader, priced"
-  - [ ] the Down cell re-run on `0cb731d` beside the current tree in one session, to find which of its
+  - [ ] the Down cell re-run on `15f74f2` beside the current tree in one session, to find which of its
         four readings is the outlier (`bench/RESULTS.md`, "The Down cell") — **left open on purpose**: it
-        needs the bench place built from a worktree at `0cb731d`, that matrix run, then the current
+        needs the bench place built from a worktree at `15f74f2`, that matrix run, then the current
         tree's in the same session, about twenty minutes of Studio for a question about the instrument
         rather than about netweave. Nothing in the library waits on it, and the owner declined the
         comparable multi-client runs on 2026-09-19
@@ -419,7 +419,7 @@ payload type function at once:
       encodes in it; `nearby` walks every player per subject, so the distance half grows with players ×
       subjects and the encode half with recipients. Two points do not give a slope, ~~and the `BEFORE` for
       this task is a live run at 4 and 8 players before the cache lands~~. The owner declined the 4- and
-      8-player runs (2026-09-19), so the `BEFORE` is two probes instead, both on `d982242`: `bench/tick`
+      8-player runs (2026-09-19), so the `BEFORE` is two probes instead, both on `2ac59d9`: `bench/tick`
       under lune with the rig answering `has` (`select-all` 3.43–3.47 ms, the new `nearby-all` 2.37–2.38),
       and `roblox_runtime` in Studio with one player, timing `within` and a roster-returning `select` over
       the frame's list (693 and 355 ns a subject). What landed: `Recipients.of` answers membership from a
@@ -451,7 +451,7 @@ payload type function at once:
         6.4e-5 rad), and that run corrected the reader — the three kept squares sum to at most **3/4**,
         not 1, because the dropped component is the largest. `types_ok`, `types_runtime`, `ir_runtime`,
         `protocol_runtime`; the wire half is `roblox_runtime`, and the Studio pass ran green on
-        `6aeff0e` — 20 of 20 files, the compact cframe at 13 bytes for a narrowed position and 19 for a
+        `52005a2` — 20 of 20 files, the compact cframe at 13 bytes for a narrowed position and 19 for a
         float one, a quarter and a wide turn about each axis, the packing just over 3/4 refused and the
         one exactly on it accepted. The `within` numbers reproduced in the same run: 346 and 142 ns a
         subject against 364 and 140.
@@ -628,7 +628,7 @@ Closed 2026-09-24 on `develop`. Every task is ticked except one, left open on pu
 below. The lune half is 28 green steps through `scripts/check.ps1`, run on every commit of the
 milestone with the pre-commit hook refusing the rest; the Studio half ran green on the closing tree —
 **19 runtime modules, 0 console errors**, which is the pass `CLAUDE.md` §9 asks for before a milestone
-is called green. (`6aeff0e`'s pass was recorded as "20 of 20" above and that was a miscount: there are
+is called green. (`52005a2`'s pass was recorded as "20 of 20" above and that was a miscount: there are
 eighteen lune modules and `roblox_runtime`.)
 
 ### What shipped
@@ -678,7 +678,7 @@ tree, 348 and 159 ns a subject, which is what the table above quotes.
 ### The one task left open
 
 The `ArrayHeavy` Down cell's outlier (§6 phase 4). It needs the bench place built from a worktree at
-`0cb731d`, that matrix run, and the current tree's matrix in the same Studio session — twenty minutes
+`15f74f2`, that matrix run, and the current tree's matrix in the same Studio session — twenty minutes
 for a question about the instrument rather than about netweave. `bench/RESULTS.md` says so where the
 cell is, and nothing in the library waits on it.
 

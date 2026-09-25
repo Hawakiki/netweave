@@ -199,7 +199,7 @@ end
 	frame. M4-1 measured 112 B a call; this rung measures both of `write`'s paths, since the
 	"nothing changed" path built it too, for nothing to call it with.
 
-	BEFORE (bea4631): changed 112.0 B/call [67–112, n = 45], unchanged 112.0 B/call [84–112, n = 46].
+	BEFORE (731e6e6): changed 112.0 B/call [67–112, n = 45], unchanged 112.0 B/call [84–112, n = 46].
 	AFTER: 0.0 in all 64 windows on both paths.
 ]]
 local function rung73()
@@ -245,7 +245,7 @@ rung73()
 	whose rate the peer chooses. The ceiling is fixed per channel, so the reason can be too. M4-1
 	measured 500 claims across 50 distinct lengths as 50 distinct strings; this rung sends the same.
 
-	BEFORE (d98e91d): 50 distinct reasons for 500 claims. AFTER: 1.
+	BEFORE (ffdefee): 50 distinct reasons for 500 claims. AFTER: 1.
 ]]
 local function rung74()
 	print("74      Batch.read, distinct reasons for oversize claims")
@@ -337,7 +337,7 @@ rung74()
 	frame costs — where the exact copy `take` returns is the floor, since the remote must not carry
 	the slack.
 
-	BEFORE (0ee4327): sizes 64 → 2048 → 64, the second frame's buffer is a new object,
+	BEFORE (b819333): sizes 64 → 2048 → 64, the second frame's buffer is a new object,
 	5,696 B/frame [3,008–5,760, n = 56], 768 B per unreliable packet [272–768, n = 57].
 	AFTER: 64 → 2048 → 2048, the same object, 1,600 B/frame [1,536–1,600, n = 61] and 256 B per
 	unreliable packet [208–272, n = 59] — the copy plus the sidecar table, both times.
@@ -464,7 +464,7 @@ rung76()
 	that list, and how many entries a one-recipient audience leaves in a scratch a fifty-recipient
 	one filled.
 
-	BEFORE (f15828a): two asks, two tables; 1 ask a tick and `within` handed no list (so the Roblox
+	BEFORE (575fdfe): two asks, two tables; 1 ask a tick and `within` handed no list (so the Roblox
 	roster asks the engine per subject); 50 entries left after an audience of 1.
 	AFTER: one table; 1 ask, handed to all 100 `within` calls; 1 entry left.
 ]]
@@ -600,7 +600,7 @@ rung77()
 	`race` above for what makes a clock survive re-running here. The clock the budget is given never
 	moves, so a fresh bucket admits its whole burst and a drained one refuses everything after.
 
-	BEFORE, the cache reverted in place on `6aeff0e`: refused 186–187 ns against 65–66 admitted,
+	BEFORE, the cache reverted in place on `52005a2`: refused 186–187 ns against 65–66 admitted,
 	ratio 2.84 .. 2.87 over three runs — and the rung goes red, which is the §9 half of it.
 	AFTER: refused 79–81 ns, ratio 1.19 .. 1.25. The ceiling of 2.0 sits between the two with room
 	on both sides, which a ratio measured off a clock has to have.
@@ -662,7 +662,7 @@ rungBudget()
 	columns read the same sidecar slot through the same reader: one holds an instance of the
 	declared class, the other one of another class.
 
-	BEFORE, the concatenation restored in place on `6aeff0e`: refused 152–167 ns against 107–110
+	BEFORE, the concatenation restored in place on `52005a2`: refused 152–167 ns against 107–110
 	admitted, ratio 1.40 .. 1.52 over three runs, and the rung goes red.
 	AFTER: refused 119–121 ns, ratio 1.09 .. 1.11. The ceiling is 1.3; this is the narrower of the
 	two margins, and the fastest-pass statistic is what makes it hold.
@@ -723,7 +723,7 @@ rungInstance()
 	yields, and that is game code. Counted rather than weighed, because lune cannot force a
 	collection and what the pool retains is otherwise invisible: `pooled()` exists for this rung.
 
-	BEFORE (5214fd1, with the accessor): 64 walks parked at once, 0 pooled while parked, 64 after.
+	BEFORE (0c86157, with the accessor): 64 walks parked at once, 0 pooled while parked, 64 after.
 	AFTER: 0 while parked, 8 after — the cap.
 ]]
 local function rungPool()
