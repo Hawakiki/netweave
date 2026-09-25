@@ -416,10 +416,15 @@ narrower one:
   step on its own.
 - The backup story is still the filesystem unless the owner says otherwise.
 
-**What publishing would expose, checked 2026-09-25 and true until it changes:** all 172 commits carry
-`vaxze <vaxzeen@hotmail.com>` as the author, and GitHub's private-email setting cannot reach commit
-objects that already exist. The owner knows; do not rewrite history to change it — six milestone
-merge commits sit in that history and are the record §3 is about.
+**Published 2026-09-25**: `https://github.com/Hawakiki/netweave`, public, `master` the default branch
+and `develop` beside it. `gh` is authenticated as `Hawakiki` with the `repo` scope.
+
+**The author identity changed with the publish.** Commits from here on are
+`Hawakiki <283680891+Hawakiki@users.noreply.github.com>`, set in this repository's own `.git/config`
+rather than globally, because the owner's other projects were not part of the decision. The **173
+commits made before it** carry `vaxze <vaxzeen@hotmail.com>` and always will: GitHub's private-email
+setting cannot reach commit objects that already exist, and rewriting them would rewrite six
+milestone merges, which are the record §3 is about. The owner published knowing that.
 
 Everything git buys here is local and worth having either way: a diff when `bench/RESULTS.md`
 changes, a point to return to when a Studio-only regression appears, and a record of *when* a claim
