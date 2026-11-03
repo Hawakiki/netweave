@@ -476,11 +476,21 @@ directly.
 - English, like every other artifact in this repository (§1).
 - Say what changed and *why*, in that order. The why is the part a diff cannot show.
 - Commit or push only when asked. Nothing here is automatic.
-- End the message with:
+- End the message with a `Co-Authored-By` line naming **the model that actually made the commit**,
+  as the session reports it — not a name copied from an earlier commit or from this file. A commit
+  made on Claude Opus 5.5 ends:
 
   ```
-  Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
   ```
+
+  ~~End the message with `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.~~
+  Changed on 2026-11-03. A fixed string is a claim about authorship that turns false the first time
+  another model makes a commit, and it had already: 28 commits on `master` and `develop` say
+  `Claude Fable 5.1`, 160 say `Claude Opus 5 (1M context)`, and the last two made under the fixed
+  rule (`2763f47`, `3879f58`) were made on Opus 5.5 and say the latter. They keep the line they were
+  written with — correcting them costs every hash after them, the reason the contributor note above
+  gives for leaving history alone.
 
 ### What is not committed
 
