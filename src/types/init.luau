@@ -179,7 +179,7 @@ export type Type<T> = {
 	reference an outer local and calling across a `require` needs the name exported.
 ]]
 -- selene: allow(undefined_variable)
-type function carrierOf(ty)
+type function carrierOf(ty: type): type
 	if not ty:is("intersection") then
 		return ty
 	end
@@ -271,7 +271,7 @@ type _instantiatePayloadOf = PayloadOf<Type<{ probe: boolean }>>
      stays `any` on the way out rather than being refused: the analyzer has been bypassed on
      purpose, and the runtime `check()` is the guard on that path. ]]
 -- selene: allow(undefined_variable)
-export type function OptionalPayload(inner, default)
+export type function OptionalPayload(inner: type, default: type)
 	if inner:is("any") then
 		return types.any
 	end
@@ -356,7 +356,7 @@ end
 	What [Types.array] carries: a list of the element type's payload. Applied for you.
 ]=]
 -- selene: allow(undefined_variable)
-export type function ArrayPayload(element)
+export type function ArrayPayload(element: type)
 	if element:is("any") then
 		return types.newtable(nil, { index = types.number, readresult = types.any, writeresult = types.any })
 	end

@@ -1,5 +1,5 @@
 --!strict
--- netweave:expect 36
+-- netweave:expect 37
 
 --[[
 	The negative controls for the declaration surface. Every statement below **must** fail
@@ -15,6 +15,7 @@
 
 local nw = require("../src/netweave")
 local t = require("../src/types")
+local View = require("../src/api/View")
 
 local allow = nw.policy(function()
 	return function()
@@ -332,5 +333,15 @@ canary.server.fire:send({ x = 1 })
 canary.server.fire:listen(function(_ctx, payload)
 	local _mistyped: string = payload.x
 end)
+
+--[[
+	**A schema in a namespace is not a channel, and the message says so.** `channelView` read
+	`__class` without asking whether it was there, so a namespace holding `t.struct(...)` where a
+	channel belongs was refused with the analyzer's own `attempt to index nil with 'value'`, which
+	names neither netweave nor the fix. luau-lsp 1.70 typed those reads `type?` and pointed at it.
+	`View.ServerView` directly, because a namespace or `nw.Views` evaluates both sides and would put
+	two diagnostics on one line.
+]]
+type _SchemaAsChannel = View.ServerView<{ hp: typeof(StateSchema) }, nw.Ctx> -- netweave:reject a namespace holds channels
 
 return nil

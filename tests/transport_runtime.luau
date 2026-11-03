@@ -81,7 +81,9 @@ local Bounded = channelOf(4, t.struct({ n = t.u8(0, 200), maybe = t.optional(t.u
 
 local byId: { [number]: any } = {}
 
-for _, channel in { Fixed, Counted, Big, Bounded } do
+--[[ `channel: any` because luau-lsp 1.70 types the elements of this literal as `(any & ~nil) | …`
+     and then refuses `.id` on it, where 1.69 read them as `any`. ]]
+for _, channel: any in { Fixed, Counted, Big, Bounded } do
 	byId[channel.id] = channel
 end
 

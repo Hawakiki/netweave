@@ -64,7 +64,7 @@ local View = {}
 	brand across the `if r then` a game has to write anyway.
 ]]
 -- selene: allow(undefined_variable)
-type function brandedAs(payload, name)
+type function brandedAs(payload: type, name: string): type
 	local value = types.copy(payload)
 
 	local function tagged(inner)
@@ -101,20 +101,31 @@ type function brandedAs(payload, name)
 end
 
 -- selene: allow(undefined_variable)
-type function channelView(channel, side, ctx)
-	if not channel:is("table") then
-		error(
-			"a namespace holds channels, and this field is not one. Declare it with nw.command, "
-				.. "nw.intent, nw.signal, nw.query, nw.state or nw.event — a schema on its own is "
-				.. "not a channel, and neither is a function."
-		)
+type function channelView(channel: type, side: type, ctx: type): type
+	--[[ Every `Channel` carries all five of these, `nil` where a class has no response or subject,
+	     so a property that is absent means the field is not a channel. A schema is a table too, and
+	     it used to get past the shape test and raise `attempt to index nil` on `__class` — the
+	     analyzer's message, not netweave's, which luau-lsp 1.70 started pointing out by typing the
+	     reads `type?`. ]]
+	local function field(name: string): type
+		local value = if channel:is("table") then channel:readproperty(types.singleton(name)) else nil
+
+		if not value then
+			error(
+				"a namespace holds channels, and this field is not one. Declare it with nw.command, "
+					.. "nw.intent, nw.signal, nw.query, nw.state or nw.event — a schema on its own is "
+					.. "not a channel, and neither is a function."
+			)
+		end
+
+		return value
 	end
 
-	local class = channel:readproperty(types.singleton("__class")):value()
-	local audience = channel:readproperty(types.singleton("__audience")):value()
-	local payload = channel:readproperty(types.singleton("__payload"))
-	local response = channel:readproperty(types.singleton("__response"))
-	local subject = channel:readproperty(types.singleton("__subject"))
+	local class = field("__class"):value()
+	local audience = field("__audience"):value()
+	local payload = field("__payload")
+	local response = field("__response")
+	local subject = field("__subject")
 
 	local view = types.newtable()
 	local server = side:value() == "server"

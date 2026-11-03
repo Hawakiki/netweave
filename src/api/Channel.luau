@@ -169,7 +169,7 @@ export type Channel<C, A, T, R, U> = {
 	through both.
 ]]
 -- selene: allow(undefined_variable)
-type function carrierOf(ty)
+type function carrierOf(ty: type): type
 	if not ty:is("intersection") then
 		return ty
 	end
@@ -184,7 +184,7 @@ type function carrierOf(ty)
 end
 
 -- selene: allow(undefined_variable)
-type function payloadOf(descriptor, field)
+type function payloadOf(descriptor: type, field: type): type
 	local schema = carrierOf(types.copy(descriptor))
 	local name = field:value()
 
@@ -215,7 +215,7 @@ type function payloadOf(descriptor, field)
 end
 
 -- selene: allow(undefined_variable)
-type function propertyOf(spec, field)
+type function propertyOf(spec: type, field: type): type?
 	local declaration = types.copy(spec)
 
 	if not declaration:is("table") then
@@ -230,7 +230,7 @@ type function propertyOf(spec, field)
 end
 
 -- selene: allow(undefined_variable)
-type function requireRate(spec, class)
+type function requireRate(spec: type, class: type): type
 	local rate = propertyOf(spec, types.singleton("rate"))
 
 	if not rate then
@@ -273,7 +273,7 @@ end
 	string is the cheapest type that carries a list.
 ]]
 -- selene: allow(undefined_variable)
-type function permit(spec, class, allowed)
+type function permit(spec: type, class: type, allowed: type): type
 	local declaration = types.copy(spec)
 
 	if not declaration:is("table") then
@@ -287,7 +287,7 @@ type function permit(spec, class, allowed)
 	local names = {}
 	local list = {}
 
-	for name in string.gmatch(allowed:value(), "[^,]+") do
+	for name in string.gmatch(tostring(allowed:value()), "[^,]+") do
 		names[name] = true
 		table.insert(list, name)
 	end
@@ -357,7 +357,7 @@ type function permit(spec, class, allowed)
 end
 
 -- selene: allow(undefined_variable)
-type function requireData(spec, class, field, purpose)
+type function requireData(spec: type, class: type, field: type, purpose: type): type
 	local declared = propertyOf(spec, field)
 
 	if not declared then
