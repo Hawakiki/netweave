@@ -1048,7 +1048,7 @@ the numeric-bound ones cannot be closed at analysis), 51, 52, 53, 56, 58, 60, 61
 | 경고, 4 comments | `Batch` resync sentence, `Buffer` Zap claim, pointer-compare docstrings, unreachable `Query.abandon` | first three closed, phase 8; `Query.abandon`'s comments are open |
 | 경고, 9 tests | floors, `span` invariant, corpus, `UNCOVERED`, D-5/union pins, departed e2e, `roblox_runtime` skip, hostile crash, Studio coverage | closed, phase 6, except the `Driver`/`Link.roblox` Studio sections, which are open |
 | 경고, 8 bench | `BEFORE` notes, `bench/` unchecked, `report` degrades, no spread, no drop rate, envelope copy, fairness, provenance | closed, phase 7, except `bench/` under `analyze` (M5) |
-| 경고, 8 tools | repair markers, `src/types` messages, `findLuauLsp`, `messages` extraction, selene allows, unchecked checkers | open; selene allows and the checkers under `analyze` are M5, the rest not yet placed |
+| 경고, 8 tools | repair markers, `src/types` messages, `findLuauLsp`, `messages` extraction, selene allows, unchecked checkers | open; selene allows and the checkers under `analyze` are M5; `findLuauLsp` closed 2026-11-03 (2763f47), after the multi-version condition the report predicted went live — luau-lsp 1.70.1 installed beside the pin took `analyze` from clean to 309 diagnostics — and it reads the `rokit.toml` pin now, so neither the sort nor a newer install chooses; the rest not yet placed |
 | 미미, 16 | | the counted-fact comments closed in phase 8; the rest open |
 
 Everything marked open here is open in the plan that owns it or in no plan yet; nothing is closed

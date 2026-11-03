@@ -164,10 +164,10 @@ assert(fs.isFile(DEFINITIONS), `{DEFINITIONS} is missing; see tools/README.md`)
 
 --[[
 	Returns the output, the diagnostic count, the diagnostics by line, and whether luau-lsp itself
-	ran. Exit codes measured at 1.69.0: 0 clean, 1 with diagnostics, 1 on a usage error — so a
-	non-zero exit with nothing counted is the tool failing, not the tree passing. Before this
-	distinction a bad flag printed a usage banner to stderr and the must-be-clean half said
-	"OK 52 files clean" (SECURITY-REPORT-M4-1, tools 위험 2).
+	ran. Exit codes measured at 1.69.0 and again at 1.70.1, the same: 0 clean, 1 with diagnostics, 1
+	on a usage error — so a non-zero exit with nothing counted is the tool failing, not the tree
+	passing. Before this distinction a bad flag printed a usage banner to stderr and the
+	must-be-clean half said "OK 52 files clean" (SECURITY-REPORT-M4-1, tools 위험 2).
 ]]
 local function analyze(files: { string }): (string, number, { [number]: { string } }, boolean)
 	local args = {

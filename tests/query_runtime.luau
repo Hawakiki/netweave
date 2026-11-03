@@ -153,7 +153,10 @@ pingRecord.qualified = "test.ping"
 
 local byId: { [number]: any } = {}
 
-for _, channel in { getLoadout, refused, broken, lookup, trickle, ping } do
+--[[ `channel: any` for the reason `transport_runtime` gives: luau-lsp 1.70 types this literal's
+     elements as `(any & ~nil) | …` and refuses `.id` on it. `ping` is read through `any` above
+     already; this is the loop saying the same. ]]
+for _, channel: any in { getLoadout, refused, broken, lookup, trickle, ping } do
 	byId[channel.id] = channel
 end
 

@@ -112,7 +112,7 @@ local Trust = {}
 	the payload's optionality forces a game to write.
 ]]
 -- selene: allow(undefined_variable)
-type function branded(payload, name)
+type function branded(payload: type, name: string): type
 	local value = types.copy(payload)
 
 	local function tagged(inner)
@@ -213,7 +213,7 @@ type _instantiateUntrusted = Untrusted<{ probe: boolean }>
 	through both.
 ]]
 -- selene: allow(undefined_variable)
-type function carrierOf(ty)
+type function carrierOf(ty: type): type
 	if not ty:is("intersection") then
 		return ty
 	end
