@@ -19,6 +19,7 @@
 
 local fs = require("@lune/fs")
 local process = require("@lune/process")
+local serde = require("@lune/serde")
 local stdio = require("@lune/stdio")
 
 local DEFINITIONS = "tools/globalTypes.d.luau"
@@ -46,21 +47,40 @@ local function color(name: stdio.Color, text: string): string
 	return `{stdio.color(name)}{text}{stdio.color("reset")}`
 end
 
+--[[
+	The version comes from `rokit.toml`, not from whatever is newest in rokit's storage. That
+	storage is shared by every project on the machine, and this used to take the last directory in
+	it: when another project installed luau-lsp 1.70.1 beside the pinned 1.69.0, analyze went from
+	clean to 309 diagnostics without a line of netweave changing. The guarantees in the reject
+	counts were measured against one analyzer, and a different one is a different test.
+]]
+local function pinnedLuauLspVersion(): string
+	local manifest = serde.decode("toml", fs.readFile("rokit.toml"))
+	local spec = manifest.tools and manifest.tools["luau-lsp"]
+	assert(type(spec) == "string", "rokit.toml has no [tools] luau-lsp entry; add one with a pinned version")
+
+	local version = string.match(spec, "@(.+)$")
+	assert(version, `rokit.toml pins luau-lsp as "{spec}"; write it as "JohnnyMorganz/luau-lsp@<version>"`)
+	return version
+end
+
 local function findLuauLsp(): string
 	local home = process.env.USERPROFILE or process.env.HOME
 	assert(home, "cannot locate the home directory to find luau-lsp")
+
+	local version = pinnedLuauLspVersion()
 
 	local storage = `{home}/.rokit/tool-storage/JohnnyMorganz/luau-lsp`
 	if not fs.isDir(storage) then
 		storage = `{home}/.rokit/tool-storage/johnnymorganz/luau-lsp`
 	end
 
-	assert(fs.isDir(storage), `luau-lsp is not installed; run \`rokit install\` ({storage})`)
-
-	local versions = fs.readDir(storage)
-	table.sort(versions)
-
-	return `{storage}/{versions[#versions]}/luau-lsp.exe`
+	local binary = `{storage}/{version}/luau-lsp.exe`
+	assert(
+		fs.isFile(binary),
+		`luau-lsp {version} (pinned in rokit.toml) is not installed; run \`rokit install\` ({binary})`
+	)
+	return binary
 end
 
 local function collect(dir: string, out: { string }, shallow: boolean): { string }
